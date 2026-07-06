@@ -67,6 +67,26 @@ func TestNormalizeLabeledDoesNotInheritForeignOptIn(t *testing.T) {
 	}
 }
 
+// Defense in depth (semstreams-reviewer MEDIUM): on an `opened` event where the
+// sender is NOT the issue author, the body/labels are not attributable to the
+// actor, so no opt-in signal is surfaced — an authorized sender on someone else's
+// authored content is not admitted.
+func TestNormalizeOpenedSenderMustBeAuthor(t *testing.T) {
+	e := githubwebhook.IssueEvent{
+		WebhookEvent: githubwebhook.WebhookEvent{Action: "opened", Sender: "maintainer", Repository: githubwebhook.Repository{Owner: "octo", Name: "repo", FullName: "octo/repo"}},
+		Issue:        githubwebhook.IssuePayload{Number: 3, Body: "/semdev", Labels: []string{"semdev"}, Author: "someone-else"},
+	}
+	b, _ := json.Marshal(e)
+	in, _ := Normalize(SubjectIssue, b)
+	if len(in.Event.AppliedLabels) != 0 || in.Event.AuthoredText != "" {
+		t.Fatalf("sender!=author surfaced an unattributable opt-in signal: %+v", in.Event)
+	}
+	d, _ := Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "admin"})
+	if d.Admitted {
+		t.Errorf("an authorized sender on another author's opt-in content was admitted: %+v", d)
+	}
+}
+
 // End to end on the supported path: an authorized opener whose issue carries the
 // semdev label is admitted; an unauthorized opener with the same label is not.
 func TestNormalizeThenDecideOpenedPath(t *testing.T) {

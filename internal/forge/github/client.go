@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -32,6 +33,7 @@ type Client struct {
 	token   string
 	apiBase string
 	http    *http.Client
+	logger  *slog.Logger
 }
 
 // NewClient builds a GitHub API client authenticated with token. A blank token
@@ -39,13 +41,22 @@ type Client struct {
 // silently succeeding — the caller (the intake component) registers without one
 // only in schema/census contexts.
 func NewClient(token string) *Client {
-	return &Client{token: token, apiBase: defaultAPIBase, http: &http.Client{Timeout: requestTimeout}}
+	return &Client{token: token, apiBase: defaultAPIBase, http: &http.Client{Timeout: requestTimeout}, logger: slog.Default()}
 }
 
 // WithBaseURL overrides the API base (for httptest). Returns the same client for
 // chaining.
 func (c *Client) WithBaseURL(base string) *Client {
 	c.apiBase = base
+	return c
+}
+
+// WithLogger sets the logger used for the 404→none observability line. Returns the
+// same client for chaining.
+func (c *Client) WithLogger(l *slog.Logger) *Client {
+	if l != nil {
+		c.logger = l
+	}
 	return c
 }
 
@@ -89,7 +100,13 @@ func (c *Client) Permission(ctx context.Context, owner, repo, actor string) (str
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		// Not a collaborator / no such user for this repo — a definitive "none",
-		// not a failure (the gate treats it as unauthorized, not retryable).
+		// not a failure (the gate treats it as unauthorized, not retryable). A 404
+		// also covers a token that cannot see the repo, which would reject EVERYONE;
+		// log it so that misconfiguration is distinguishable from correctly
+		// rejecting strangers when an operator asks "why is nothing being admitted?"
+		c.logger.Debug("github permission 404 → none",
+			"owner", owner, "repo", repo, "actor", actor,
+			"note", "non-collaborator, or the token cannot see this repo (misscoped token rejects everyone)")
 		return "none", nil
 	case resp.StatusCode != http.StatusOK:
 		return "", fmt.Errorf("github: permission for %q returned HTTP %d: %s", actor, resp.StatusCode, snippet(body))

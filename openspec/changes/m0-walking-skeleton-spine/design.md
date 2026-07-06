@@ -234,10 +234,14 @@ safely supportable, record it — never a silent Go workaround (B7/G2).
   Treating the aggregate as the actor's signal would be the privilege-confusion
   hole (an authorized actor's unrelated `labeled` event inheriting a foreign
   `semdev`). Ask: publish the added `label` on `labeled`/`unlabeled` actions.
+  **Status: TO FILE** on c360studio/semstreams (not yet filed — this note is the
+  in-change record, not the upstream ask).
 - **UA-2 — comment events drop the issue number/URL and comment id.**
   `CommentPayload` is `{body, author}` only, so a `/semdev` comment or a human
   reply cannot be tied to its run. Ask: carry the parent issue/PR number (and
-  comment id) on `github.event.comment`.
+  comment id) on `github.event.comment` (`IssueEvent`/`PREvent` already carry
+  `Number`; mirror it on `CommentEvent`). **Status: TO FILE** on
+  c360studio/semstreams.
 
 **M0 scope decision:** intake triggers on issue **`opened`** only — the one flow
 the flattened payload fully supports (actor == opener; initial labels + body are

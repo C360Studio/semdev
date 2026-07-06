@@ -3,6 +3,7 @@ package intake
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	githubwebhook "github.com/c360studio/semstreams/input/github-webhook"
 )
@@ -24,6 +25,9 @@ type Intake struct {
 	// that actor per the Event invariant).
 	Event Event
 	// IssueRef is the host-neutral reference to the work item, "owner/repo#number".
+	// The arc treats it as an OPAQUE handle — only forge-io adapters (PR delivery,
+	// github_add_comment) parse owner/repo/number back out; a neutral rule/lifecycle
+	// that split it would leak the host shape (host-neutrality, 5.8).
 	IssueRef string
 	// Relevant is false for an event that is not an M0 intake trigger (see
 	// Normalize); the adapter skips it without decision or stamp.
@@ -68,14 +72,18 @@ func normalizeIssue(e githubwebhook.IssueEvent) *Intake {
 			Repo:  e.Repository.Name,
 		},
 	}
-	// Extract the opt-in signal ONLY for `opened`: the sender IS the opener, who
-	// applied the initial labels and authored the body — the sole issue action
+	// Extract the opt-in signal ONLY for `opened` AND only when the event's sender
+	// is the issue's author. On a normal issues.opened the sender IS the opener,
+	// who applied the initial labels and authored the body — the sole issue action
 	// whose opt-in is safely attributable to the actor from the flattened payload.
-	// A `labeled` action's aggregate Labels are NOT the labeler's specific signal
-	// (the added label is dropped upstream), so they are ignored — otherwise an
-	// authorized actor's unrelated `labeled`/edit event would inherit a foreign
-	// actor's `semdev` label and be wrongly admitted (the Event invariant).
-	if e.Action == "opened" {
+	// The sender==author guard makes "authored by THIS actor" robust rather than
+	// assumed: any host/edge where an opened event's sender differs from the author
+	// yields no attributable signal (defense in depth at the security door). A
+	// `labeled` action's aggregate Labels are likewise NOT the labeler's specific
+	// signal (the added label is dropped upstream), so they are ignored — otherwise
+	// an authorized actor's unrelated event would inherit a foreign actor's `semdev`
+	// label and be wrongly admitted (the Event invariant).
+	if e.Action == "opened" && strings.EqualFold(strings.TrimSpace(e.Sender), strings.TrimSpace(e.Issue.Author)) {
 		in.Event.AppliedLabels = e.Issue.Labels
 		in.Event.AuthoredText = e.Issue.Body
 	}
