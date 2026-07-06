@@ -40,8 +40,8 @@ var regressionManifest = []struct {
 		"the architecture docs' fact-vocabulary table matches the code registry"},
 	{"T1", "test/conformance/taxonomy_test.go", []string{"TestPersonaDeclaresExactTaxonomy", "TestNoRuleRoutesOutOfTaxonomyAction"},
 		"the coordinator persona declares exactly the closed taxonomy; no rule routes an out-of-taxonomy action"},
-	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestParkRuleStampsAwaitingHuman"},
-		"lifecycle transitions target valid agent-run edges; the change-approval gate ordering and park rule hold"},
+	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestParkRuleStampsAwaitingHuman", "TestLifecycleTransitionRulesExcludeParkedRuns"},
+		"lifecycle transitions target valid agent-run edges; gate ordering, park, and park-exclusion (D15) hold"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if

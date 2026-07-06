@@ -7,7 +7,8 @@
   "conditions": [
     { "field": "agent.run.phase", "operator": "eq", "value": "executing", "required": true },
     { "field": "openspec.validated", "operator": "ne", "value": "", "required": true },
-    { "field": "run.change_approved", "operator": "length_eq", "value": 0, "required": true }
+    { "field": "run.change_approved", "operator": "length_eq", "value": 0, "required": true },
+    { "field": "run.awaiting_human", "operator": "length_eq", "value": 0, "required": true }
   ],
   "logic": "and",
   "on_enter": [

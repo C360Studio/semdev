@@ -281,6 +281,10 @@ so a later group cannot break them silently:
    that advances or terminates a run MUST exclude `run.awaiting_human`-present
    runs, or a parked run gets swept; (b) the `respond` handler (group 5) MUST
    remove `run.awaiting_human` on resume so a resumed run is not read as parked.
+   Rules 01/02 carry the `run.awaiting_human length_eq 0` guard, and a
+   conformance pin (`TestLifecycleTransitionRulesExcludeParkedRuns`) fails the
+   build if any active `lifecycle_transition` rule omits it — the only exemption
+   is a rule that itself clears the marker (the group-5 resume-from-park rule).
 3. **Entry transition.** There is no `dispatched→executing` rule yet; a minted run
    (phase `dispatched`) reaches `executing` only once group 5 wires the entry
    transition (the semteams `agent-run/02` analog, keyed on the dispatch/handoff

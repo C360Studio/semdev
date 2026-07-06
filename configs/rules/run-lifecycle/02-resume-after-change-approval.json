@@ -6,7 +6,8 @@
   "enabled": true,
   "conditions": [
     { "field": "agent.run.phase", "operator": "eq", "value": "awaiting_approval", "required": true },
-    { "field": "run.change_approved", "operator": "eq", "value": "true", "required": true }
+    { "field": "run.change_approved", "operator": "eq", "value": "true", "required": true },
+    { "field": "run.awaiting_human", "operator": "length_eq", "value": 0, "required": true }
   ],
   "logic": "and",
   "on_enter": [

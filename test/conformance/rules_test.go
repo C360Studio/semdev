@@ -41,6 +41,39 @@ func (r ruleFile) hasTriple(predicate string) bool {
 	return false
 }
 
+func (r ruleFile) firesTransition() bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "lifecycle_transition" {
+			return true
+		}
+	}
+	return false
+}
+
+// clearsPredicate reports whether the rule removes a predicate (the resume-from-
+// park rule clears run.awaiting_human, exempting it from the park-exclusion pin).
+func (r ruleFile) clearsPredicate(predicate string) bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "remove_triple" && a.Predicate == predicate {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAbsenceGuard reports whether the rule requires a predicate to be absent
+// (length_eq 0) — the "fact not present" guard.
+func (r ruleFile) hasAbsenceGuard(field string) bool {
+	for _, c := range r.Conditions {
+		if c.Field == field && c.Operator == "length_eq" {
+			if f, ok := c.Value.(float64); ok && f == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // G2 / 3.4 — every lifecycle_transition rule targets a VALID agent-run edge. The
 // source phase comes from the rule's agent.run.phase guard, the target from the
 // action; the pair must be a real transition in the framework's agent-run table.
@@ -118,6 +151,60 @@ func TestParkRuleStampsAwaitingHuman(t *testing.T) {
 	// subject-override would not resolve and the marker would be silently dropped.
 	if c, ok := park.condition("agent.run.entity_id"); !ok || c.Operator != "ne" {
 		t.Error("park rule must carry the agent.run.entity_id run-anchor guard (ne \"\")")
+	}
+}
+
+// D15 park-exclusion — every active lifecycle_transition rule MUST exclude parked
+// runs (run.awaiting_human absent), or a parked run gets swept through a gate
+// before the group-5 human-resume path clears the marker. The only exemption is a
+// rule that itself clears run.awaiting_human (the resume-from-park rule). This is
+// the guard codex flagged: rules 01/02 advance the run and must carry it.
+func TestLifecycleTransitionRulesExcludeParkedRuns(t *testing.T) {
+	saw := 0
+	for _, r := range runLifecycleRules(t) {
+		if !r.firesTransition() {
+			continue
+		}
+		saw++
+		if r.clearsPredicate("run.awaiting_human") {
+			continue // resume-from-park rule: legitimately fires on a parked run to un-park it
+		}
+		if !r.hasAbsenceGuard("run.awaiting_human") {
+			t.Errorf("rule %s fires a lifecycle_transition but does not exclude parked runs (run.awaiting_human length_eq 0) — a parked run would be swept through the gate (design D15)", r.ID)
+		}
+	}
+	if saw == 0 {
+		t.Fatal("no lifecycle_transition rules found; the park-exclusion pin would pass vacuously")
+	}
+}
+
+// Red-first: the park-exclusion helpers must classify correctly — an unguarded
+// transition rule is caught, a marker-clearing rule is exempt, a guarded rule
+// passes.
+func TestParkExclusionPinLogic(t *testing.T) {
+	unguarded := ruleFile{ID: "unguarded", OnEnter: []ruleAction{{Type: "lifecycle_transition", Workflow: "agent-run", Phase: "executing"}}}
+	if !unguarded.firesTransition() {
+		t.Fatal("unguarded rule not seen as a transition")
+	}
+	if unguarded.hasAbsenceGuard("run.awaiting_human") || unguarded.clearsPredicate("run.awaiting_human") {
+		t.Error("unguarded transition rule wrongly treated as guarded/exempt — pin would not fire")
+	}
+
+	resume := ruleFile{ID: "resume", OnEnter: []ruleAction{
+		{Type: "remove_triple", Predicate: "run.awaiting_human"},
+		{Type: "lifecycle_transition", Workflow: "agent-run", Phase: "executing"},
+	}}
+	if !resume.clearsPredicate("run.awaiting_human") {
+		t.Error("resume-from-park rule not recognized as clearing the marker")
+	}
+
+	guarded := ruleFile{
+		ID:         "guarded",
+		Conditions: []ruleCondition{{Field: "run.awaiting_human", Operator: "length_eq", Value: float64(0)}},
+		OnEnter:    []ruleAction{{Type: "lifecycle_transition"}},
+	}
+	if !guarded.hasAbsenceGuard("run.awaiting_human") {
+		t.Error("guarded rule not recognized as carrying the absence guard")
 	}
 }
 
