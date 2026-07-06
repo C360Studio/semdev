@@ -20,6 +20,8 @@ import (
 // diagnostic, blocked, and skipped are evidence but never green.
 type Status string
 
+// The status vocabulary. Only StatusPass is green evidence; the rest are
+// evidence but never green.
 const (
 	StatusPass        Status = "pass"
 	StatusExploratory Status = "exploratory"
@@ -41,6 +43,8 @@ func (s Status) Valid() bool {
 // evidence; mock and fixture-seeded runs are bridge proof (G7, T8).
 type Kind string
 
+// The evidence-kind vocabulary. Only KindRealLLM can be real-LLM product
+// evidence; the others are bridge proof.
 const (
 	KindRealLLM       Kind = "real-llm"
 	KindMock          Kind = "mock"

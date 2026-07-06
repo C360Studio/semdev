@@ -7,10 +7,16 @@ tasks:
       - go build ./...
 
   lint:
-    desc: Vet and gofmt check (gofmt drift fails)
+    desc: Vet, gofmt, and revive (warnings = failure — the house standard)
     cmds:
       - go vet ./...
       - test -z "$(gofmt -l .)"
+      - revive -config revive.toml -set_exit_status ./...
+
+  lint:ci:
+    desc: Revive with stylish output for CI (exits non-zero on any warning)
+    cmds:
+      - revive -config revive.toml -formatter stylish -set_exit_status ./...
 
   test:
     desc: Unit tests with the race detector

@@ -7,10 +7,13 @@
 package boot
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/componentregistry"
+	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
 )
 
 // RegisterAll registers every component semdev's binaries run into reg. It wraps
@@ -23,5 +26,19 @@ func RegisterAll(reg *component.Registry) error {
 	}
 	// semdev's own components register here (task 2.1 onward). Keep every
 	// addition inside this function so both binaries stay in lockstep.
+	return nil
+}
+
+// RegisterTools registers every agentic tool executor semdev exposes into reg:
+// the framework builtins plus semdev's own G1-gated tools (none at M0). The G3
+// schema census builds the tool registry through this same seam, so a semdev
+// tool cannot land uncovered by the outcome-field pin — the census and
+// production registration cannot drift.
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies) error {
+	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
+		return fmt.Errorf("register builtin tools: %w", err)
+	}
+	// semdev's own tool executors register here as later groups add them (task
+	// 7.1 measurement, floor tools) — each G1-gated and G3-scanned.
 	return nil
 }

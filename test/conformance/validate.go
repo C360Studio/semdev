@@ -3,10 +3,81 @@ package conformance
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/c360studio/semdev/internal/registry"
 	"github.com/c360studio/semdev/internal/vocab"
 )
+
+// forbiddenOutcomeFields are the outcome-shaped input-schema property names a
+// tool must never accept from the caller (G3): the model may claim, only the
+// harness records. From the harness-measurement spec + the constitution's
+// "test-count fact" (G3). The set is extensible; matching is by property name.
+var forbiddenOutcomeFields = map[string]bool{
+	"pass":         true,
+	"passed":       true,
+	"exit_code":    true,
+	"success":      true,
+	"resolved":     true,
+	"outcome":      true,
+	"test_count":   true,
+	"tests_passed": true,
+	"tests_failed": true,
+	"failures":     true,
+}
+
+// outcomeFieldViolations returns one message per forbidden outcome-shaped
+// property found anywhere in a tool's input schema (G3). params is the tool's
+// JSON-schema object (agentic.ToolDefinition.Parameters); the walk descends
+// nested object properties, array items, the composition keywords
+// (anyOf/allOf/oneOf), and named-schema maps ($defs/definitions/
+// patternProperties), so an outcome field cannot hide in a composite. Matching
+// is by property name — an outcome expressed as an enum value under an
+// innocently-named property is out of scope for a name census.
+func outcomeFieldViolations(toolName string, params map[string]any) []string {
+	var out []string
+	var walk func(schema map[string]any)
+	descend := func(v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			walk(t)
+		case []any:
+			for _, e := range t {
+				if m, ok := e.(map[string]any); ok {
+					walk(m)
+				}
+			}
+		}
+	}
+	walk = func(schema map[string]any) {
+		if props, ok := schema["properties"].(map[string]any); ok {
+			for name, sub := range props {
+				if forbiddenOutcomeFields[strings.ToLower(name)] {
+					out = append(out, fmt.Sprintf("tool %q input schema accepts caller-supplied outcome field %q (G3): the harness stamps outcomes, the model may not", toolName, name))
+				}
+				descend(sub)
+			}
+		}
+		// single nested schemas
+		for _, key := range []string{"items", "additionalProperties"} {
+			descend(schema[key])
+		}
+		// arrays of schemas
+		for _, key := range []string{"anyOf", "allOf", "oneOf"} {
+			descend(schema[key])
+		}
+		// maps of named schemas: descend the values, not the (arbitrary) names
+		for _, key := range []string{"$defs", "definitions", "patternProperties"} {
+			if m, ok := schema[key].(map[string]any); ok {
+				for _, v := range m {
+					descend(v)
+				}
+			}
+		}
+	}
+	walk(params)
+	return out
+}
 
 // This file holds the pure census cores so each pin is provably fireable: the
 // real pin runs a core over the checked-in table and asserts no violations,

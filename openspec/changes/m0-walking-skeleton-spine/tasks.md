@@ -12,10 +12,10 @@
 - [x] 2.2 Framework-alignment-note format (G1); each new Go addition links its note in the registry
 - [x] 2.3 Single-writer table (G5) + writers-census test: every predicate maps to exactly one writer
 - [x] 2.4 Predicate → introducing-change table (G9) + exhaustiveness test: an undeclared predicate fails
-- [ ] 2.5 G2 conformance test (red-first): zero lifecycle-transition callers in product Go (exception table, target 0)
-- [ ] 2.6 G3 schema conformance test (red-first): reject any tool schema accepting an outcome-shaped field
-- [ ] 2.7 Evidence-ledger schema (G7) + schema-validation test; regression-pin manifest (G6): deleting a named pin fails
-- [ ] 2.8 Docs inventory conformance test (G10): README/architecture tables compared against the registries
+- [x] 2.5 G2 conformance test (red-first): zero lifecycle-transition callers in product Go (exception table, target 0)
+- [x] 2.6 G3 schema conformance test (red-first): reject any tool schema accepting an outcome-shaped field
+- [x] 2.7 Evidence-ledger schema (G7) + schema-validation test; regression-pin manifest (G6): deleting a named pin fails
+- [x] 2.8 Docs inventory conformance test (G10): README/architecture tables compared against the registries
 
 ## 3. run-lifecycle (G2, T1)
 

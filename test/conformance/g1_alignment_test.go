@@ -44,6 +44,20 @@ func TestAlignmentNotesDocIsPresent(t *testing.T) {
 	}
 }
 
+// Red-first: a "## …" inside a fenced code block must not be counted as an
+// anchor, or the G10 docs pin (which reuses this scanner) would see phantom rows
+// and either false-fail or mask a real drift.
+func TestMarkdownAnchorsSkipCodeFences(t *testing.T) {
+	src := []byte("## Real\n\n```\n## Fenced Example\n```\n\n## AlsoReal\n")
+	got := markdownH2Anchors(src)
+	if !got["Real"] || !got["AlsoReal"] {
+		t.Errorf("real headings missing from %v", got)
+	}
+	if got["Fenced Example"] {
+		t.Error("a heading inside a code fence was counted as an anchor")
+	}
+}
+
 // Red-first: the census must flag an entry with a missing note and an entry
 // whose note does not resolve to a heading.
 func TestAlignmentCensusCatchesViolations(t *testing.T) {

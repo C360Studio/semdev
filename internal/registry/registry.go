@@ -15,6 +15,8 @@ package registry
 // executor — the two surfaces the G1 census enumerates separately.
 type Kind string
 
+// KindComponent and KindTool are the two registered surfaces (G1) the census
+// enumerates separately.
 const (
 	KindComponent Kind = "component"
 	KindTool      Kind = "tool"
