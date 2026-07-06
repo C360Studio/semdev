@@ -81,6 +81,12 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	if p.Slug == "" {
 		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: slug is required")
 	}
+	// The slug is model-supplied and becomes both a fact-predicate namespace and,
+	// downstream, a changes/<slug>/ filesystem path — reject a traversal slug at
+	// the authoring source so nothing further down (write_change) must re-guard it.
+	if err := openspec.ValidateSlug(p.Slug); err != nil {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: %v", err)
+	}
 
 	change := p.toChange()
 	triples := changeTriples(runEntityID, change, time.Now().UTC())

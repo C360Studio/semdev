@@ -223,12 +223,33 @@ func writeCapabilitySpec(specsDir, capability, content string) error {
 	return nil
 }
 
+// isSafePathSegment reports whether name is a single safe path segment: non-empty,
+// not "." / "..", and free of any path separator or ".." run. It is the shared
+// guard behind ValidateSlug and validateCapability — the check that keeps a
+// programmatically- or model-supplied name from escaping the tree a caller builds
+// under it (changes/<slug>/, specs/<capability>/).
+func isSafePathSegment(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		!strings.ContainsAny(name, `/\`) && !strings.Contains(name, "..")
+}
+
+// ValidateSlug rejects a change slug that is not a single safe path segment. A
+// slug flows from a model (create_change authors it) into both a fact-predicate
+// namespace (openspec.change.<slug>.*) and a filesystem path (changes/<slug>/ when
+// the change is written to a workspace), so a slug like "../../etc" would let a
+// write escape the changes tree. Callers that author or materialize a slug
+// validate it here first.
+func ValidateSlug(slug string) error {
+	if !isSafePathSegment(slug) {
+		return fmt.Errorf("invalid change slug %q: must be a single safe path segment (no separators, not \".\"/\"..\")", slug)
+	}
+	return nil
+}
+
 // validateCapability rejects a capability name that is not a single safe path
-// segment (empty, "." / "..", or containing a path separator or ".."), which
-// would let a write escape the specs tree.
+// segment, which would let a write escape the specs tree.
 func validateCapability(capability string) error {
-	if capability == "" || capability == "." || capability == ".." ||
-		strings.ContainsAny(capability, `/\`) || strings.Contains(capability, "..") {
+	if !isSafePathSegment(capability) {
 		return fmt.Errorf("invalid capability name %q", capability)
 	}
 	return nil

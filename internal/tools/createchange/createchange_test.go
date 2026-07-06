@@ -177,6 +177,24 @@ func TestCreateChangeIgnoresAuthoredTaskCompletion(t *testing.T) {
 	t.Error("no task.0.done fact stamped")
 }
 
+// A traversal slug is rejected at the authoring source and writes no facts, so a
+// model cannot seed an openspec.change.* namespace (or a downstream changes/<slug>/
+// path) that escapes the tree.
+func TestCreateChangeRejectsUnsafeSlug(t *testing.T) {
+	for _, bad := range []string{"../../etc/passwd", "a/b", ".", "..", "foo/../bar"} {
+		call := sampleCall()
+		call.Arguments["slug"] = bad
+		w := &fakeWriter{}
+		res, _ := New(w, nil).Execute(context.Background(), call)
+		if res.Error == "" {
+			t.Errorf("slug %q was accepted; want a rejection", bad)
+		}
+		if len(w.replaces) != 0 {
+			t.Errorf("slug %q wrote %d fact mutations; want none (rejected before any write)", bad, len(w.replaces))
+		}
+	}
+}
+
 // Missing run-entity metadata fails loudly (the silent-subject trap).
 func TestCreateChangeFailsWithoutRunEntity(t *testing.T) {
 	call := sampleCall()
