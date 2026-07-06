@@ -1,0 +1,22 @@
+# Binaries and build output
+/semdev
+/bin/
+dist/
+coverage.out
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Node (UI-adjacent tooling, journeys)
+node_modules/
+
+# Local scratch
+tmp/
+*.log
