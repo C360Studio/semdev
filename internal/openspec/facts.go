@@ -43,6 +43,13 @@ func slugify(s string) string {
 // living-spec writer needs it.)
 func ChangeEntityPrefix(slug string) string { return changePrefix + slug + "." }
 
+// SpecEntityPrefix returns the "openspec.spec.<capability>." predicate prefix that
+// a living capability Spec's Facts() stamps under — the living-spec analogue of
+// ChangeEntityPrefix. A writer that adds spec-scoped graph-state (the brownfield
+// projector's provenance source_ref, a future spec status) uses this so its facts
+// share the capability's subtree with the pure content facts.
+func SpecEntityPrefix(capability string) string { return specPrefix + capability + "." }
+
 // Fact is a subject-less graph assertion: the predicate key and object that the
 // OpenSpec model determines — a message.Triple minus the fields the writer owns
 // (Subject/Source/Timestamp/Confidence). The graph-writing caller (the

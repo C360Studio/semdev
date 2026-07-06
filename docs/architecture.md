@@ -22,6 +22,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `run.awaiting_human` | park-rule | run-lifecycle |
 | `pr.ref` | pr-delivery-adapter | forge-io |
 | `openspec.change.*` | create-change-author-tool | openspec-io |
+| `openspec.spec.*` | brownfield-spec-projector | openspec-io |
 | `openspec.validated` | openspec-validate-harness | openspec-io |
 | `openspec.archived` | openspec-archive-harness | openspec-io |
 | `task.spec` | task-projector | dev-from-task |

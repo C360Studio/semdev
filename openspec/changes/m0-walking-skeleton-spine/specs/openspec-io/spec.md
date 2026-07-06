@@ -50,16 +50,21 @@ merge-event trigger and the live archive call are wired at M1.
 
 ### Requirement: Brownfield OpenSpec artifacts are ingested deterministically
 
-The system SHALL read existing OpenSpec artifacts in a target repository's
-`openspec/` workspace and seed the graph with their facts through a
-deterministic parser; no model SHALL interpret the artifacts on the ingest path
-(G3). Parsing SHALL be lenient — bullet, heading-case, and optional-file
-variance produce warnings, never a hard failure — and the raw artifact bytes
-SHALL be retained by reference so each ingested fact traces to its source file.
+The system SHALL read a target repository's existing **living specifications**
+(`openspec/specs/*/spec.md`) and seed the graph with their `openspec.spec.*`
+facts through a deterministic parser; no model SHALL interpret the artifacts on
+the ingest path (G3). Parsing SHALL be lenient — bullet, heading-case, and
+optional-file variance produce warnings, never a hard failure — and the raw
+artifact bytes SHALL be retained by reference so each ingested fact traces to
+its source file. A target repo's in-flight `openspec/changes/` are the human's
+work-in-progress and SHALL NOT be ingested: `openspec.change.*` has a single
+writer (the `create_change` author tool, G5), so a second projector of that
+namespace is forbidden — semdev owns only the changes it authors on a run.
 
-#### Scenario: Existing artifacts seed the graph
-- **WHEN** init encounters a target repo containing `openspec/changes/` and `openspec/specs/`
-- **THEN** a deterministic parser reads them and writes their facts to the graph under a single owner
+#### Scenario: Existing living specs seed the graph
+- **WHEN** init encounters a target repo containing `openspec/specs/`
+- **THEN** a deterministic parser reads each capability's `spec.md` and writes its `openspec.spec.*` facts to the graph under a single owner
+- **AND** the repo's in-flight `openspec/changes/` are left un-ingested
 - **AND** no LLM is invoked on the parse path
 
 #### Scenario: Lenient parse tolerates format variance and keeps provenance
