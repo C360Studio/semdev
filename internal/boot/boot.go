@@ -10,8 +10,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/componentregistry"
+	"github.com/c360studio/semstreams/pkg/lifecycle"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
 )
@@ -40,5 +42,18 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	}
 	// semdev's own tool executors register here as later groups add them (task
 	// 7.1 measurement, floor tools) — each G1-gated and G3-scanned.
+	return nil
+}
+
+// RegisterLifecycle registers semdev's run-entity workflow into the lifecycle
+// Manager: the framework's agent-run workflow is the run entity (design D2).
+// Rules own every transition on it (G2) — product Go registers the workflow
+// declaration here but fires no transition. The binaries call this when they
+// wire the runtime (with a live Manager); the run-lifecycle rule pack drives the
+// phase transitions.
+func RegisterLifecycle(mgr *lifecycle.Manager) error {
+	if err := agentrun.Register(mgr); err != nil {
+		return fmt.Errorf("register agent-run workflow: %w", err)
+	}
 	return nil
 }

@@ -19,15 +19,15 @@
 
 ## 3. run-lifecycle (G2, T1)
 
-- [ ] 3.1 Closed action taxonomy config (issue_intake, create_change, dev_from_task, verify, open_pr, ask_human, respond, archive_change) mirroring the OpenSpec lifecycle; no phase enum. **verify = clean-room outcome (G4) only; coherence is structural (`openspec.validated` + derived completion + `review.verdict`), no separate coherence action**
-- [ ] 3.2 `agentic/agentrun` as the run entity; run created carrying `run.issue_ref`
-- [ ] 3.3 Persona fragments — Sarah (coordinator), Amelia (dev), Quinn (reviewer); cosmetic, never fact-writers
-- [ ] 3.4 Lifecycle-transition rules (phase-as-fact / `lifecycle_transition`): each station→next fires off a milestone fact
-- [ ] 3.5 Change-approval human-gate rule: `dev_from_task` ineligible until `run.change_approved`
-- [ ] 3.6 Park-toward-human rule: `run.awaiting_human` on unresolvable-by-rule; no Go reconciler advances a parked run
-- [ ] 3.7 Validate-gate wiring: `openspec.validated` must be present before the change-approval gate is offered (create_change → validate → approval ordering)
-- [ ] 3.8 Test: an out-of-taxonomy action is not routable — no rule routes it and the condition surfaces for attention
-- [ ] 3.9 `archive_change` loop-closer (design-now, wire-M1): declare the action + `openspec.archived` fact and design the merge-triggered rule; assert the M0 mock journey terminates at `open_pr` (`pr.ref`) and the merge trigger + live archive land at M1
+- [x] 3.1 Closed action taxonomy config (issue_intake, create_change, dev_from_task, verify, open_pr, ask_human, respond, archive_change) mirroring the OpenSpec lifecycle; no phase enum. **verify = clean-room outcome (G4) only; coherence is structural (`openspec.validated` + derived completion + `review.verdict`), no separate coherence action**
+- [x] 3.2 `agentic/agentrun` as the run entity; run created carrying `run.issue_ref`
+- [x] 3.3 Persona fragments — Sarah (coordinator), Amelia (dev), Quinn (reviewer); cosmetic, never fact-writers
+- [x] 3.4 Lifecycle-transition rules (phase-as-fact / `lifecycle_transition`): each station→next fires off a milestone fact
+- [x] 3.5 Change-approval human-gate rule: `dev_from_task` ineligible until `run.change_approved`
+- [x] 3.6 Park-toward-human rule: `run.awaiting_human` on unresolvable-by-rule; no Go reconciler advances a parked run
+- [x] 3.7 Validate-gate wiring: `openspec.validated` must be present before the change-approval gate is offered (create_change → validate → approval ordering)
+- [x] 3.8 Test: an out-of-taxonomy action is not routable — no rule routes it and the condition surfaces for attention
+- [x] 3.9 `archive_change` loop-closer (design-now, wire-M1): declare the action + `openspec.archived` fact and design the merge-triggered rule; assert the M0 mock journey terminates at `open_pr` (`pr.ref`) and the merge trigger + live archive land at M1
 
 ## 4. openspec-io (port format engine; hydrate / ingest / oracle)
 

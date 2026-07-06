@@ -1,0 +1,47 @@
+{
+  "_comment": "semdev bootstrap config (M0, thin). The rule-processor loads the run-lifecycle rule pack; capability groups append their spawn rules to rules_files and their tools to allowed_tools. Paths are repo-relative; runtime path resolution is finalized with the e2e journey (group 11).",
+  "model_registry": {
+    "capabilities": {
+      "coordinator": { "preferred": ["mock"], "requires_tools": true },
+      "developer": { "preferred": ["mock"], "requires_tools": true },
+      "reviewer": { "preferred": ["mock"], "requires_tools": true }
+    },
+    "endpoints": {
+      "mock": {
+        "provider": "openai",
+        "url": "http://mock-llm:8080/v1",
+        "model": "mock-model",
+        "supports_tools": true,
+        "tool_format": "openai"
+      }
+    },
+    "defaults": { "model": "mock" }
+  },
+  "components": {
+    "rule": {
+      "type": "processor",
+      "name": "rule-processor",
+      "enabled": true,
+      "config": {
+        "entity_watch_patterns": ["c360.>"],
+        "enable_graph_integration": true,
+        "pack_id": "semdev",
+        "rules_files": [
+          "configs/rules/run-lifecycle/01-offer-change-approval.json",
+          "configs/rules/run-lifecycle/02-resume-after-change-approval.json",
+          "configs/rules/run-lifecycle/03-park-awaiting-human.json",
+          "configs/rules/run-lifecycle/04-archive-change-loop-closer.json"
+        ],
+        "inline_rules": []
+      }
+    },
+    "agentic-tools": {
+      "type": "processor",
+      "name": "agentic-tools",
+      "enabled": true,
+      "config": {
+        "allowed_tools": ["decide"]
+      }
+    }
+  }
+}

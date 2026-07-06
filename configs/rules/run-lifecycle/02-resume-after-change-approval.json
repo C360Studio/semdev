@@ -1,0 +1,22 @@
+{
+  "id": "run_resume_after_change_approval",
+  "type": "expression",
+  "name": "Resume after change approval (awaiting_approval → executing)",
+  "description": "The dev loop SHALL NOT start until a human approves the generated change (run.change_approved). This rule is the release side of the first human gate: a run parked in awaiting_approval returns to executing only once run.change_approved is present, at which point dev_from_task becomes eligible for the run's tasks. Without the approval fact the run stays parked — the gate holds. Rule-owned transition (G2). CONTRACT (design D15): group 5's approval adapter MUST stamp run.change_approved on the RUN entity (subject = agent.run.entity_id), or the run never resumes.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.run.phase", "operator": "eq", "value": "awaiting_approval", "required": true },
+    { "field": "run.change_approved", "operator": "eq", "value": "true", "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "lifecycle_transition",
+      "workflow": "agent-run",
+      "phase": "executing",
+      "reason": "human approved the change; resuming to develop from the approved tasks"
+    }
+  ],
+  "on_exit": [],
+  "metadata": { "pack": "run-lifecycle", "capability": "run-lifecycle", "gate": "change-approval", "task": "3.4/3.5" }
+}

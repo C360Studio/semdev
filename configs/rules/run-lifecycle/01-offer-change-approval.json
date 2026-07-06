@@ -1,0 +1,23 @@
+{
+  "id": "run_offer_change_approval",
+  "type": "expression",
+  "name": "Offer change-approval gate (executing → awaiting_approval)",
+  "description": "First human gate. When a run's generated OpenSpec change has been authored and blessed by the CLI validator (openspec.validated present) but no human approval exists yet (run.change_approved absent), move the run to awaiting_approval so the dev loop cannot start. This encodes the validate-before-approval ordering (G-io task 4.4/3.7): approval is only offered after the change is OpenSpec-valid. The transition is rule-owned (G2) — no product Go fires it. CONTRACT (design D15): this rule evaluates conditions against the RUN entity, so group 4's validate harness MUST stamp openspec.validated on the run entity (subject = agent.run.entity_id), not on the loop or a change entity, or this rule never fires and the run wedges silently.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.run.phase", "operator": "eq", "value": "executing", "required": true },
+    { "field": "openspec.validated", "operator": "ne", "value": "", "required": true },
+    { "field": "run.change_approved", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "lifecycle_transition",
+      "workflow": "agent-run",
+      "phase": "awaiting_approval",
+      "reason": "change authored and OpenSpec-validated; awaiting human change approval"
+    }
+  ],
+  "on_exit": [],
+  "metadata": { "pack": "run-lifecycle", "capability": "run-lifecycle", "gate": "change-approval", "task": "3.4/3.7" }
+}

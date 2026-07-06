@@ -38,6 +38,10 @@ var regressionManifest = []struct {
 		"the mock ladder spends zero paid tokens (loopback-only endpoint)"},
 	{"G10", "test/conformance/g10_docs_test.go", []string{"TestDocsVocabularyMatchesRegistry"},
 		"the architecture docs' fact-vocabulary table matches the code registry"},
+	{"T1", "test/conformance/taxonomy_test.go", []string{"TestPersonaDeclaresExactTaxonomy", "TestNoRuleRoutesOutOfTaxonomyAction"},
+		"the coordinator persona declares exactly the closed taxonomy; no rule routes an out-of-taxonomy action"},
+	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestParkRuleStampsAwaitingHuman"},
+		"lifecycle transitions target valid agent-run edges; the change-approval gate ordering and park rule hold"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if

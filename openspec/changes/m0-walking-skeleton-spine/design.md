@@ -258,6 +258,39 @@ merge-event trigger at M1; the M0 mock journey terminates at `open_pr`.
 *Alternative rejected:* a parallel semdev verifier/archiver (re-implements the
 proven oracle, invites drift, and forfeits the compatibility claim).
 
+### D15 — Run-lifecycle bones: park semantics + the forward contracts groups 4/5 honor
+
+Group 3 lands the run-lifecycle *bones* — the taxonomy, personas, agentrun
+registration, the two-human-gate transitions (rules 01/02), the park rule (03),
+and the archive stub (04). Per-action spawn rules live with their capability
+packs; run-creation-on-intake is `forge-io` (group 5); live firing is proven in
+the group-11 journey. Four contracts fall out of that split and are pinned here
+so a later group cannot break them silently:
+
+1. **Run-scoped facts.** Rules fire against the *firing entity's* triples, and
+   the lifecycle rules fire on the run (they match `agent.run.phase`). So the
+   milestone facts those rules gate on — `openspec.validated` (group 4),
+   `run.change_approved` (group 5) — MUST be stamped on the **run entity**
+   (subject = `agent.run.entity_id`, the loop→run subject-override the park rule
+   models), never on the loop or a change entity, or the rule never fires and the
+   run wedges. Groups 4/5 should carry a red-first pin for this.
+2. **Park is marker-only.** The park rule (03) records `run.awaiting_human` and
+   does NOT reflect the phase — deliberately, to avoid conflating with the
+   change-approval `awaiting_approval` gate (a run can await a human for either
+   reason, distinguished by the fact, not the phase). Consequently: (a) any rule
+   that advances or terminates a run MUST exclude `run.awaiting_human`-present
+   runs, or a parked run gets swept; (b) the `respond` handler (group 5) MUST
+   remove `run.awaiting_human` on resume so a resumed run is not read as parked.
+3. **Entry transition.** There is no `dispatched→executing` rule yet; a minted run
+   (phase `dispatched`) reaches `executing` only once group 5 wires the entry
+   transition (the semteams `agent-run/02` analog, keyed on the dispatch/handoff
+   signal). Rules 01/02 are inert until it lands — expected.
+4. **Runtime boot parity.** `boot.RegisterLifecycle` (agentrun registration) and
+   the rule/persona/tool config load are not in the static `RegisterAll` seam
+   (they need a live Manager); group 11 wires them into a shared runtime-boot path
+   that BOTH binaries call, guarded by a parity pin — the same half-wired-binary
+   class `boot.RegisterAll` already prevents for components.
+
 ## Risks / Trade-offs
 
 - **Cache-home freshness is the silent G4 killer** → per-run fresh cache home +
