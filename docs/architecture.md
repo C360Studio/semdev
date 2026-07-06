@@ -37,10 +37,20 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 
 semdev's own Go components and tools (G1). The framework's components are not
 listed — only what semdev adds, each with a framework-alignment note
-(`docs/alignment-notes.md`). Mirrors `internal/registry.Entries`.
+(`docs/alignment-notes.md`). Mirrors `internal/registry.Entries`, pinned to it by
+the G10 census (`TestDocsComponentsMatchRegistry`).
 
-_None yet._ The M0 walking-skeleton spine adds no Go components — the arc is rule
-packs, persona fragments, and reused framework tools.
+| Name | Kind | Capability | Alignment note |
+|------|------|------------|----------------|
+| `create_change` | tool | openspec-io | `create-change-author-tool` |
+| `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
+| `write_change` | tool | openspec-io | `write-change-workspace-tool` |
+| `validate_change` | tool | openspec-io | `validate-change-cli-oracle` |
+
+The rest of the M0 arc is rule packs, persona fragments, and reused framework
+tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)
+and archive oracle are library/design surfaces whose registered components land at
+group 11 / M1 and join this table then.
 
 ## Action taxonomy
 
