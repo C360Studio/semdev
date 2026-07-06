@@ -52,10 +52,13 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 		"removed":    arrayOf(removed, "Removed requirements."),
 	}, "capability")
 
+	// No `done` / completion field: a freshly authored change's tasks are never
+	// pre-completed. Task status is DERIVED from execution markers and gate facts
+	// (dev-from-task spec), not authored — the author tool coerces every task to
+	// not-done regardless of what the model supplies.
 	task := obj(map[string]any{
 		"number": map[string]any{"type": "string", "description": "OpenSpec dotted number, e.g. '1.1'."},
 		"text":   map[string]any{"type": "string", "description": "The task description."},
-		"done":   map[string]any{"type": "boolean", "description": "Whether the task is complete."},
 	}, "text")
 	taskSection := obj(map[string]any{
 		"section": map[string]any{"type": "string", "description": "The task group heading, e.g. '1. Foundation'."},

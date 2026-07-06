@@ -152,6 +152,31 @@ func contains(ss []string, s string) bool {
 	return false
 }
 
+// The author tool must NOT honor a model-supplied task-completion field: a
+// freshly authored change's tasks are never pre-checked. Task status is DERIVED
+// from execution markers and gate facts (dev-from-task spec), not authored.
+func TestCreateChangeIgnoresAuthoredTaskCompletion(t *testing.T) {
+	call := sampleCall()
+	// Inject done:true into the authored task args.
+	items := call.Arguments["tasks"].([]any)[0].(map[string]any)["items"].([]any)
+	items[0].(map[string]any)["done"] = true
+
+	w := &fakeWriter{}
+	res, err := New(w, nil).Execute(context.Background(), call)
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	for _, tr := range w.replaces[0].add {
+		if strings.HasSuffix(tr.Predicate, ".task.0.done") {
+			if tr.Object != "false" {
+				t.Errorf("authored done:true was honored — %s = %v, want \"false\" (status must be derived, not authored)", tr.Predicate, tr.Object)
+			}
+			return
+		}
+	}
+	t.Error("no task.0.done fact stamped")
+}
+
 // Missing run-entity metadata fails loudly (the silent-subject trap).
 func TestCreateChangeFailsWithoutRunEntity(t *testing.T) {
 	call := sampleCall()
@@ -170,16 +195,48 @@ func TestCreateChangeFailsWithoutWriter(t *testing.T) {
 	}
 }
 
-// The schema advertises the tool with content-only input (no outcome field).
-func TestSchemaHasNoOutcomeField(t *testing.T) {
+// The schema advertises content-only input — no outcome field (G3) and no
+// task-completion field anywhere (an authoring tool must not let the model
+// pre-complete tasks).
+func TestSchemaHasNoOutcomeOrCompletionField(t *testing.T) {
 	defs := New(nil, nil).ListTools()
 	if len(defs) != 1 || defs[0].Name != ToolName {
 		t.Fatalf("want one tool %q, got %+v", ToolName, defs)
 	}
-	props, _ := defs[0].Parameters["properties"].(map[string]any)
-	for _, forbidden := range []string{"pass", "passed", "exit_code", "success", "outcome", "validated", "resolved"} {
-		if _, ok := props[forbidden]; ok {
-			t.Errorf("schema exposes outcome-shaped field %q (G3)", forbidden)
+	forbidden := []string{"pass", "passed", "exit_code", "success", "outcome", "validated", "resolved", "done", "completed", "complete"}
+	for _, name := range forbidden {
+		if schemaHasProperty(defs[0].Parameters, name) {
+			t.Errorf("schema exposes forbidden field %q (G3 / status-is-derived)", name)
 		}
 	}
+}
+
+// schemaHasProperty reports whether name appears as a property key anywhere in a
+// JSON schema (recursing into properties, items, and composition keywords).
+func schemaHasProperty(schema map[string]any, name string) bool {
+	if props, ok := schema["properties"].(map[string]any); ok {
+		for k, v := range props {
+			if k == name {
+				return true
+			}
+			if sub, ok := v.(map[string]any); ok && schemaHasProperty(sub, name) {
+				return true
+			}
+		}
+	}
+	for _, key := range []string{"items", "anyOf", "allOf", "oneOf"} {
+		switch v := schema[key].(type) {
+		case map[string]any:
+			if schemaHasProperty(v, name) {
+				return true
+			}
+		case []any:
+			for _, e := range v {
+				if m, ok := e.(map[string]any); ok && schemaHasProperty(m, name) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

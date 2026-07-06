@@ -64,7 +64,9 @@ type taskSection struct {
 type taskPayload struct {
 	Number string `json:"number"`
 	Text   string `json:"text"`
-	Done   bool   `json:"done"`
+	// No Done field: an authored change's task completion is never model-supplied
+	// (dev-from-task derives status from execution markers). A `done` in the raw
+	// arguments is silently ignored, and toChange stamps every task not-done.
 }
 
 // toChange maps the authored payload onto the format engine's Change model, whose
@@ -103,7 +105,9 @@ func (p *payload) toChange() *openspec.Change {
 		for _, s := range p.Tasks {
 			section := openspec.TaskSection{Name: s.Name}
 			for _, it := range s.Items {
-				section.Tasks = append(section.Tasks, openspec.Task{Number: it.Number, Text: it.Text, Done: it.Done})
+				// Done is deliberately not carried from the payload: an authored
+				// task is always not-done (status is derived, not authored).
+				section.Tasks = append(section.Tasks, openspec.Task{Number: it.Number, Text: it.Text})
 			}
 			tasks.Sections = append(tasks.Sections, section)
 		}
