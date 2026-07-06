@@ -25,6 +25,8 @@
 - [ ] 3.4 Lifecycle-transition rules (phase-as-fact / `lifecycle_transition`): each station→next fires off a milestone fact
 - [ ] 3.5 Change-approval human-gate rule: `dev_from_task` ineligible until `run.change_approved`
 - [ ] 3.6 Park-toward-human rule: `run.awaiting_human` on unresolvable-by-rule; no Go reconciler advances a parked run
+- [ ] 3.7 Validate-gate wiring: `openspec.validated` must be present before the change-approval gate is offered (create_change → validate → approval ordering)
+- [ ] 3.8 Test: an out-of-taxonomy action is not routable — no rule routes it and the condition surfaces for attention
 
 ## 4. openspec-io (port format engine; hydrate / ingest / oracle)
 
@@ -45,6 +47,7 @@
 - [ ] 5.5 Inventory + add thin comment tools if missing (`list_comments`/`get_pr`); G1 note each
 - [ ] 5.6 PR delivery carrying the evidence summary; record `pr.ref`
 - [ ] 5.7 `ask_human` posts a comment; `respond` re-enters as `human.signal`; only the authorized requester steers the run's human gate
+- [ ] 5.8 Host-neutrality conformance pin (red-first): a build-failing test that no arc rule references a host-specific predicate/field
 
 ## 6. dev-from-task (T2, T3, S1)
 
