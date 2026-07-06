@@ -121,7 +121,7 @@ func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 // as removePredicates) so a shrunk/renamed re-author leaves no phantom facts.
 func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 	prior := []string{
-		"openspec.change.fix-null-deref.task.9.text",   // a task that no longer exists
+		"openspec.change.fix-null-deref.task.9.text", // a task that no longer exists
 		"openspec.change.fix-null-deref.delta.handler.old-req.statement",
 	}
 	w := &fakeWriter{owned: prior}
