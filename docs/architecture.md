@@ -46,6 +46,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
 | `write_change` | tool | openspec-io | `write-change-workspace-tool` |
 | `validate_change` | tool | openspec-io | `validate-change-cli-oracle` |
+| `github_list_comments` | tool | forge-io | `github-list-comments-tool` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

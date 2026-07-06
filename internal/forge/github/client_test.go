@@ -92,6 +92,45 @@ func TestPermissionRequiresToken(t *testing.T) {
 	}
 }
 
+// ListComments maps GitHub's comment shape to the host-neutral Comment (author
+// from user.login), preserving order, and hits the issues/{n}/comments endpoint.
+func TestListCommentsMapsAndOrders(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`[
+			{"id":1,"body":"first","created_at":"2026-01-01","html_url":"u1","user":{"login":"alice"}},
+			{"id":2,"body":"second","created_at":"2026-01-02","html_url":"u2","user":{"login":"bob"}}
+		]`))
+	}))
+	defer srv.Close()
+
+	got, err := NewClient("t").WithBaseURL(srv.URL).ListComments(context.Background(), "octo", "repo", 7)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	if gotPath != "/repos/octo/repo/issues/7/comments" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if len(got) != 2 || got[0].Author != "alice" || got[0].Body != "first" || got[1].Author != "bob" {
+		t.Errorf("comments mapped wrong (order/author/body): %+v", got)
+	}
+}
+
+// A non-200 is a loud error, not an empty list; no token is a loud error.
+func TestListCommentsErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	if _, err := NewClient("t").WithBaseURL(srv.URL).ListComments(context.Background(), "o", "r", 1); err == nil {
+		t.Error("expected an error on HTTP 403")
+	}
+	if _, err := NewClient("").ListComments(context.Background(), "o", "r", 1); err == nil {
+		t.Error("expected an error with no token")
+	}
+}
+
 // The actor is path-escaped so a crafted login cannot alter the request path.
 func TestPermissionEscapesActor(t *testing.T) {
 	var gotPath string

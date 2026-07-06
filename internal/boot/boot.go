@@ -16,11 +16,14 @@ package boot
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
+	"github.com/c360studio/semdev/internal/tools/listcomments"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -98,6 +101,18 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// Source per triple (G5), so sharing the transport is safe.
 	if err := reg.RegisterExecutor(validatechange.New(factReader, cliexec.OSRunner{}, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", validatechange.ToolName, err)
+	}
+
+	// github_list_comments (forge-io) reads an issue/PR thread via the semdev
+	// GitHub client, built from GITHUB_TOKEN. Without a token the tool registers
+	// schema-only (pass a literal nil interface — NOT a typed-nil *Client — so the
+	// executor's nil-check fires) and fails loudly if executed.
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		if err := reg.RegisterExecutor(listcomments.New(github.NewClient(token).WithLogger(deps.Logger), deps.Logger)); err != nil {
+			return fmt.Errorf("register %s: %w", listcomments.ToolName, err)
+		}
+	} else if err := reg.RegisterExecutor(listcomments.New(nil, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", listcomments.ToolName, err)
 	}
 	// More semdev tools register here as later groups add them (measurement,
 	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.

@@ -125,6 +125,67 @@ func (c *Client) Permission(ctx context.Context, owner, repo, actor string) (str
 	return "none", nil
 }
 
+// Comment is one issue/PR comment — the fields semdev needs to read a
+// conversation. Host-neutral to the caller (no GitHub-specific shape leaks out).
+type Comment struct {
+	ID        int64  `json:"id"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	URL       string `json:"url"`
+}
+
+// commentResponse is the GitHub shape of an item in
+// GET /repos/{o}/{r}/issues/{n}/comments.
+type commentResponse struct {
+	ID        int64  `json:"id"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	HTMLURL   string `json:"html_url"`
+	User      struct {
+		Login string `json:"login"`
+	} `json:"user"`
+}
+
+// ListComments returns the comments on issue/PR number in owner/repo, in GitHub's
+// default oldest-first order. It is the thin read the framework's github tools lack
+// (github_add_comment writes, github_get_issue reads the issue but not its
+// comments). A blank token is a loud error, never a silent empty list.
+func (c *Client) ListComments(ctx context.Context, owner, repo string, number int) ([]Comment, error) {
+	if c.token == "" {
+		return nil, fmt.Errorf("github: no token configured; cannot list comments for %s/%s#%d", owner, repo, number)
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments",
+		url.PathEscape(owner), url.PathEscape(repo), number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("github: build list-comments request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github: list comments for %s/%s#%d: %w", owner, repo, number, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github: list comments for %s/%s#%d returned HTTP %d: %s", owner, repo, number, resp.StatusCode, snippet(body))
+	}
+
+	var raw []commentResponse
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("github: decode comments for %s/%s#%d: %w", owner, repo, number, err)
+	}
+	out := make([]Comment, len(raw))
+	for i, r := range raw {
+		out[i] = Comment{ID: r.ID, Author: r.User.Login, Body: r.Body, CreatedAt: r.CreatedAt, URL: r.HTMLURL}
+	}
+	return out, nil
+}
+
 // snippet trims an error body for a log-safe message.
 func snippet(b []byte) string {
 	const maxLen = 200

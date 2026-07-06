@@ -46,7 +46,7 @@
 - [ ] 5.2 Normalized issue/PR/comment fact mapping; arc rules reference no host-specific field
 - [ ] 5.3 Deterministic allowlist admission check (zero-token): `intake.actor` + `intake.admitted`; collaborator-or-allowlist + `semdev` label/command opt-in
 - [ ] 5.4 G6 pin (red-first): an unauthorized intake creates no run and spends zero tokens
-- [ ] 5.5 Inventory + add thin comment tools if missing (`list_comments`/`get_pr`); G1 note each
+- [x] 5.5 Inventory + add thin comment tools if missing: `github_get_pr`/`github_add_comment` already ship (framework); added `github_list_comments` (the missing read) over the semdev GitHub client; G1 note + registry + Components row
 - [ ] 5.6 PR delivery carrying the evidence summary; record `pr.ref`
 - [ ] 5.7 `ask_human` posts a comment; `respond` re-enters as `human.signal`; only the authorized requester steers the run's human gate
 - [x] 5.8 Host-neutrality conformance pin (red-first): a build-failing test that no arc rule references a host-specific predicate/field (`TestNoArcRuleReferencesHostSpecificField`; scans condition fields + action subject/predicate for host names; in the G6 regression manifest)

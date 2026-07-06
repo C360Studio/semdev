@@ -126,6 +126,20 @@ Template:
   `internal/cliexec`). The M0 mock journey terminates at `open_pr` (`pr.ref`).
 - **Change:** m0-walking-skeleton-spine
 
+## github-list-comments-tool
+
+- **Primitive considered:** the framework's existing `github_read` tools (which
+  cover `github_get_issue`/`github_get_pr` but not comment threads) and a rule.
+- **Why it cannot express this:** reading an issue/PR's comment thread is a GitHub
+  REST call (`GET /repos/{o}/{r}/issues/{n}/comments`) the framework's github tools
+  do not expose (inventory, task 5.5) and no rule can make. It is the thin comment
+  read semdev adds over its own GitHub client — read-only, host-specific by
+  construction like the framework's `github_*` tools, stamping no facts (no G5
+  writer) with a coordinate-only schema (G3). The arc consumes the returned
+  thread, not the API.
+- **Registry entry:** `github_list_comments` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's
