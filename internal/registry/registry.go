@@ -37,9 +37,18 @@ var Entries []Entry
 
 // ComponentNames returns the declared names of Entries of KindComponent.
 func ComponentNames() map[string]bool {
+	return namesOfKind(KindComponent)
+}
+
+// ToolNames returns the declared names of Entries of KindTool.
+func ToolNames() map[string]bool {
+	return namesOfKind(KindTool)
+}
+
+func namesOfKind(kind Kind) map[string]bool {
 	out := make(map[string]bool)
 	for _, e := range Entries {
-		if e.Kind == KindComponent {
+		if e.Kind == kind {
 			out[e.Name] = true
 		}
 	}

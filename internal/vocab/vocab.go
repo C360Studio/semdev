@@ -9,6 +9,8 @@
 // entries; the census tests in test/conformance enforce the invariants.
 package vocab
 
+import "strings"
+
 // Predicate is one fact predicate: its name, the single writer allowed to stamp
 // it (G5), the capability that owns it, and the OpenSpec change slug that
 // introduced it (G9). A trailing ".*" in Name denotes a writer-owned namespace
@@ -55,11 +57,18 @@ func Names() []string {
 	return names
 }
 
-// WriterOf returns the single writer declared for a predicate name. ok is false
-// when the name is not in the vocabulary.
+// WriterOf returns the single writer declared for a predicate name. It matches
+// exactly first, then falls back to a declared namespace: a concrete name like
+// "openspec.change.proposal" resolves to the writer of the "openspec.change.*"
+// entry. ok is false when the name is in neither.
 func WriterOf(name string) (writer string, ok bool) {
 	for _, p := range Predicates {
 		if p.Name == name {
+			return p.Writer, true
+		}
+	}
+	for _, p := range Predicates {
+		if prefix, isNS := strings.CutSuffix(p.Name, ".*"); isNS && strings.HasPrefix(name, prefix+".") {
 			return p.Writer, true
 		}
 	}

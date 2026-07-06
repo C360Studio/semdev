@@ -188,8 +188,10 @@ render / `ReadChange`/`WriteChange` / `Facts()`↔`FromFacts`) — **no new form
 Go**; re-vocabulary to semdev predicates (G9). Hydrate-out renders artifacts from
 graph facts (G10-truthful). Ingest-in parses brownfield artifacts to facts
 deterministically (G3-safe), preserving raw bytes by reference for provenance.
-**Shell out to the real OpenSpec CLI** (`validate --strict --json --no-interactive`,
-`archive -y --json`) as the compatibility oracle — the honest "compatible" claim.
+**Shell out to the real OpenSpec CLI** (`validate <change> --strict --json
+--no-interactive` — target the change explicitly; the bare form is
+interactive-only and fails non-interactively — and `archive <change> -y --json`)
+as the compatibility oracle — the honest "compatible" claim.
 Build the one thing semteams deferred: the `WriteChange`-to-workspace tool for the
 PR. Round-trip fidelity (parse ≈ render⁻¹) is the compat test; semdev's own repo
 is the first fixture.

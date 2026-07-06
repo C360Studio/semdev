@@ -14,18 +14,23 @@ a separate source of truth.
 
 ### Requirement: Produced artifacts pass the OpenSpec CLI validator
 
-A generated OpenSpec change SHALL pass the real OpenSpec CLI validator
-(`openspec validate --strict`) before it reaches the human-approval gate. The
-CLI is the compatibility oracle; semdev SHALL NOT substitute a re-implementation
-of the CLI's rules for this check, and the pass/fail SHALL be stamped by the
-harness that ran the validator (`openspec.validated`), never by a model.
+A generated OpenSpec change SHALL pass the real OpenSpec CLI validator before it
+reaches the human-approval gate. The harness SHALL invoke the validator
+deterministically, targeting the change explicitly and running non-interactively
+— `openspec validate <change> --strict --json --no-interactive` (or
+`--changes` for the whole set). The bare `openspec validate --strict` form is
+interactive-only and fails non-interactively ("Nothing to validate"), so it MUST
+NOT be the harness invocation. The CLI is the compatibility oracle; semdev SHALL
+NOT substitute a re-implementation of its rules, and the pass/fail SHALL be
+stamped by the harness that ran the validator (`openspec.validated`), never by a
+model.
 
 #### Scenario: An invalid change cannot reach approval
-- **WHEN** a generated change fails `openspec validate --strict`
+- **WHEN** a generated change fails `openspec validate <change> --strict --json --no-interactive`
 - **THEN** it does not advance to the human-approval gate and the failure surfaces for correction
 
 #### Scenario: A valid change is blessed by the sponsor's own tool
-- **WHEN** a generated change passes `openspec validate --strict`
+- **WHEN** a generated change passes `openspec validate <change> --strict --json --no-interactive`
 - **THEN** the harness that ran the validator records `openspec.validated` for the change
 
 ### Requirement: Archiving folds the merged change back into the specs via the CLI

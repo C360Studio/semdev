@@ -20,6 +20,21 @@ func TestSingleWriterPerPredicate(t *testing.T) {
 	for _, v := range duplicateNameViolations(vocab.Predicates) {
 		t.Error(v)
 	}
+	for _, v := range namespaceWriterViolations(vocab.Predicates) {
+		t.Error(v)
+	}
+}
+
+// Red-first: the namespace census must flag a concrete predicate under a
+// declared namespace that declares a different writer.
+func TestNamespaceWriterCensusCatchesConflict(t *testing.T) {
+	preds := []vocab.Predicate{
+		{Name: "openspec.change.*", Writer: "author-tool", Capability: "openspec-io", IntroducedBy: "m0-walking-skeleton-spine"},
+		{Name: "openspec.change.title", Writer: "some-other-writer", Capability: "openspec-io", IntroducedBy: "m0-walking-skeleton-spine"},
+	}
+	if len(namespaceWriterViolations(preds)) == 0 {
+		t.Error("census passed a namespace member with a conflicting writer; G5 namespace pin does not fire")
+	}
 }
 
 // Red-first: the census must catch a predicate stamped by two writers — the

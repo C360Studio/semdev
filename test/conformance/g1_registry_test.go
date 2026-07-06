@@ -60,7 +60,7 @@ func TestSemdevComponentsAreRegistered(t *testing.T) {
 	declared := registry.ComponentNames()
 
 	// Every semdev-added component must be declared with an alignment note.
-	for _, msg := range undeclaredComponents(added, declared) {
+	for _, msg := range undeclaredRegistrations("component", added, declared) {
 		t.Error(msg)
 	}
 	// No phantom entries: every declared component must actually be registered.
@@ -71,13 +71,16 @@ func TestSemdevComponentsAreRegistered(t *testing.T) {
 	}
 }
 
-// Red-first: the census must flag a component that is registered but absent from
-// the declaration.
-func TestComponentCensusCatchesUndeclared(t *testing.T) {
+// Red-first: the census must flag a registered surface that is absent from the
+// declaration — the same core guards both the component and tool censuses.
+func TestRegistrationCensusCatchesUndeclared(t *testing.T) {
 	added := map[string]bool{"semdev-measurement": true}
 	declared := map[string]bool{}
-	if len(undeclaredComponents(added, declared)) == 0 {
+	if len(undeclaredRegistrations("component", added, declared)) == 0 {
 		t.Error("census passed an undeclared registered component; G1 pin does not fire")
+	}
+	if len(undeclaredRegistrations("tool", added, declared)) == 0 {
+		t.Error("census passed an undeclared registered tool; G1 pin does not fire")
 	}
 }
 

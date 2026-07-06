@@ -18,6 +18,8 @@ var regressionManifest = []struct {
 }{
 	{"G1", "test/conformance/g1_registry_test.go", []string{"TestSemdevComponentsAreRegistered"},
 		"every semdev-added component must carry a registry entry + alignment note"},
+	{"G1", "test/conformance/g1_tools_test.go", []string{"TestSemdevToolsAreRegistered"},
+		"every semdev-added tool must carry a KindTool registry entry + alignment note"},
 	{"G1", "test/conformance/g1_parity_test.go", []string{"TestBinariesRegisterOnlyThroughBoot"},
 		"both binaries register only through boot.RegisterAll (half-wired-binary class)"},
 	{"G1", "test/conformance/g1_alignment_test.go", []string{"TestRegistryEntriesHaveAlignmentNotes"},

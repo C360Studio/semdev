@@ -112,6 +112,32 @@ func singleWriterViolations(preds []vocab.Predicate) []string {
 	return out
 }
 
+// namespaceWriterViolations returns one message per concrete predicate that
+// falls under a declared "prefix.*" namespace but declares a different writer —
+// the G5 guarantee for namespace-owned facts. Vacuous until a concrete member
+// lands (openspec.change.* has none at M0), but pinned before openspec-io tools
+// add one.
+func namespaceWriterViolations(preds []vocab.Predicate) []string {
+	namespaces := make(map[string]string) // prefix -> writer
+	for _, p := range preds {
+		if prefix, isNS := strings.CutSuffix(p.Name, ".*"); isNS {
+			namespaces[prefix] = p.Writer
+		}
+	}
+	var out []string
+	for _, p := range preds {
+		if strings.HasSuffix(p.Name, ".*") {
+			continue
+		}
+		for prefix, writer := range namespaces {
+			if strings.HasPrefix(p.Name, prefix+".") && p.Writer != writer {
+				out = append(out, fmt.Sprintf("predicate %q falls under namespace %q.* (writer %q) but declares writer %q — G5 namespace conflict", p.Name, prefix, writer, p.Writer))
+			}
+		}
+	}
+	return out
+}
+
 // duplicateNameViolations returns one message per predicate declared more than
 // once — a silent duplicate would let two changes each claim the same fact.
 func duplicateNameViolations(preds []vocab.Predicate) []string {
@@ -147,14 +173,14 @@ func provenanceViolations(preds []vocab.Predicate, validChanges, validCaps map[s
 	return out
 }
 
-// undeclaredComponents returns one message per component in added that has no
-// entry in declared — the G1 "registered without a registry entry + alignment
-// note" shape.
-func undeclaredComponents(added, declared map[string]bool) []string {
+// undeclaredRegistrations returns one message per registered name in added that
+// has no entry in declared — the G1 "registered without a registry entry +
+// alignment note" shape. kind is "component" or "tool" for the message.
+func undeclaredRegistrations(kind string, added, declared map[string]bool) []string {
 	var out []string
 	for name := range added {
 		if !declared[name] {
-			out = append(out, fmt.Sprintf("component %q is registered but has no registry.Entry + alignment note (G1)", name))
+			out = append(out, fmt.Sprintf("%s %q is registered but has no registry.Entry + alignment note (G1)", kind, name))
 		}
 	}
 	return out
