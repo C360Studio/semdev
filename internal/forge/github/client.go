@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -147,19 +148,44 @@ type commentResponse struct {
 	} `json:"user"`
 }
 
-// ListComments returns the comments on issue/PR number in owner/repo, in GitHub's
-// default oldest-first order. It is the thin read the framework's github tools lack
-// (github_add_comment writes, github_get_issue reads the issue but not its
-// comments). A blank token is a loud error, never a silent empty list.
+// maxCommentPages bounds pagination so a misbehaving API cannot loop forever.
+// 100 pages × 100/page = 10k comments, well beyond any real thread.
+const maxCommentPages = 100
+
+// ListComments returns ALL comments on issue/PR number in owner/repo, in GitHub's
+// default oldest-first order, following pagination to exhaustion — the newest
+// human instruction or correction is on the LAST page, so a single-page read would
+// ground the agent in stale context. It is the thin read the framework's github
+// tools lack (github_add_comment writes, github_get_issue reads the issue but not
+// its comments). A blank token is a loud error, never a silent empty list.
 func (c *Client) ListComments(ctx context.Context, owner, repo string, number int) ([]Comment, error) {
 	if c.token == "" {
 		return nil, fmt.Errorf("github: no token configured; cannot list comments for %s/%s#%d", owner, repo, number)
 	}
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments",
+	next := c.apiBase + fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100",
 		url.PathEscape(owner), url.PathEscape(repo), number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+path, nil)
+
+	var out []Comment
+	for page := 0; next != "" && page < maxCommentPages; page++ {
+		raw, nextURL, err := c.fetchCommentPage(ctx, next)
+		if err != nil {
+			return nil, fmt.Errorf("github: list comments for %s/%s#%d: %w", owner, repo, number, err)
+		}
+		for _, r := range raw {
+			out = append(out, Comment{ID: r.ID, Author: r.User.Login, Body: r.Body, CreatedAt: r.CreatedAt, URL: r.HTMLURL})
+		}
+		next = nextURL
+	}
+	return out, nil
+}
+
+// fetchCommentPage GETs one comments page (a full URL — the first built by
+// ListComments, subsequent ones taken verbatim from the Link header), returning
+// the decoded page and the rel="next" URL ("" when this is the last page).
+func (c *Client) fetchCommentPage(ctx context.Context, pageURL string) ([]commentResponse, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("github: build list-comments request: %w", err)
+		return nil, "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -167,23 +193,48 @@ func (c *Client) ListComments(ctx context.Context, owner, repo string, number in
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("github: list comments for %s/%s#%d: %w", owner, repo, number, err)
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github: list comments for %s/%s#%d returned HTTP %d: %s", owner, repo, number, resp.StatusCode, snippet(body))
+		return nil, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
-
 	var raw []commentResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("github: decode comments for %s/%s#%d: %w", owner, repo, number, err)
+		return nil, "", fmt.Errorf("decode: %w", err)
 	}
-	out := make([]Comment, len(raw))
-	for i, r := range raw {
-		out[i] = Comment{ID: r.ID, Author: r.User.Login, Body: r.Body, CreatedAt: r.CreatedAt, URL: r.HTMLURL}
+	return raw, nextPageLink(resp.Header.Get("Link")), nil
+}
+
+// nextPageLink extracts the rel="next" URL from a GitHub Link header, or "" if
+// there is no next page. Header shape:
+// `<https://api.github.com/...?page=2>; rel="next", <...?page=9>; rel="last"`.
+func nextPageLink(header string) string {
+	if header == "" {
+		return "" // common single-page case
 	}
-	return out, nil
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(part, ";")
+		if len(segs) < 2 {
+			continue
+		}
+		var link, rel string
+		for i, s := range segs {
+			s = strings.TrimSpace(s)
+			if i == 0 {
+				link = strings.TrimSuffix(strings.TrimPrefix(s, "<"), ">")
+				continue
+			}
+			if r, ok := strings.CutPrefix(s, "rel="); ok {
+				rel = strings.Trim(r, `"`)
+			}
+		}
+		if rel == "next" {
+			return link
+		}
+	}
+	return ""
 }
 
 // snippet trims an error body for a log-safe message.

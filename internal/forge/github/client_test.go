@@ -117,6 +117,48 @@ func TestListCommentsMapsAndOrders(t *testing.T) {
 	}
 }
 
+// ListComments follows pagination to exhaustion: a busy thread's LATEST comment is
+// on the last page, so a single-page read would return stale context. Two pages
+// via the Link header; the newest comment (page 2) must be present and last.
+func TestListCommentsPaginatesToLastPage(t *testing.T) {
+	var pagesServed int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "2":
+			pagesServed++
+			// Last page — no Link: rel="next".
+			_, _ = w.Write([]byte(`[{"id":3,"body":"the latest instruction","user":{"login":"maintainer"}}]`))
+		default: // page 1 (or unset)
+			pagesServed++
+			// Point rel="next" at page 2 on THIS test server.
+			w.Header().Set("Link", `<`+srvURL(r)+`/x?page=2>; rel="next", <`+srvURL(r)+`/x?page=2>; rel="last"`)
+			_, _ = w.Write([]byte(`[{"id":1,"body":"first","user":{"login":"alice"}},{"id":2,"body":"second","user":{"login":"bob"}}]`))
+		}
+	}))
+	defer srv.Close()
+
+	got, err := NewClient("t").WithBaseURL(srv.URL).ListComments(context.Background(), "octo", "repo", 7)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	if pagesServed < 2 {
+		t.Fatalf("only %d page(s) fetched; pagination did not follow rel=next", pagesServed)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d comments across pages, want 3: %+v", len(got), got)
+	}
+	if got[2].Body != "the latest instruction" || got[2].Author != "maintainer" {
+		t.Errorf("the latest comment (page 2) is missing or out of order: %+v", got)
+	}
+}
+
+// srvURL reconstructs the test server's base URL from a request (scheme is http
+// for httptest), so a handler can build a rel="next" Link that points back at
+// itself.
+func srvURL(r *http.Request) string {
+	return "http://" + r.Host
+}
+
 // A non-200 is a loud error, not an empty list; no token is a loud error.
 func TestListCommentsErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
