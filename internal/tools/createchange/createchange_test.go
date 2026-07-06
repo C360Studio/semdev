@@ -9,23 +9,24 @@ import (
 	"github.com/c360studio/semstreams/message"
 )
 
-// fakePublisher records the triples a tool writes, so the fact-emission path is
-// testable without a live NATS graph.
-type fakePublisher struct {
-	batches [][]message.Triple
+// fakeWriter records replace calls and returns a scripted prior owned package, so
+// the replace-by-predicate path is testable without a live NATS graph.
+type fakeWriter struct {
+	owned    []string // what ReadOwnedPredicates returns (the prior package)
+	replaces []replaceCall
 }
 
-func (f *fakePublisher) CreateEntityWithTriples(_ context.Context, _ string, _ message.Type, triples []message.Triple) error {
-	f.batches = append(f.batches, triples)
+type replaceCall struct {
+	add    []message.Triple
+	remove []string
+}
+
+func (f *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, remove []string) error {
+	f.replaces = append(f.replaces, replaceCall{add: add, remove: remove})
 	return nil
 }
-func (f *fakePublisher) AddTriple(_ context.Context, t message.Triple) error {
-	f.batches = append(f.batches, []message.Triple{t})
-	return nil
-}
-func (f *fakePublisher) AddTriplesBatch(_ context.Context, triples []message.Triple) error {
-	f.batches = append(f.batches, triples)
-	return nil
+func (f *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) ([]string, error) {
+	return f.owned, nil
 }
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -60,21 +61,24 @@ func sampleCall() agentic.ToolCall {
 	}
 }
 
-// The tool stamps openspec.change.* facts, all on the RUN entity (D15), and never
-// an outcome fact.
+// The tool stamps openspec.change.* facts, all on the RUN entity (D15), tagged
+// with the vocab writer Source, and never an outcome fact.
 func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
-	pub := &fakePublisher{}
-	res, err := New(pub, nil).Execute(context.Background(), sampleCall())
+	w := &fakeWriter{}
+	res, err := New(w, nil).Execute(context.Background(), sampleCall())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
-	if len(pub.batches) != 1 {
-		t.Fatalf("expected one atomic batch, got %d", len(pub.batches))
+	if !res.StopLoop {
+		t.Error("author result should set StopLoop so a re-author is not auto-triggered in-loop")
 	}
-	triples := pub.batches[0]
+	if len(w.replaces) != 1 {
+		t.Fatalf("expected one replace mutation, got %d", len(w.replaces))
+	}
+	triples := w.replaces[0].add
 	if len(triples) == 0 {
 		t.Fatal("no triples stamped")
 	}
@@ -86,6 +90,9 @@ func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 		}
 		if !strings.HasPrefix(tr.Predicate, "openspec.change.") {
 			t.Errorf("predicate %q is not under openspec.change.*", tr.Predicate)
+		}
+		if tr.Source != Source {
+			t.Errorf("triple Source = %q, want the vocab writer %q (G5)", tr.Source, Source)
 		}
 		if strings.Contains(tr.Predicate, "outcome") || strings.HasSuffix(tr.Predicate, ".validated") || strings.HasSuffix(tr.Predicate, ".pass") {
 			t.Errorf("tool stamped an outcome-shaped fact %q (G3 violation)", tr.Predicate)
@@ -110,21 +117,56 @@ func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 	}
 }
 
+// Re-author REPLACES the owned package: the prior predicates are cleared (passed
+// as removePredicates) so a shrunk/renamed re-author leaves no phantom facts.
+func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
+	prior := []string{
+		"openspec.change.fix-null-deref.task.9.text",   // a task that no longer exists
+		"openspec.change.fix-null-deref.delta.handler.old-req.statement",
+	}
+	w := &fakeWriter{owned: prior}
+	res, err := New(w, nil).Execute(context.Background(), sampleCall())
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	if len(w.replaces) != 1 {
+		t.Fatalf("expected one replace mutation, got %d", len(w.replaces))
+	}
+	got := w.replaces[0].remove
+	for _, p := range prior {
+		if !contains(got, p) {
+			t.Errorf("re-author did not clear prior owned predicate %q — a phantom fact would linger", p)
+		}
+	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Missing run-entity metadata fails loudly (the silent-subject trap).
 func TestCreateChangeFailsWithoutRunEntity(t *testing.T) {
 	call := sampleCall()
 	call.Metadata = nil
-	res, _ := New(&fakePublisher{}, nil).Execute(context.Background(), call)
+	res, _ := New(&fakeWriter{}, nil).Execute(context.Background(), call)
 	if res.Error == "" {
 		t.Error("expected an error when agent.run_entity_id is missing")
 	}
 }
 
-// A nil publisher fails loudly rather than dropping facts.
-func TestCreateChangeFailsWithoutPublisher(t *testing.T) {
+// A nil writer fails loudly rather than dropping facts.
+func TestCreateChangeFailsWithoutWriter(t *testing.T) {
 	res, _ := New(nil, nil).Execute(context.Background(), sampleCall())
 	if res.Error == "" {
-		t.Error("expected an error when no publisher is wired")
+		t.Error("expected an error when no owned-fact writer is wired")
 	}
 }
 

@@ -1,9 +1,16 @@
-// Package boot centralizes component registration for semdev's binaries. Both
-// cmd/semdev and cmd/e2e-semdev MUST register components through RegisterAll and
-// nothing else: a component present in one binary but not the other is the
+// Package boot centralizes registration for semdev's binaries. Both cmd/semdev
+// and cmd/e2e-semdev MUST register components through RegisterAll and nothing
+// else: a component present in one binary but not the other is the
 // half-wired-binary silent-flow-break class — it compiles, passes review, and
 // then drops facts on the floor in the binary that skipped it. One function, two
 // callers, identical registration by construction.
+//
+// RegisterTools (the agentic tool registry) and RegisterLifecycle (the run-entity
+// workflow) are SEPARATE seams: they need a live NATS client / lifecycle Manager,
+// so they cannot sit in the static RegisterAll(reg) call and are wired into a
+// shared runtime-boot path at group 11 — guarded by a binary-parity pin like the
+// one RegisterAll already carries, so a binary cannot wire one and forget the
+// other. Until then they are exercised only by the conformance censuses.
 package boot
 
 import (
@@ -42,15 +49,18 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
 
-	// A fact-writing tool holds a TriplePublisher built from the NATS client. When
-	// there is no client (the schema-scanning censuses), the publisher is nil and
-	// the tool registers schema-only; its Execute fails loudly if ever called
-	// without one, so a fact is never silently dropped.
-	var publisher agentictools.TriplePublisher
+	// A tool that OWNS a mutable fact package holds an OwnedFactWriter (replace-by-
+	// predicate) built from the NATS client. When there is no client (the
+	// schema-scanning censuses), the writer is nil and the tool registers
+	// schema-only; its Execute fails loudly if ever called without one, so a fact
+	// is never silently dropped. RegisterExecutor derives the tool name from the
+	// executor's own ListTools, so the registered name cannot drift from its
+	// advertised schema.
+	var changeWriter agentictools.OwnedFactWriter
 	if deps.NATSClient != nil {
-		publisher = agentictools.NewNATSTriplePublisher(deps.NATSClient)
+		changeWriter = agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
 	}
-	if err := reg.RegisterTool(createchange.ToolName, createchange.New(publisher, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(createchange.New(changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", createchange.ToolName, err)
 	}
 	// More semdev tools register here as later groups add them (measurement,

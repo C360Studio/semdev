@@ -3,6 +3,7 @@ package conformance
 import (
 	"testing"
 
+	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/vocab"
 )
 
@@ -22,6 +23,31 @@ func TestSingleWriterPerPredicate(t *testing.T) {
 	}
 	for _, v := range namespaceWriterViolations(vocab.Predicates) {
 		t.Error(v)
+	}
+}
+
+// G5 verifiability — the Source a fact-writing tool stamps on its triples must
+// equal the single writer the vocab declares for that tool's predicate namespace.
+// Without this the sole-writer claim is a table string nothing ties to what
+// actually lands on the graph — the "sole writer was a false comment" disease.
+// One entry per fact-writing tool.
+func TestToolSourceMatchesVocabWriter(t *testing.T) {
+	cases := []struct {
+		tool      string
+		source    string
+		predicate string // any predicate under the tool's namespace
+	}{
+		{"create_change", createchange.Source, "openspec.change.example.proposal.intent"},
+	}
+	for _, c := range cases {
+		writer, ok := vocab.WriterOf(c.predicate)
+		if !ok {
+			t.Errorf("%s: predicate %q has no vocab writer", c.tool, c.predicate)
+			continue
+		}
+		if c.source != writer {
+			t.Errorf("%s stamps Source %q but vocab declares writer %q for %q — G5 unverifiable drift", c.tool, c.source, writer, c.predicate)
+		}
 	}
 }
 
