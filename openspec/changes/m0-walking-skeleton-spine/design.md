@@ -267,6 +267,23 @@ packs; run-creation-on-intake is `forge-io` (group 5); live firing is proven in
 the group-11 journey. Four contracts fall out of that split and are pinned here
 so a later group cannot break them silently:
 
+0. **Re-authored changes must be re-validated before the gate reads
+   `openspec.validated`.** `create_change` REPLACES `openspec.change.*` on a
+   re-author, but G5 forbids it (or any tool but the validate harness) from
+   touching `openspec.validated` — and `validate_change` is not invoked on
+   re-author, so *no writer clears the marker when the change content changes*.
+   The marker's value is the slug (stable across content edits), so it cannot
+   self-detect a re-author. If any rework path re-authors and the change-approval
+   gate re-reads `openspec.validated` before a fresh `validate_change` runs, a
+   **stale pass gates a superseded change version silently.** The invariant
+   "a re-authored change is re-validated before the gate evaluates" MUST be owned
+   by the run-lifecycle rule ordering / coordinator flow (group 5 gate wiring,
+   proven in the group-11 journey) and carry a red-first pin. Candidate hardening
+   when the gate is wired: stamp the marker's *value* as a change content-revision
+   (not the slug) so the gate can require a value-match and a re-author
+   self-invalidates. Surfaced by the 4.4 semstreams-review; tracked, not a 4.4
+   defect (4.4 correctly cannot fix it under G5).
+
 1. **Run-scoped facts.** Rules fire against the *firing entity's* triples, and
    the lifecycle rules fire on the run (they match `agent.run.phase`). So the
    milestone facts those rules gate on — `openspec.validated` (group 4),

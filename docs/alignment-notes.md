@@ -99,6 +99,33 @@ Template:
 - **Registry entry:** `validate_change` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## archive-change-cli-oracle
+
+- **Primitive considered:** a rule that folds a merged change's deltas into the
+  living specs, or re-implementing `openspec archive`'s spec-merge in Go.
+- **Why it cannot express this:** the loop-closer that keeps the target repo's
+  specs truthful (G10) must be the SPONSOR's own archiver (the second CLI oracle
+  alongside `validate`, D11/D14) — semdev shells `openspec archive <change> -y
+  --json` and stamps `openspec.archived` from the real exit code, never a
+  re-implementation (which would drift from the CLI and forfeit the compatibility
+  claim). Verified invocation: it moves the change to
+  `openspec/changes/archive/<date>-<slug>/` and folds its deltas into
+  `openspec/specs/` (`"specsUpdated": true`). Key contrast with `validate_change`:
+  the validator runs against a **throwaway temp** materialization (a read-only
+  oracle over the graph), but the archiver **mutates the real checkout** — it
+  rewrites the repo's living specs, which are then committed — so at M1 it runs
+  against the run's actual workspace, not a temp. Harness-stamped (G3: exit code,
+  not a model outcome); single G5 writer of `openspec.archived`
+  (`openspec-archive-harness`).
+- **Registry entry:** none yet — **DESIGN-ONLY at M0** (this note declares the
+  shell path). The live archive call and its merge-event trigger land at M1: the
+  `archive_change` action + `openspec.archived` fact + the disabled loop-closer
+  rule (`configs/rules/run-lifecycle/04-archive-change-loop-closer.json`) are
+  already declared (task 3.9), and M1 wires the forge-io PR-merged trigger, enables
+  the rule, and registers the archive tool (mirroring `validate_change` over
+  `internal/cliexec`). The M0 mock journey terminates at `open_pr` (`pr.ref`).
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's

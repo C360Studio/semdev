@@ -38,7 +38,7 @@
 - [x] 4.5 `WriteChange`-to-workspace tool: write the change folder into the target repo for the PR (via an injected `WorkspaceResolver` seam; slug path-guarded)
 - [x] 4.6 Brownfield projector: deterministic parse of an existing `openspec/specs/` → `openspec.spec.*` facts under one owner (no LLM); retain raw bytes by reference. In-flight `changes/` NOT ingested (G5: single-writer `openspec.change.*`)
 - [x] 4.7 Round-trip fidelity test (red-first): ingest semdev's own `m0` change → facts → hydrate → semantically equivalent
-- [ ] 4.8 Archive CLI-oracle (parallel to validate): design the `openspec archive` shell path; `openspec.archived` harness-stamped, single writer (G3/G5). M0 declares the shell path; M1 wires the merge trigger + live call
+- [x] 4.8 Archive CLI-oracle (parallel to validate): designed the `openspec archive <change> -y --json` shell path (verified: moves change→archive/, folds deltas into specs/; mutates the REAL checkout, unlike validate's throwaway temp); `openspec.archived` harness-stamped, single writer (G3/G5). M0 declares the shell path (alignment note); M1 wires the merge trigger + live call + tool registration
 
 ## 5. forge-io (T7, S5) + intake security
 
