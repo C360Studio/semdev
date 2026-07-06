@@ -52,15 +52,18 @@ run. The arc SHALL NOT contain a bespoke chat surface.
 
 The system SHALL create a run, spend budget, or steer an existing run only in
 response to an event whose code-host actor (`intake.actor`) is authorized — a
-repository collaborator or a member of an explicit allowlist — and whose work is
-explicitly opted in by a `semdev` label or `/semdev` command applied by an
-authorized actor. Admission SHALL be a deterministic, zero-token check recorded
+**push-capable** repository collaborator (write, maintain, or admin permission) or
+a member of an explicit allowlist — and whose work is explicitly opted in by a
+`semdev` label or `/semdev` command applied by that same authorized actor. A
+read- or triage-only viewer is not authorized to spend budget; the allowlist is
+the explicit escape hatch for any actor the operator trusts regardless of repo
+permission. Admission SHALL be a deterministic, zero-token check recorded
 as `intake.admitted` that runs before any run is created and before any paid
 token is spent; a rejected event creates no run and, by default, receives no
 reply.
 
 #### Scenario: Authorized, opted-in issue is admitted
-- **WHEN** an issue is labeled `semdev` (or carries a `/semdev` command) by a repository collaborator or allowlisted actor
+- **WHEN** an issue is labeled `semdev` (or carries a `/semdev` command) by a push-capable repository collaborator or allowlisted actor
 - **THEN** `intake.admitted` is recorded and a run is created
 
 #### Scenario: Unauthorized actor is rejected at zero token cost
