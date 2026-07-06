@@ -34,8 +34,15 @@ Template:
 - **Change:** <change-slug>
 ```
 
-## Notes
+## create-change-author-tool
 
-_None yet._ The M0 walking-skeleton spine adds no Go components — the arc is rule
-packs, persona fragments, and reused framework tools. The first notes land when a
-later capability group introduces G1-gated Go.
+- **Primitive considered:** a rule that authors the OpenSpec change directly, or
+  the reused framework `decide`/agentic tools.
+- **Why it cannot express this:** authoring a change means turning a model's
+  structured content into the full `openspec.change.*` fact set via the OpenSpec
+  format engine (`internal/openspec`), then stamping it atomically on the run
+  entity. That is a deterministic mapping + a graph write no rule or generic tool
+  performs; the engine mapping is code (ported, dep-free), and the tool is the
+  single G5 writer of `openspec.change.*`. Its schema takes content only (G3).
+- **Registry entry:** `create_change` (`tool`)
+- **Change:** m0-walking-skeleton-spine

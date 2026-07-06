@@ -32,7 +32,7 @@
 ## 4. openspec-io (port format engine; hydrate / ingest / oracle)
 
 - [x] 4.1 Port semteams `cmd/semteams/openspec/` as a dep-free Go library (parse/render/`ReadChange`/`WriteChange`/`Facts`); re-vocabulary to semdev predicates (G9)
-- [ ] 4.2 `create_change` author tool: emit `openspec.change.*` facts from an intaken issue (mock LLM)
+- [x] 4.2 `create_change` author tool: emit `openspec.change.*` facts from an intaken issue (mock LLM)
 - [ ] 4.3 Hydrate tool: render `proposal`/`specs`/`tasks` from `openspec.change.*` facts (G10 — projection of facts, not hand-authored)
 - [ ] 4.4 CLI-validate step: shell `openspec validate <change> --strict --json --no-interactive` (explicit change target — the bare form is interactive-only and fails non-interactively); harness stamps `openspec.validated`; invalid → does not reach approval gate
 - [ ] 4.5 `WriteChange`-to-workspace tool: write the change folder into the target repo for the PR

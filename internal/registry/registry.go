@@ -32,8 +32,10 @@ type Entry struct {
 	AlignmentNote string
 }
 
-// Entries is semdev's own component/tool inventory. Empty at M0.
-var Entries []Entry
+// Entries is semdev's own component/tool inventory.
+var Entries = []Entry{
+	{Name: "create_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "create-change-author-tool"},
+}
 
 // ComponentNames returns the declared names of Entries of KindComponent.
 func ComponentNames() map[string]bool {

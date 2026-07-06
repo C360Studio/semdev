@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/componentregistry"
@@ -40,8 +41,20 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
-	// semdev's own tool executors register here as later groups add them (task
-	// 7.1 measurement, floor tools) — each G1-gated and G3-scanned.
+
+	// A fact-writing tool holds a TriplePublisher built from the NATS client. When
+	// there is no client (the schema-scanning censuses), the publisher is nil and
+	// the tool registers schema-only; its Execute fails loudly if ever called
+	// without one, so a fact is never silently dropped.
+	var publisher agentictools.TriplePublisher
+	if deps.NATSClient != nil {
+		publisher = agentictools.NewNATSTriplePublisher(deps.NATSClient)
+	}
+	if err := reg.RegisterTool(createchange.ToolName, createchange.New(publisher, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", createchange.ToolName, err)
+	}
+	// More semdev tools register here as later groups add them (measurement,
+	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.
 	return nil
 }
 
