@@ -20,6 +20,7 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
+	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/componentregistry"
@@ -75,6 +76,16 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	}
 	if err := reg.RegisterExecutor(hydratechange.New(factReader, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", hydratechange.ToolName, err)
+	}
+
+	// write_change materializes the change to the run's target-repo workspace. The
+	// workspace resolver (which locates the run's checkout) is forge-io / clean-room
+	// runtime state (groups 5/8), so it is nil here; the tool registers schema-only
+	// and fails loudly if executed without one, and the group-11 journey injects a
+	// real resolver.
+	var workspace writechange.WorkspaceResolver // nil until the checkout seam lands
+	if err := reg.RegisterExecutor(writechange.New(factReader, workspace, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", writechange.ToolName, err)
 	}
 	// More semdev tools register here as later groups add them (measurement,
 	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.

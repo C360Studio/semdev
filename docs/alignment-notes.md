@@ -65,6 +65,23 @@ Template:
 - **Registry entry:** `render_openspec` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## write-change-workspace-tool
+
+- **Primitive considered:** a rule that reads `$entity.triple.openspec.change.*`
+  and `publish`es to an `output/file` component to drop the change folder on disk.
+- **Why it cannot express this:** materializing an OpenSpec change is a multi-file
+  filesystem write — `proposal.md`, `tasks.md`, and one `specs/<capability>/spec.md`
+  per delta — reconstructed from the flat fact set (`ChangeFromFacts`) and
+  serialized by the format engine's `WriteChange`, which also prunes stale managed
+  files. A rule's single-value `publish` cannot re-group deltas by capability, walk
+  a variable set of capability files, or drive the authoritative directory
+  rewrite. It is a graph-READ tool (a `changefacts.Reader`) plus the deterministic
+  `WriteChange`; it stamps no facts (no G5 writer) and its schema takes only the
+  change slug (G3). WHERE it writes is the run's checkout, resolved through an
+  injected `WorkspaceResolver` seam rather than any workspace state of its own (B1).
+- **Registry entry:** `write_change` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's
