@@ -8,10 +8,10 @@
 
 ## 2. Conformance registries + pins (land first, red-first)
 
-- [ ] 2.1 Tools registry (G1) + conformance test: an unregistered tool/processor fails the build; **binary-parity pin**: assert `cmd/semdev` and `cmd/e2e-semdev` register an identical factory set (guards the half-wired-binary class against a future direct registration bypassing `boot.RegisterAll`)
-- [ ] 2.2 Framework-alignment-note format (G1); each new Go addition links its note in the registry
-- [ ] 2.3 Single-writer table (G5) + writers-census test: every predicate maps to exactly one writer
-- [ ] 2.4 Predicate → introducing-change table (G9) + exhaustiveness test: an undeclared predicate fails
+- [x] 2.1 Tools registry (G1) + conformance test: an unregistered tool/processor fails the build; **binary-parity pin**: assert `cmd/semdev` and `cmd/e2e-semdev` register an identical factory set (guards the half-wired-binary class against a future direct registration bypassing `boot.RegisterAll`)
+- [x] 2.2 Framework-alignment-note format (G1); each new Go addition links its note in the registry
+- [x] 2.3 Single-writer table (G5) + writers-census test: every predicate maps to exactly one writer
+- [x] 2.4 Predicate → introducing-change table (G9) + exhaustiveness test: an undeclared predicate fails
 - [ ] 2.5 G2 conformance test (red-first): zero lifecycle-transition callers in product Go (exception table, target 0)
 - [ ] 2.6 G3 schema conformance test (red-first): reject any tool schema accepting an outcome-shaped field
 - [ ] 2.7 Evidence-ledger schema (G7) + schema-validation test; regression-pin manifest (G6): deleting a named pin fails
@@ -19,7 +19,7 @@
 
 ## 3. run-lifecycle (G2, T1)
 
-- [ ] 3.1 Closed action taxonomy config (issue_intake, create_change, dev_from_task, verify, open_pr, ask_human, respond); no phase enum
+- [ ] 3.1 Closed action taxonomy config (issue_intake, create_change, dev_from_task, verify, open_pr, ask_human, respond, archive_change) mirroring the OpenSpec lifecycle; no phase enum. **verify = clean-room outcome (G4) only; coherence is structural (`openspec.validated` + derived completion + `review.verdict`), no separate coherence action**
 - [ ] 3.2 `agentic/agentrun` as the run entity; run created carrying `run.issue_ref`
 - [ ] 3.3 Persona fragments — Sarah (coordinator), Amelia (dev), Quinn (reviewer); cosmetic, never fact-writers
 - [ ] 3.4 Lifecycle-transition rules (phase-as-fact / `lifecycle_transition`): each station→next fires off a milestone fact
@@ -27,6 +27,7 @@
 - [ ] 3.6 Park-toward-human rule: `run.awaiting_human` on unresolvable-by-rule; no Go reconciler advances a parked run
 - [ ] 3.7 Validate-gate wiring: `openspec.validated` must be present before the change-approval gate is offered (create_change → validate → approval ordering)
 - [ ] 3.8 Test: an out-of-taxonomy action is not routable — no rule routes it and the condition surfaces for attention
+- [ ] 3.9 `archive_change` loop-closer (design-now, wire-M1): declare the action + `openspec.archived` fact and design the merge-triggered rule; assert the M0 mock journey terminates at `open_pr` (`pr.ref`) and the merge trigger + live archive land at M1
 
 ## 4. openspec-io (port format engine; hydrate / ingest / oracle)
 
@@ -37,6 +38,7 @@
 - [ ] 4.5 `WriteChange`-to-workspace tool: write the change folder into the target repo for the PR
 - [ ] 4.6 Brownfield projector: deterministic parse of an existing `openspec/` → facts under one owner (no LLM); retain raw bytes by reference
 - [ ] 4.7 Round-trip fidelity test (red-first): ingest semdev's own `m0` change → facts → hydrate → semantically equivalent
+- [ ] 4.8 Archive CLI-oracle (parallel to validate): design the `openspec archive` shell path; `openspec.archived` harness-stamped, single writer (G3/G5). M0 declares the shell path; M1 wires the merge trigger + live call
 
 ## 5. forge-io (T7, S5) + intake security
 

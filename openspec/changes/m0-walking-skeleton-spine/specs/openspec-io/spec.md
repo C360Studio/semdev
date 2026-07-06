@@ -28,6 +28,21 @@ harness that ran the validator (`openspec.validated`), never by a model.
 - **WHEN** a generated change passes `openspec validate --strict`
 - **THEN** the harness that ran the validator records `openspec.validated` for the change
 
+### Requirement: Archiving folds the merged change back into the specs via the CLI
+
+The "back to OpenSpec" step SHALL fold a merged change's spec deltas into the
+target repository's living specs by shelling the real OpenSpec CLI
+(`openspec archive`) — the second deterministic CLI oracle alongside `validate`.
+The pass/fail SHALL be stamped by the harness that ran the archiver
+(`openspec.archived`), never by a model, and semdev SHALL NOT re-implement the
+CLI's archive rules. At M0 the fact and the shell path are declared; the
+merge-event trigger and the live archive call are wired at M1.
+
+#### Scenario: A merged change is archived by the sponsor's own tool
+- **WHEN** a delivered change's PR is merged (M1 trigger)
+- **THEN** `openspec archive` is shelled and the harness records `openspec.archived`
+- **AND** semdev does not substitute a re-implementation of the CLI's archive rules
+
 ### Requirement: Brownfield OpenSpec artifacts are ingested deterministically
 
 The system SHALL read existing OpenSpec artifacts in a target repository's

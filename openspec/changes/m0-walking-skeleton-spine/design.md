@@ -209,6 +209,7 @@ is the checked-in artifact the G5/G9 pins compare against.
 | `pr.ref` | PR-delivery adapter | forge-io |
 | `openspec.change.*` | create_change author tool | openspec-io |
 | `openspec.validated` | harness running `openspec validate` | openspec-io |
+| `openspec.archived` | harness running `openspec archive` | openspec-io |
 | `task.spec` | task projector | dev-from-task |
 | `task.attempt` | dev-loop harness | dev-from-task |
 | `floor.finding` | floor tools | dev-from-task |
@@ -223,6 +224,37 @@ All four beta.115-era suspicions are closed; fan-out/fan-in exist. The only
 narrow expressiveness limit (cross-entity aggregate in a `when`-clause) is a
 fan-in detail and does not bind serial v1. If a real gap appears, the move is:
 file the upstream ask, park toward the human, record it — never a Go workaround.
+
+### D14 — The taxonomy mirrors the proven OpenSpec lifecycle (structure + HITL + substrate)
+
+semdev does not invent a workflow; it wraps the proven OpenSpec lifecycle
+(`new → apply → verify → archive`) with a closed-taxonomy **structure**, **human
+gates + observability**, and a **graph-backed fact substrate**. The test of the
+taxonomy is that every OpenSpec checkpoint maps to a semdev action or fact:
+
+| OpenSpec checkpoint | semdev action / fact | Kind |
+|---|---|---|
+| `new` | `create_change` → `openspec.change.*` | LLM-authored, hydrated from graph |
+| `validate` | validate sub-step → `openspec.validated` | deterministic CLI oracle |
+| `apply` | `dev_from_task` → `task.spec`/`task.attempt` | bounded loop |
+| `verify` (coherence) | *structural* — `openspec.validated` + derived completion + `review.verdict` | no separate action |
+| — (outcome, G4) | `verify` → `verify.result` | deterministic clean-room harness |
+| `archive` | `archive_change` → `openspec.archived` | deterministic CLI oracle (M1-wired) |
+
+semdev's own additions to the wrapper are `issue_intake` (front door),
+`open_pr` (delivery — OpenSpec is local-only), and `ask_human`/`respond` (HITL).
+
+Two forks were resolved here. **Verify is split**: the `verify` action means
+clean-room *outcome* verification only; OpenSpec's coherence-verify collapses
+into the structural triad above, because `task.spec` is the approved change
+projected immutably and cannot drift from it (a graph property OpenSpec's manual
+step compensates for by hand). **`validate` and `archive` are the two
+deterministic CLI oracles** semdev shells rather than re-implements (D11) — the
+honest "the sponsor's own tool blessed this" claim on both the way in and the way
+out. `archive_change` is designed at M0 (action + fact + rule) and wired to a
+merge-event trigger at M1; the M0 mock journey terminates at `open_pr`.
+*Alternative rejected:* a parallel semdev verifier/archiver (re-implements the
+proven oracle, invites drift, and forfeits the compatibility claim).
 
 ## Risks / Trade-offs
 

@@ -1,0 +1,45 @@
+// Package registry is semdev's checked-in inventory of its OWN components and
+// tools (G1 — primitive-first). semstreams' framework components are not listed
+// here; only Go that semdev adds. Every entry links a framework-alignment note:
+// which primitive was considered and why it cannot express the behavior. The G1
+// conformance pin fails the build if semdev registers a component the framework
+// did not provide without a matching entry, or if an entry points at a note that
+// does not exist.
+//
+// semdev starts empty on purpose: the M0 spine is rule packs, persona fragments,
+// and reused framework tools — no new Go components. Entries land here as later
+// capability groups introduce G1-gated Go, each with its alignment note.
+package registry
+
+// Kind distinguishes a registered semstreams component from an agentic tool
+// executor — the two surfaces the G1 census enumerates separately.
+type Kind string
+
+const (
+	KindComponent Kind = "component"
+	KindTool      Kind = "tool"
+)
+
+// Entry is one semdev-owned component or tool. Name is the registered factory or
+// tool name; AlignmentNote is the section anchor of its note in
+// docs/alignment-notes.md (e.g. "measurement-tool").
+type Entry struct {
+	Name          string
+	Kind          Kind
+	Capability    string
+	AlignmentNote string
+}
+
+// Entries is semdev's own component/tool inventory. Empty at M0.
+var Entries []Entry
+
+// ComponentNames returns the declared names of Entries of KindComponent.
+func ComponentNames() map[string]bool {
+	out := make(map[string]bool)
+	for _, e := range Entries {
+		if e.Kind == KindComponent {
+			out[e.Name] = true
+		}
+	}
+	return out
+}

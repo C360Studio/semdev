@@ -18,9 +18,13 @@ rung of the milestone ladder.
   deterministic floors + semantic review → clean-room verification in fresh
   isolation → PR delivery — driven by a mock LLM against a single fixture repo.
 - The arc is expressed as **rules matching facts**, never product Go firing
-  transitions (G2). Its action vocabulary is a closed taxonomy (T1): issue
-  intake, create_change, dev_from_task, verify, open_pr, ask_human, respond —
-  no phase enum, no Go terminal detector.
+  transitions (G2). Its action vocabulary is a closed taxonomy (T1) that mirrors
+  the proven OpenSpec lifecycle (`new → apply → verify → archive`): issue intake,
+  create_change (`new`), dev_from_task (`apply`), verify (clean-room outcome),
+  open_pr, ask_human, respond, archive_change (`archive` — the "back to OpenSpec"
+  loop-closer) — no phase enum, no Go terminal detector. semdev wraps a proven
+  workflow rather than re-implementing one; `archive_change` is designed at M0
+  and merge-triggered at M1.
 - Land the load-bearing pins, **red-first** where applicable:
   - **G2** — conformance test asserts zero lifecycle-transition callers in
     product Go (target 0).

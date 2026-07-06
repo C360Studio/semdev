@@ -33,6 +33,45 @@ contributes — and what is banned from crossing — is specified precisely in
 re-growing semspec's complexity are law in
 [docs/constitution.md](constitution.md).
 
+## What semdev adds to OpenSpec (why not vanilla OpenSpec?)
+
+OpenSpec is a proven workflow — `new → apply → verify → archive`, spec-driven and
+CLI-blessed — and semdev deliberately does **not** re-implement it. semdev
+*wraps* the proven lifecycle with the three things a spec workflow alone does not
+give you, which together answer "why not just run OpenSpec by hand?":
+
+- **An autonomous runner.** Vanilla OpenSpec is human-driven — a person invokes
+  each command in turn. semdev drives the whole lifecycle from a GitHub issue to
+  a delivered PR, unattended between its two human gates: `create_change` is
+  `openspec new`, `dev_from_task` is `openspec apply`, run by a bounded dev loop
+  over immutable spec-projected tasks, and `archive_change` is `openspec archive`
+  — the "back to OpenSpec" loop-closer that keeps the repo's specs truthful.
+- **Human gates + total observability.** Two explicit approval points (the
+  generated change, then the PR) and a full, durable trajectory per run —
+  prompts, tool calls, every fact written, budgets spent — rendered on demand as
+  a static-site audit archive. The workflow becomes inspectable, not just
+  executable.
+- **A graph-backed fact substrate.** The run's state lives as facts in the
+  graph, not in prose: one writer per fact (G5), a minimal declared vocabulary
+  (G9), and outcomes stamped by the harness that ran the command, never by the
+  model (G3). OpenSpec's documents become projections of that graph (G10), so the
+  specs cannot drift from what happened. This is what makes coherence
+  *structural* rather than a manual re-check: `task.spec` is the approved change
+  projected immutably, so the implementation cannot silently diverge from the
+  plan — OpenSpec's manual `verify` step is doing by hand what the substrate does
+  by construction.
+- **Verification floors and a clean room.** Deterministic floors (fabrication,
+  vacuous tests, scope drift — zero tokens) plus a terminal clean-room build/test
+  in fresh isolation (G4) gate delivery. OpenSpec validates that a change is
+  *well-formed*; semdev additionally proves the change's artifact *actually
+  builds and passes its own tests* before a PR opens.
+
+The compatibility contract is honest: `validate` and `archive` are shelled to
+the **real OpenSpec CLI** as deterministic oracles, never re-implemented — so
+"OpenSpec-compatible" is a claim the sponsor's own tool asserts, on the way in
+and the way out. semdev's value is the structure, the gates, the substrate, and
+the floors around a workflow that already works.
+
 ## Product shape (v1)
 
 - **Input**: a GitHub issue on a target repository.

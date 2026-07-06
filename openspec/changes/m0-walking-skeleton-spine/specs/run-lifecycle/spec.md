@@ -34,12 +34,50 @@ toward the human (see "Park toward the human"), never advance the run from Go.
 
 The rule layer SHALL consume only a closed set of actions:
 `issue_intake`, `create_change`, `dev_from_task`, `verify`, `open_pr`,
-`ask_human`, `respond`. No other action value is routable, and no phase enum is
-introduced.
+`ask_human`, `respond`, `archive_change`. No other action value is routable, and
+no phase enum is introduced.
+
+The taxonomy mirrors the proven OpenSpec lifecycle wrapped with semdev's human
+gates and delivery: `create_change` is `openspec new`, `dev_from_task` is
+`openspec apply`, `verify` is the clean-room outcome gate, and `archive_change`
+is `openspec archive` — with `issue_intake`, `open_pr`, `ask_human`, and
+`respond` as semdev's front-door, delivery, and HITL additions. Every OpenSpec
+checkpoint maps to an action or a fact; semdev does not re-implement the workflow.
 
 #### Scenario: An out-of-taxonomy action is not routable
 - **WHEN** a fact requests an action outside the closed taxonomy
 - **THEN** no rule routes it and the condition surfaces for human attention
+
+### Requirement: Verify is outcome verification; coherence is structural
+
+The `verify` action SHALL mean clean-room outcome verification (G4): the
+artifact builds and passes its own tests in fresh isolation, recorded as
+`verify.result`. semdev SHALL NOT introduce a separate coherence-verify action
+for "does the implementation match the change." Coherence is enforced
+structurally instead — by `openspec.validated` (artifacts well-formed), by task
+status derived from execution markers, and by the semantic `review.verdict` —
+because `task.spec` is the approved change projected immutably and cannot drift
+from it.
+
+#### Scenario: Verify records an outcome, not a coherence judgment
+- **WHEN** the `verify` action runs for a run
+- **THEN** it records `verify.result` from a clean-room build-and-test outcome
+- **AND** no separate coherence-verify action or authoritative coherence fact is written
+
+### Requirement: archive_change closes the loop back to OpenSpec
+
+The `archive_change` action SHALL fold a merged change's spec deltas into the
+target repository's living specs by shelling the real OpenSpec CLI
+(`openspec archive`), stamping `openspec.archived` from the harness that ran it —
+the "back to OpenSpec" step that keeps the specs truthful (G10). At M0 the action
+and its fact are declared and the loop-closer rule is designed; the merge-event
+trigger and the live archive call are wired at M1. The M0 mock journey terminates
+at `open_pr` (`pr.ref`).
+
+#### Scenario: A merged change is archived back into the specs
+- **WHEN** a delivered change's PR is merged (M1 trigger)
+- **THEN** the `archive_change` action shells `openspec archive` and the harness records `openspec.archived`
+- **AND** no model stamps the archive outcome (G3)
 
 ### Requirement: Change-approval human gate
 
