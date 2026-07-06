@@ -33,6 +33,12 @@ rung of the milestone ladder.
 - **Host neutrality**: the arc speaks *issue in → PR out* generically. GitHub
   is the v1 adapter behind a channel-agnostic seam (T7), owned by the `forge-io`
   capability and swappable for other code hosts without touching the arc.
+- **OpenSpec-compatible, graph-first** (the sponsor's one hard requirement): the
+  generated change is produced in real OpenSpec-CLI format so `openspec
+  validate`/`archive` bless it, while the graph stays authoritative and the
+  artifacts are projections of it. Brownfield OpenSpec artifacts (including
+  semdev's own repo on dogfood) are read back to seed the graph — round-trip
+  fidelity is the compatibility test.
 - **Personas port as pattern, re-derived.** Donor persona names (semteams'
   Lisa / Ralph / CBG) are not carried; semteams' "Ralph loop" enters as the
   bounded dev loop (pattern, not name). Persona naming maps to **BMAD** where
@@ -71,9 +77,19 @@ Explicit scope guard — these do **not** enter with the spine:
   an engine gap becomes an upstream semstreams ask plus a documented interim,
   never a silent Go reconciler.
 - `forge-io`: the code-host I/O seam — issue intake in, PR/comment delivery
-  out — behind a channel-agnostic boundary (T7). GitHub is the v1 adapter
-  (re-shaped from semspec's watcher/submitter as tools, not components — S5,
-  G1). The arc never binds to a specific host.
+  out — behind a channel-agnostic boundary (T7), reusing semstreams' existing
+  GitHub tools + webhook input (S5, G1); the arc reads normalized facts and
+  never binds to a specific host. Intake admits only authorized actors — a
+  repository collaborator or allowlisted user, opted in by a `semdev` label or
+  command — rejecting everything else deterministically at zero token cost, so a
+  public front door cannot be spammed into paid runs.
+- `openspec-io`: the bidirectional OpenSpec seam (the sponsor's one hard
+  requirement) — **graph-first**: OpenSpec-format artifacts are *hydrated* from
+  graph facts on the way out (G10-truthful by construction) and brownfield
+  artifacts are *ingested* into graph facts on the way in. Ports semteams' dep-
+  free format engine as a library (parse/render/facts — no new format Go) and
+  shells out to the real OpenSpec CLI as the validation oracle. Owns the seam,
+  its vocabulary, and the round-trip contract; no state machine.
 - `dev-from-task`: an approved OpenSpec change projected into **immutable task
   facts**, run through one bounded dev loop (T2). Karpathy-shaped task schema
   enforced at stamp time — assumptions, non-goals, ≥1 target file, required
@@ -109,8 +125,9 @@ None — semdev starts from zero specs.
   compose (never embedded), plus a mock-LLM harness and the S6 e2e ladder
   discipline (mock ladder green before any real token).
 - **Ports land per the manifest only**: T1, T2, T3, T4, T5, T7, T8 (semteams
-  shape) and S1, S2, S3, S5, S6, S7, S10 (semspec floors). Nothing on the
-  B1–B10 banned list crosses.
+  shape) and S1, S2, S3, S5, S6, S7, S10 (semspec floors); `openspec-io`
+  additionally ports semteams' dep-free OpenSpec format engine (parse/render/
+  facts) as a library. Nothing on the B1–B10 banned list crosses.
 - **New checked-in registries** the pins compare against: the tools registry
   (G1), the single-writer table (G5), the predicate → introducing-change table
   (G9), and the evidence-ledger schema (G7).

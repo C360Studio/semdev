@@ -47,3 +47,31 @@ run. The arc SHALL NOT contain a bespoke chat surface.
 - **WHEN** the `ask_human` action fires for a parked run
 - **THEN** the adapter posts the question as an issue/PR comment
 - **AND** a human reply re-enters as a `human.signal` fact that lets a rule resume the run
+
+### Requirement: Intake is gated to authorized, opted-in actors
+
+The system SHALL create a run, spend budget, or steer an existing run only in
+response to an event whose code-host actor (`intake.actor`) is authorized — a
+repository collaborator or a member of an explicit allowlist — and whose work is
+explicitly opted in by a `semdev` label or `/semdev` command applied by an
+authorized actor. Admission SHALL be a deterministic, zero-token check recorded
+as `intake.admitted` that runs before any run is created and before any paid
+token is spent; a rejected event creates no run and, by default, receives no
+reply.
+
+#### Scenario: Authorized, opted-in issue is admitted
+- **WHEN** an issue is labeled `semdev` (or carries a `/semdev` command) by a repository collaborator or allowlisted actor
+- **THEN** `intake.admitted` is recorded and a run is created
+
+#### Scenario: Unauthorized actor is rejected at zero token cost
+- **WHEN** an issue, comment, or pull-request event arrives from an actor who is neither a collaborator nor on the allowlist
+- **THEN** the event is rejected deterministically before any run is created
+- **AND** no paid token is spent and, by default, no reply is posted
+
+#### Scenario: Authorized but not opted in does not start a run
+- **WHEN** an authorized actor opens an issue without the `semdev` label or `/semdev` command
+- **THEN** no run is created
+
+#### Scenario: Only the authorizing requester steers a run's human gate
+- **WHEN** a comment answering a run's `ask_human` question arrives from an actor other than that run's authorized requester
+- **THEN** it is not routed to the run's human-response gate
