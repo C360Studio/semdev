@@ -49,7 +49,7 @@
 - [ ] 5.5 Inventory + add thin comment tools if missing (`list_comments`/`get_pr`); G1 note each
 - [ ] 5.6 PR delivery carrying the evidence summary; record `pr.ref`
 - [ ] 5.7 `ask_human` posts a comment; `respond` re-enters as `human.signal`; only the authorized requester steers the run's human gate
-- [ ] 5.8 Host-neutrality conformance pin (red-first): a build-failing test that no arc rule references a host-specific predicate/field
+- [x] 5.8 Host-neutrality conformance pin (red-first): a build-failing test that no arc rule references a host-specific predicate/field (`TestNoArcRuleReferencesHostSpecificField`; scans condition fields + action subject/predicate for host names; in the G6 regression manifest)
 
 ## 6. dev-from-task (T2, T3, S1)
 

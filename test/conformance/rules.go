@@ -2,10 +2,57 @@ package conformance
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// hostNames are code-host identifiers that must never appear in an arc rule's
+// predicate positions. The forge-io seam keeps host-awareness in the Go adapter
+// (T7); the arc reacts only to NORMALIZED facts, so a host name in a condition
+// field or an action subject/predicate is host coupling that breaks the
+// swap-the-adapter contract.
+var hostNames = []string{"github", "gitlab", "bitbucket", "gitea"}
+
+// containsHostName returns the host identifier a string embeds (case-insensitive),
+// or "" if none.
+func containsHostName(s string) string {
+	low := strings.ToLower(s)
+	for _, h := range hostNames {
+		if strings.Contains(low, h) {
+			return h
+		}
+	}
+	return ""
+}
+
+// hostSpecificRuleRefs returns a violation message for each PREDICATE POSITION in
+// which an arc rule names a code host — a condition `field` or an action
+// `subject`/`predicate` (the structural positions the host-neutrality requirement
+// covers; action `object` values are data, not predicates, and are not scanned).
+// Empty when every rule is host-neutral. Pure over the parsed rules so the pin can
+// be exercised with synthetic input.
+func hostSpecificRuleRefs(rules []ruleFile) []string {
+	var out []string
+	for _, r := range rules {
+		for _, c := range r.Conditions {
+			if h := containsHostName(c.Field); h != "" {
+				out = append(out, fmt.Sprintf("rule %q condition field %q names host %q", r.ID, c.Field, h))
+			}
+		}
+		actions := append(append([]ruleAction{}, r.OnEnter...), r.OnExit...)
+		for _, a := range actions {
+			if h := containsHostName(a.Subject); h != "" {
+				out = append(out, fmt.Sprintf("rule %q action subject %q names host %q", r.ID, a.Subject, h))
+			}
+			if h := containsHostName(a.Predicate); h != "" {
+				out = append(out, fmt.Sprintf("rule %q action predicate %q names host %q", r.ID, a.Predicate, h))
+			}
+		}
+	}
+	return out
+}
 
 // This file holds the shared loaders for semdev's rule packs and bootstrap
 // config, used by the run-lifecycle contract pins (taxonomy closure, gate

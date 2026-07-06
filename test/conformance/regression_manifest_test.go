@@ -42,6 +42,8 @@ var regressionManifest = []struct {
 		"the coordinator persona declares exactly the closed taxonomy; no rule routes an out-of-taxonomy action"},
 	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestParkRuleStampsAwaitingHuman", "TestLifecycleTransitionRulesExcludeParkedRuns"},
 		"lifecycle transitions target valid agent-run edges; gate ordering, park, and park-exclusion (D15) hold"},
+	{"T7", "test/conformance/host_neutrality_test.go", []string{"TestNoArcRuleReferencesHostSpecificField"},
+		"no arc rule names a code host in a predicate position (forge-io host-neutrality — swap-the-adapter contract)"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if
