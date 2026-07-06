@@ -3,12 +3,12 @@
 - [x] 1.1 Init Go module (go 1.26) and repo layout (`cmd/semdev`, `cmd/e2e-semdev`, `internal/`, `test/`)
 - [x] 1.2 Add semstreams `v1.0.0-beta.141`+ dependency; confirm build
 - [x] 1.3 `docker compose` for NATS JetStream (never embedded) + Taskfile targets (build, lint, test, e2e)
-- [ ] 1.4 Mock-LLM harness scaffold (S6): deterministic fixtures, zero paid tokens
-- [ ] 1.5 `componentregistry.RegisterAll` wired into BOTH binaries (`cmd/semdev` and `cmd/e2e-semdev`)
+- [x] 1.4 Mock-LLM harness scaffold (S6): deterministic fixtures, zero paid tokens
+- [x] 1.5 `componentregistry.RegisterAll` wired into BOTH binaries (`cmd/semdev` and `cmd/e2e-semdev`)
 
 ## 2. Conformance registries + pins (land first, red-first)
 
-- [ ] 2.1 Tools registry (G1) + conformance test: an unregistered tool/processor fails the build
+- [ ] 2.1 Tools registry (G1) + conformance test: an unregistered tool/processor fails the build; **binary-parity pin**: assert `cmd/semdev` and `cmd/e2e-semdev` register an identical factory set (guards the half-wired-binary class against a future direct registration bypassing `boot.RegisterAll`)
 - [ ] 2.2 Framework-alignment-note format (G1); each new Go addition links its note in the registry
 - [ ] 2.3 Single-writer table (G5) + writers-census test: every predicate maps to exactly one writer
 - [ ] 2.4 Predicate → introducing-change table (G9) + exhaustiveness test: an undeclared predicate fails
