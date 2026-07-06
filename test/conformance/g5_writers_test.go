@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/tools/createchange"
+	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/vocab"
 )
 
@@ -38,6 +39,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		predicate string // any predicate under the tool's namespace
 	}{
 		{"create_change", createchange.Source, "openspec.change.example.proposal.intent"},
+		{"validate_change", validatechange.Source, validatechange.ValidatedPredicate},
 	}
 	for _, c := range cases {
 		writer, ok := vocab.WriterOf(c.predicate)

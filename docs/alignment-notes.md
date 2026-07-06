@@ -82,6 +82,23 @@ Template:
 - **Registry entry:** `write_change` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## validate-change-cli-oracle
+
+- **Primitive considered:** a rule/persona that judges the change's validity from
+  its facts, or re-implementing the OpenSpec validation rules in Go.
+- **Why it cannot express this:** the honest "compatible" claim (D11/D14) requires
+  the SPONSOR's own validator to bless the change — semdev must shell the real
+  `openspec validate` CLI and read its exit code, not re-implement or LLM-judge it
+  (re-implementing invites drift and forfeits the compatibility claim). Doing that
+  means hydrating the change, materializing it to a throwaway workspace, running an
+  external process, and stamping `openspec.validated` from the real exit status. No
+  rule can run a subprocess or read an exit code, and G3 forbids a model supplying
+  the verdict. This is the measurement-harness shape: the schema takes content only
+  (the slug); the tool's Go (the harness that ran the command) stamps the result.
+  It is the single G5 writer of `openspec.validated`.
+- **Registry entry:** `validate_change` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's

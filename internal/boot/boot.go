@@ -18,8 +18,10 @@ import (
 	"fmt"
 
 	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
+	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
@@ -86,6 +88,16 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	var workspace writechange.WorkspaceResolver // nil until the checkout seam lands
 	if err := reg.RegisterExecutor(writechange.New(factReader, workspace, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", writechange.ToolName, err)
+	}
+
+	// validate_change shells the real OpenSpec CLI as the compatibility oracle and
+	// stamps openspec.validated from the real exit code (harness-measured, G3). The
+	// exec runner is a plain os/exec seam (no NATS); the owned-fact writer stamps/
+	// clears the marker and is nil without a client (schema-only census). It reuses
+	// the same OwnedFactWriter transport as create_change — each tool stamps its own
+	// Source per triple (G5), so sharing the transport is safe.
+	if err := reg.RegisterExecutor(validatechange.New(factReader, cliexec.OSRunner{}, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", validatechange.ToolName, err)
 	}
 	// More semdev tools register here as later groups add them (measurement,
 	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.
