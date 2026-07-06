@@ -45,7 +45,7 @@
 - [ ] 5.1 Wire semstreams `github-webhook` input + `github_read`/`github_write` tools into both binaries
 - [ ] 5.2 Normalized issue/PR/comment fact mapping; arc rules reference no host-specific field
 - [ ] 5.3 Deterministic allowlist admission check (zero-token): `intake.actor` + `intake.admitted`; collaborator-or-allowlist + `semdev` label/command opt-in
-- [ ] 5.4 G6 pin (red-first): an unauthorized intake creates no run and spends zero tokens
+- [x] 5.4 G6 pin (red-first): an unauthorized intake creates no run and spends zero tokens (`TestAssessUnauthorizedCreatesNoRun` — unauthorized → `Outcome.Admitted=false`, so the adapter stamps nothing and spawns no coordinator; one deterministic non-LLM permission call, never a model. The adapter executes this gate; the decision is the enforcement point)
 - [x] 5.5 Inventory + add thin comment tools if missing: `github_get_pr`/`github_add_comment` already ship (framework); added `github_list_comments` (the missing read) over the semdev GitHub client; G1 note + registry + Components row
 - [ ] 5.6 PR delivery carrying the evidence summary; record `pr.ref`
 - [ ] 5.7 `ask_human` posts a comment; `respond` re-enters as `human.signal`; only the authorized requester steers the run's human gate
