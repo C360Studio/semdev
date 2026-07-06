@@ -1,0 +1,107 @@
+package github
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/c360studio/semdev/internal/intake"
+)
+
+// The client implements the admission gate's PermissionChecker, so it drops
+// straight into intake.Decide.
+var _ intake.PermissionChecker = (*Client)(nil)
+
+// A 200 returns the granular role_name in preference to the coarse permission,
+// and sends the expected auth headers to the collaborators/permission endpoint.
+func TestPermissionPrefersRoleNameAndAuthenticates(t *testing.T) {
+	var gotPath, gotAuth, gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth, gotVersion = r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-GitHub-Api-Version")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"permission":"write","role_name":"maintain"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient("tok-123").WithBaseURL(srv.URL)
+	level, err := c.Permission(context.Background(), "octo", "repo", "alice")
+	if err != nil {
+		t.Fatalf("permission: %v", err)
+	}
+	if level != "maintain" {
+		t.Errorf("level = %q, want maintain (granular role_name preferred over coarse permission)", level)
+	}
+	if gotPath != "/repos/octo/repo/collaborators/alice/permission" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer tok-123" {
+		t.Errorf("auth header = %q, want Bearer tok-123", gotAuth)
+	}
+	if gotVersion != "2022-11-28" {
+		t.Errorf("api-version header = %q", gotVersion)
+	}
+}
+
+// Falls back to the coarse `permission` field when role_name is absent.
+func TestPermissionFallsBackToCoarse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"permission":"admin"}`))
+	}))
+	defer srv.Close()
+	level, err := NewClient("t").WithBaseURL(srv.URL).Permission(context.Background(), "o", "r", "u")
+	if err != nil || level != "admin" {
+		t.Fatalf("level=%q err=%v, want admin/nil", level, err)
+	}
+}
+
+// A non-collaborator (404) resolves to "none" WITHOUT an error, so the gate
+// rejects them cleanly rather than failing closed-with-retry.
+func TestPermissionNotFoundIsNoneNotError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+	level, err := NewClient("t").WithBaseURL(srv.URL).Permission(context.Background(), "o", "r", "stranger")
+	if err != nil {
+		t.Fatalf("404 must not error: %v", err)
+	}
+	if level != "none" {
+		t.Errorf("level = %q, want none for a non-collaborator", level)
+	}
+}
+
+// A 5xx returns an error so the gate fails closed and retries (a transient GitHub
+// outage must not be read as a definitive rejection).
+func TestPermissionServerErrorIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if _, err := NewClient("t").WithBaseURL(srv.URL).Permission(context.Background(), "o", "r", "u"); err == nil {
+		t.Error("expected an error on HTTP 500 (fail closed + retry)")
+	}
+}
+
+// No token → a loud error, never a silent success.
+func TestPermissionRequiresToken(t *testing.T) {
+	if _, err := NewClient("").Permission(context.Background(), "o", "r", "u"); err == nil {
+		t.Error("expected an error with no token")
+	}
+}
+
+// The actor is path-escaped so a crafted login cannot alter the request path.
+func TestPermissionEscapesActor(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		_, _ = w.Write([]byte(`{"permission":"none"}`))
+	}))
+	defer srv.Close()
+	_, _ = NewClient("t").WithBaseURL(srv.URL).Permission(context.Background(), "o", "r", "a/../../admin")
+	if strings.Contains(gotPath, "/../") {
+		t.Errorf("actor was not escaped; path traversal reached the request path: %q", gotPath)
+	}
+}
