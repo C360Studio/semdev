@@ -1,0 +1,40 @@
+version: "3"
+
+tasks:
+  build:
+    desc: Build all binaries and packages
+    cmds:
+      - go build ./...
+
+  lint:
+    desc: Vet and gofmt check (gofmt drift fails)
+    cmds:
+      - go vet ./...
+      - test -z "$(gofmt -l .)"
+
+  test:
+    desc: Unit tests with the race detector
+    cmds:
+      - go test -race ./...
+
+  nats:up:
+    desc: Start NATS JetStream (never embedded)
+    cmds:
+      - docker compose -f docker/compose/nats.yml up -d --wait
+
+  nats:down:
+    cmds:
+      - docker compose -f docker/compose/nats.yml down -v
+
+  e2e:
+    desc: Mock-LLM spine journey — zero paid tokens (mock ladder must be green)
+    deps: [nats:up]
+    cmds:
+      - go test -race -tags=e2e ./test/e2e/...
+
+  check:
+    desc: The pre-push gauntlet (build + lint + unit)
+    cmds:
+      - task: build
+      - task: lint
+      - task: test

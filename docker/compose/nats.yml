@@ -1,0 +1,14 @@
+# NATS JetStream for semdev — NEVER embedded (project rule). Bring up with:
+#   task nats:up      (docker compose -f docker/compose/nats.yml up -d)
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222" # client
+      - "8222:8222" # monitoring / healthz
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

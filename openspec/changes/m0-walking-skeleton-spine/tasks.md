@@ -1,8 +1,8 @@
 ## 1. Foundation & scaffolding
 
-- [ ] 1.1 Init Go module (go 1.26) and repo layout (`cmd/semdev`, `cmd/e2e-semdev`, `internal/`, `test/`)
-- [ ] 1.2 Add semstreams `v1.0.0-beta.141`+ dependency; confirm build
-- [ ] 1.3 `docker compose` for NATS JetStream (never embedded) + Taskfile targets (build, lint, test, e2e)
+- [x] 1.1 Init Go module (go 1.26) and repo layout (`cmd/semdev`, `cmd/e2e-semdev`, `internal/`, `test/`)
+- [x] 1.2 Add semstreams `v1.0.0-beta.141`+ dependency; confirm build
+- [x] 1.3 `docker compose` for NATS JetStream (never embedded) + Taskfile targets (build, lint, test, e2e)
 - [ ] 1.4 Mock-LLM harness scaffold (S6): deterministic fixtures, zero paid tokens
 - [ ] 1.5 `componentregistry.RegisterAll` wired into BOTH binaries (`cmd/semdev` and `cmd/e2e-semdev`)
 
