@@ -49,6 +49,15 @@ func hostSpecificRuleRefs(rules []ruleFile) []string {
 			if h := containsHostName(a.Predicate); h != "" {
 				out = append(out, fmt.Sprintf("rule %q action predicate %q names host %q", r.ID, a.Predicate, h))
 			}
+			// A rule that dispatches a host-named tool (e.g. github_list_comments)
+			// names a code host in its arc logic — the exact swap-the-adapter
+			// coupling this pin prevents. (Distinct from the bootstrap allowed_tools
+			// allowlist, which is the registration surface, not arc logic.)
+			for _, tool := range a.Tools {
+				if h := containsHostName(tool); h != "" {
+					out = append(out, fmt.Sprintf("rule %q action dispatches host-named tool %q (host %q)", r.ID, tool, h))
+				}
+			}
 		}
 	}
 	return out

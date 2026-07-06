@@ -16,7 +16,6 @@ package boot
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
@@ -48,11 +47,18 @@ func RegisterAll(reg *component.Registry) error {
 }
 
 // RegisterTools registers every agentic tool executor semdev exposes into reg:
-// the framework builtins plus semdev's own G1-gated tools (none at M0). The G3
-// schema census builds the tool registry through this same seam, so a semdev
-// tool cannot land uncovered by the outcome-field pin — the census and
-// production registration cannot drift.
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies) error {
+// the framework builtins plus semdev's own G1-gated tools. The G3 schema census
+// builds the tool registry through this same seam, so a semdev tool cannot land
+// uncovered by the outcome-field pin — the census and production registration
+// cannot drift.
+//
+// githubToken is INJECTED (not read from the environment here) so this function is
+// hermetic: the census passes "" and deterministically takes each host tool's
+// schema-only nil path regardless of the ambient env, while the runtime boot
+// (cmd/*) reads os.Getenv("GITHUB_TOKEN") at the composition edge and passes it in.
+// (The framework's own RegisterBuiltins still reads GITHUB_TOKEN internally for its
+// github_read/write tools — that is framework behavior, outside this seam.)
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -104,11 +110,11 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	}
 
 	// github_list_comments (forge-io) reads an issue/PR thread via the semdev
-	// GitHub client, built from GITHUB_TOKEN. Without a token the tool registers
-	// schema-only (pass a literal nil interface — NOT a typed-nil *Client — so the
-	// executor's nil-check fires) and fails loudly if executed.
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		if err := reg.RegisterExecutor(listcomments.New(github.NewClient(token).WithLogger(deps.Logger), deps.Logger)); err != nil {
+	// GitHub client, built from the injected githubToken. Without a token the tool
+	// registers schema-only (pass a literal nil interface — NOT a typed-nil *Client
+	// — so the executor's nil-check fires) and fails loudly if executed.
+	if githubToken != "" {
+		if err := reg.RegisterExecutor(listcomments.New(github.NewClient(githubToken).WithLogger(deps.Logger), deps.Logger)); err != nil {
 			return fmt.Errorf("register %s: %w", listcomments.ToolName, err)
 		}
 	} else if err := reg.RegisterExecutor(listcomments.New(nil, deps.Logger)); err != nil {

@@ -29,9 +29,10 @@ func TestHostNeutralityCensusCatchesHostRefs(t *testing.T) {
 		{ID: "reads-host-field", Conditions: []ruleCondition{{Field: "github.issue.state", Operator: "eq", Value: "open"}}},
 		{ID: "writes-host-subject", OnEnter: []ruleAction{{Type: "add_triple", Subject: "org.github.repo.x.issue.1", Predicate: "run.issue_ref", Object: "x#1"}}},
 		{ID: "writes-host-predicate", OnEnter: []ruleAction{{Type: "add_triple", Subject: "$entity.id", Predicate: "github.issue.title", Object: "t"}}},
+		{ID: "dispatches-host-tool", OnEnter: []ruleAction{{Type: "publish_agent", Tools: []string{"decide", "github_list_comments"}}}},
 	}
-	if got := hostSpecificRuleRefs(bad); len(got) != 3 {
-		t.Errorf("census caught %d of 3 planted host refs: %v", len(got), got)
+	if got := hostSpecificRuleRefs(bad); len(got) != 4 {
+		t.Errorf("census caught %d of 4 planted host refs: %v", len(got), got)
 	}
 
 	clean := []ruleFile{{
