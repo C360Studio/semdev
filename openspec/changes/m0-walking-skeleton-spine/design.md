@@ -220,12 +220,33 @@ is the checked-in artifact the G5/G9 pins compare against.
 | `verify.result` | verify harness | clean-room-verify |
 | `evidence.run` | evidence ledger | evidence-ledger |
 
-### D13 — No upstream asks for M0
+### D13 — Upstream asks (two forge-io payload gaps, found in group 5)
 
-All four beta.115-era suspicions are closed; fan-out/fan-in exist. The only
-narrow expressiveness limit (cross-entity aggregate in a `when`-clause) is a
-fan-in detail and does not bind serial v1. If a real gap appears, the move is:
-file the upstream ask, park toward the human, record it — never a Go workaround.
+The four beta.115-era suspicions are closed; fan-out/fan-in exist. Two real gaps
+surfaced building forge-io intake, both in the `github_webhook` input's
+**flattened** published payload (it drops fields the raw GitHub webhook carries).
+Per the constitution the move is: file the upstream ask, scope M0 to what is
+safely supportable, record it — never a silent Go workaround (B7/G2).
+
+- **UA-1 — `labeled` action drops the specific added label.** `IssuePayload.Labels`
+  is the AGGREGATE current set, not the single label the sender just added, so a
+  "labeled `semdev` after opening" opt-in cannot be attributed to the labeler.
+  Treating the aggregate as the actor's signal would be the privilege-confusion
+  hole (an authorized actor's unrelated `labeled` event inheriting a foreign
+  `semdev`). Ask: publish the added `label` on `labeled`/`unlabeled` actions.
+- **UA-2 — comment events drop the issue number/URL and comment id.**
+  `CommentPayload` is `{body, author}` only, so a `/semdev` comment or a human
+  reply cannot be tied to its run. Ask: carry the parent issue/PR number (and
+  comment id) on `github.event.comment`.
+
+**M0 scope decision:** intake triggers on issue **`opened`** only — the one flow
+the flattened payload fully supports (actor == opener; initial labels + body are
+the opener's; issue number present). Until UA-1/UA-2 land: a non-`opened` issue
+action carries no attributable opt-in (creates no run), and the comment-driven
+paths (labeled-after-open opt-in; `respond` reply routing, group 5.7) are
+designed but their live wiring waits on the field — park toward the human
+meanwhile, mirroring the archive M1-deferral. `ask_human` posting a comment
+(`github_add_comment`) is unaffected; only reply *routing* waits on UA-2.
 
 ### D14 — The taxonomy mirrors the proven OpenSpec lifecycle (structure + HITL + substrate)
 
