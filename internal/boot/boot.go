@@ -17,7 +17,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/tools/createchange"
+	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/componentregistry"
@@ -62,6 +64,17 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	}
 	if err := reg.RegisterExecutor(createchange.New(changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", createchange.ToolName, err)
+	}
+
+	// The read-side openspec-io tools take a changefacts.Reader (query-only, full
+	// triples) — the read analogue of the OwnedFactWriter. Nil without a client
+	// (the schema-scanning censuses); Execute fails loudly if called without one.
+	var factReader changefacts.Reader
+	if deps.NATSClient != nil {
+		factReader = changefacts.NewNATSReader(deps.NATSClient)
+	}
+	if err := reg.RegisterExecutor(hydratechange.New(factReader, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", hydratechange.ToolName, err)
 	}
 	// More semdev tools register here as later groups add them (measurement,
 	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.

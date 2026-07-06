@@ -46,3 +46,21 @@ Template:
   single G5 writer of `openspec.change.*`. Its schema takes content only (G3).
 - **Registry entry:** `create_change` (`tool`)
 - **Change:** m0-walking-skeleton-spine
+
+## render-openspec-hydrate-tool
+
+- **Primitive considered:** a rule that reads `$entity.triple.openspec.change.*`
+  and `publish`es a rendered document to an `output/file` component (the D1
+  "rule→publish→output/file" hydrate path).
+- **Why it cannot express this:** rendering a change means reconstructing the
+  nested OpenSpec model (proposal, per-capability deltas, ordered tasks) from a
+  flat fact set and re-serializing it to canonical markdown — the inverse of the
+  format engine's `Facts()` (`ChangeFromFacts` + `RenderChangeFolder`). A rule's
+  `$`-templating substitutes single predicate values into a fixed string; it
+  cannot re-group deltas by capability, order tasks by index, or JSON-decode the
+  scenario arrays. That reconstruction is deterministic Go in `internal/openspec`;
+  the tool is the thin read adapter (a `changefacts.Reader`, query-only) that
+  hands the run's facts to it. Read-only: it stamps no facts (no G5 writer) and
+  its schema takes only the change slug (G3, trivially).
+- **Registry entry:** `render_openspec` (`tool`)
+- **Change:** m0-walking-skeleton-spine

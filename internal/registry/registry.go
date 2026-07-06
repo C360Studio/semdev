@@ -35,6 +35,7 @@ type Entry struct {
 // Entries is semdev's own component/tool inventory.
 var Entries = []Entry{
 	{Name: "create_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "create-change-author-tool"},
+	{Name: "render_openspec", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "render-openspec-hydrate-tool"},
 }
 
 // ComponentNames returns the declared names of Entries of KindComponent.
