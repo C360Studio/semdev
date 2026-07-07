@@ -140,6 +140,26 @@ Template:
 - **Registry entry:** `github_list_comments` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## project-tasks-tool
+
+- **Primitive considered:** a rule that reads the approved change's task facts and
+  writes `task.spec`, or a persona that "projects" the tasks.
+- **Why it cannot express this:** projection reads MANY execution-rich task facts
+  off the run entity (`openspec.change.<slug>.task.<i>.*`), reconstructs each into a
+  typed task honoring the nil-vs-authored-empty presence distinction, enforces the
+  Karpathy schema and clamps the iteration budget (`devtask.Project`), and stamps
+  the result as the IMMUTABLE `task.spec.*` — a multi-fact read + transform + typed
+  write no rule can perform (a rule matches triples and emits a triple; it cannot
+  loop over an unknown number of tasks, parse JSON arrays, or run schema logic). It
+  plans nothing (create_change authored the tasks); it enforces and freezes them,
+  and refuses to re-project onto a run that already carries `task.spec` (the dev
+  loop CONVERGES on the facts, it does not redefine them — G2: the tool surfaces a
+  schema gap as an error and parks toward the human via a rule, it fires no
+  transition). Stamps no outcome (G3): `task.spec` carries the task definition, not
+  a result. Single G5 writer of `task.spec.*` (`task-projector`).
+- **Registry entry:** `project_tasks` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's

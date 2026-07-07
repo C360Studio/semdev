@@ -40,7 +40,7 @@ var Predicates = []Predicate{
 	{"openspec.spec.*", "brownfield-spec-projector", "openspec-io", m0},
 	{"openspec.validated", "openspec-validate-harness", "openspec-io", m0},
 	{"openspec.archived", "openspec-archive-harness", "openspec-io", m0},
-	{"task.spec", "task-projector", "dev-from-task", m0},
+	{"task.spec.*", "task-projector", "dev-from-task", m0},
 	{"task.attempt", "dev-loop-harness", "dev-from-task", m0},
 	{"floor.finding", "floor-tools", "dev-from-task", m0},
 	{"measurement.result", "measurement-harness", "harness-measurement", m0},

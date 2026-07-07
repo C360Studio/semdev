@@ -18,3 +18,9 @@ const (
 	FactNonGoals    = "non_goals"
 	FactBudget      = "budget"
 )
+
+// FactGoal is the goal field name of a PROJECTED task on the run entity under
+// task.spec.<i>.goal. On the input side the goal is the change task's thin text
+// (openspec.change.<slug>.task.<i>.text); the projector copies it into task.spec so
+// the frozen task carries its own goal without a back-reference to the change.
+const FactGoal = "goal"

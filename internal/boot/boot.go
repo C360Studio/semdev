@@ -23,6 +23,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
+	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -120,6 +121,15 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	} else if err := reg.RegisterExecutor(listcomments.New(nil, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", listcomments.ToolName, err)
 	}
+	// project_tasks (dev-from-task) reads a run's approved change task facts, projects
+	// them through devtask.Project, and stamps the immutable task.spec. It reads via
+	// the shared changefacts.Reader and writes task.spec via the shared OwnedFactWriter
+	// (its own Source, task-projector — sharing the transport is G5-safe). Both nil in
+	// the census (schema-only); Execute fails loudly if either is missing.
+	if err := reg.RegisterExecutor(projecttasks.New(factReader, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", projecttasks.ToolName, err)
+	}
+
 	// More semdev tools register here as later groups add them (measurement,
 	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.
 	return nil
