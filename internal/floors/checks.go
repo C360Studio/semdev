@@ -88,13 +88,21 @@ func TestsMustExist(a Attempt) Finding {
 		"attempt authored production Go source but no *_test.go test function — a change without a test proves nothing")
 }
 
-// VacuousTest rejects a test function whose body can never fail: no *testing.T
-// failing call, no assertion-library call, and no *testing.T handed to an
-// in-attempt helper that itself asserts. A test that only logs, or asserts a
-// constant tautology, inflates the passing count without proving anything. A test
-// that Skips is exempt — that is the honest deferred form. Working on the AST means
-// a renamed subtest receiver and an assertion inside a t.Run closure are
+// VacuousTest rejects a test function whose body can never meaningfully fail: no
+// *testing.T failing call on computed behavior, no assertion-library call with a
+// computed argument, and no *testing.T handed to an in-attempt helper that itself
+// asserts. A test that only logs, asserts a constant tautology (if "ok" != "ok" {
+// t.Fatal() }), or checks two literals, inflates the passing count without proving
+// anything — a bare syntactic fail-call does NOT satisfy the floor (Codex P2). A
+// test that Skips is exempt — that is the honest deferred form. Working on the AST
+// means a renamed subtest receiver and an assertion inside a t.Run closure are
 // recognized, and a commented-out or string-literal assertion is not.
+//
+// Accepted M0 limit (fail-OPEN, needs data-flow at M2): the tautology check is at
+// the literal level — a constant laundered through a variable (x := "ok"; if x !=
+// "ok" { t.Fatal() }) reads as a computed guard and escapes. AntiMock's
+// target-reference check catches a no-target test when a double is declared; a
+// bare no-target tautology with no double is the residual gap.
 //
 // Helper delegation is credited only when the callee resolves to an authored
 // function whose OWN body asserts (transitively) — passing t to a non-asserting
@@ -183,10 +191,13 @@ func isSkipped(fn *ast.FuncDecl) bool {
 	return skipped
 }
 
-// funcAsserts reports whether fn contains a real (failing) assertion: a fail-method
-// call on one of its testing receivers, an assertion-library call
-// (require./assert./is.), or a call that hands a testing receiver to an in-attempt
-// helper that itself asserts. visited guards against helper recursion cycles.
+// funcAsserts reports whether fn contains a real assertion — one that can fail on
+// COMPUTED behavior, not merely a syntactic fail-call. It credits: a fail-method
+// call on a testing receiver whose guarding condition tests a computed value (so a
+// constant tautology like `if "ok" != "ok" { t.Fatal() }` does NOT count), an
+// assertion-library call (require./assert./is.) with at least one computed
+// argument, or a call that hands a testing receiver to an in-attempt helper that
+// itself asserts. visited guards against helper recursion cycles.
 func funcAsserts(fn *ast.FuncDecl, idx funcIndex, visited map[string]bool) bool {
 	if fn == nil || fn.Body == nil || visited[fn.Name.Name] {
 		return false
@@ -194,19 +205,18 @@ func funcAsserts(fn *ast.FuncDecl, idx funcIndex, visited map[string]bool) bool 
 	visited[fn.Name.Name] = true
 
 	vars := testingVarNames(fn)
+	dead := deadFailCalls(fn.Body, vars) // fail-calls guarded only by a constant condition
 	asserts := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		if sel, ok := selectorOnTestingVar(call.Fun, vars); ok && failMethods[sel] {
+		if isFailCall(call, vars) && !dead[call] {
 			asserts = true
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-			if pkg, ok := sel.X.(*ast.Ident); ok && assertionPkgs[pkg.Name] {
-				asserts = true
-			}
+		if isAssertionLibCall(call) && hasComputedArg(call, vars) {
+			asserts = true
 		}
 		// Delegated assertion: a testing receiver passed to an authored helper that
 		// itself asserts. A non-asserting or unresolvable callee does not count.
@@ -232,6 +242,88 @@ func selectorOnTestingVar(n ast.Node, vars map[string]bool) (method string, ok b
 		return "", false
 	}
 	return sel.Sel.Name, true
+}
+
+// isFailCall reports whether call is a fail-method call on a testing receiver.
+func isFailCall(call *ast.CallExpr, vars map[string]bool) bool {
+	method, ok := selectorOnTestingVar(call.Fun, vars)
+	return ok && failMethods[method]
+}
+
+// isAssertionLibCall reports whether call is a require./assert./is. assertion.
+func isAssertionLibCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && assertionPkgs[pkg.Name]
+}
+
+// deadFailCalls returns the fail-method calls that assert nothing about computed
+// behavior: those guarded by an `if` whose condition is a constant expression
+// (both operands literal). A real test compares a COMPUTED value against an
+// expected one; a fail call reachable only under `if "ok" != "ok"` (or `if false`)
+// is a tautology that inflates the passing count. Every fail call inside a
+// constant-condition if — then-branch or else — is dead, including nested ones.
+func deadFailCalls(body *ast.BlockStmt, vars map[string]bool) map[*ast.CallExpr]bool {
+	dead := map[*ast.CallExpr]bool{}
+	collect := func(n ast.Node) {
+		ast.Inspect(n, func(m ast.Node) bool {
+			if c, ok := m.(*ast.CallExpr); ok && isFailCall(c, vars) {
+				dead[c] = true
+			}
+			return true
+		})
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok || !isConstantExpr(ifs.Cond) {
+			return true
+		}
+		collect(ifs.Body)
+		if ifs.Else != nil {
+			collect(ifs.Else)
+		}
+		return true
+	})
+	return dead
+}
+
+// isConstantExpr reports whether e is a compile-time constant expression — a
+// literal, a predeclared const identifier (true/false/nil/iota), or an operator
+// tree over such. An expression that names a variable or calls a function is NOT
+// constant: it computes a value, and comparing against it exercises behavior.
+func isConstantExpr(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.BasicLit:
+		return true
+	case *ast.Ident:
+		return x.Name == "true" || x.Name == "false" || x.Name == "nil" || x.Name == "iota"
+	case *ast.ParenExpr:
+		return isConstantExpr(x.X)
+	case *ast.UnaryExpr:
+		return isConstantExpr(x.X)
+	case *ast.BinaryExpr:
+		return isConstantExpr(x.X) && isConstantExpr(x.Y)
+	default:
+		return false
+	}
+}
+
+// hasComputedArg reports whether call has an argument that is a computed value —
+// non-constant and not the testing receiver itself. require.Equal(t, "ok", "ok")
+// is a tautology (no computed arg); require.Equal(t, "ok", got) asserts behavior.
+func hasComputedArg(call *ast.CallExpr, vars map[string]bool) bool {
+	for _, arg := range call.Args {
+		if id, ok := arg.(*ast.Ident); ok && vars[id.Name] {
+			continue // the testing receiver, not the value under assertion
+		}
+		if !isConstantExpr(arg) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveBareCallee returns the authored helper a bare-identifier call names, or
@@ -460,9 +552,12 @@ func SourceBuild(a Attempt) Finding {
 }
 
 // AntiMock rejects a test suite that declares a mock/fake/stub double yet
-// references none of the exported symbols of the task's target files in CODE — a
-// "test" that exercises only its own double proves nothing about the code under
-// test. It is the conservative M0 Go profile and fires only when both signals
+// references none of the task's target-file symbols in CODE — a "test" that
+// exercises only its own double proves nothing about the code under test. The
+// target index includes UNEXPORTED top-level declarations and methods, not just
+// exported ones, so a task changing an unexported helper or method in an internal
+// package is covered (Codex P2) — otherwise an empty symbol set let a mock-only
+// test pass. It is the conservative M0 Go profile and fires only when both signals
 // hold. Three known M0 limits, all accepted here: (1) a type whose name merely
 // contains mock/fake/stub is treated as a double, so an unlucky legitimate name
 // (Stubborn) could read as a mock — harmless unless the suite also touches no
@@ -471,14 +566,14 @@ func SourceBuild(a Attempt) Finding {
 // file honestly exercises the target; (3) reference matching is by identifier name
 // without type resolution, so a same-named but unrelated identifier (a cross-
 // package http.Handler when a target type is Handler, or a mock method colliding
-// with a target top-level func name) counts as a reference — an over-accept that
-// needs go/types to close. The richer integration-real-vs-mock discipline
-// (semspec's testcontainers floor, the OSH hard fixtures) and type-resolved
-// references land with the JVM profiles at M2.
+// with a target symbol name) counts as a reference — an over-accept that needs
+// go/types to close. The richer integration-real-vs-mock discipline (semspec's
+// testcontainers floor, the OSH hard fixtures) and type-resolved references land
+// with the JVM profiles at M2.
 func AntiMock(a Attempt) Finding {
-	targetSymbols := exportedTargetSymbols(a)
+	targetSymbols := targetSymbolIndex(a)
 	if len(targetSymbols) == 0 {
-		return pass(FloorAntiMock, "no exported target symbols to check against — floor does not apply")
+		return pass(FloorAntiMock, "no target symbols to check against — floor does not apply")
 	}
 
 	declaresMock := false
@@ -543,10 +638,13 @@ func referencesTargetSymbol(file *ast.File, symbols map[string]struct{}) bool {
 	return found
 }
 
-// exportedTargetSymbols returns the set of exported top-level identifiers
-// (functions, types, vars, consts) declared in the attempt's target files.
-// Unparseable target files are skipped — SourceBuild owns that failure.
-func exportedTargetSymbols(a Attempt) map[string]struct{} {
+// targetSymbolIndex returns the set of top-level identifiers — functions AND
+// methods (by name), types, vars, consts, EXPORTED and unexported — declared in
+// the attempt's target files. Unexported symbols are included so a same-package
+// test of internal code is covered: a task changing `parseThing` has a non-empty
+// index, so a mock-only test that never names it is caught. Unparseable target
+// files are skipped — SourceBuild owns that failure.
+func targetSymbolIndex(a Attempt) map[string]struct{} {
 	targets := map[string]struct{}{}
 	for _, p := range a.TargetFiles {
 		targets[p] = struct{}{}
@@ -563,21 +661,17 @@ func exportedTargetSymbols(a Attempt) map[string]struct{} {
 		for _, decl := range file.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
-				if d.Recv == nil && d.Name.IsExported() {
-					symbols[d.Name.Name] = struct{}{}
-				}
+				// Both plain funcs and methods — a same-package test calls either by
+				// name (parseThing() or store.parseThing()).
+				symbols[d.Name.Name] = struct{}{}
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
 					switch s := spec.(type) {
 					case *ast.TypeSpec:
-						if s.Name.IsExported() {
-							symbols[s.Name.Name] = struct{}{}
-						}
+						symbols[s.Name.Name] = struct{}{}
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
-							if n.IsExported() {
-								symbols[n.Name] = struct{}{}
-							}
+							symbols[n.Name] = struct{}{}
 						}
 					}
 				}

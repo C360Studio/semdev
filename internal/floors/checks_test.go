@@ -215,6 +215,70 @@ func TestViaHelper(t *testing.T) {
 	}
 }
 
+// A constant tautology (if "ok" != "ok" { t.Fatal() }) has a syntactic fail-call
+// but asserts nothing about computed behavior — it must be flagged vacuous
+// (Codex P2: a bare fail-call must not satisfy the floor).
+func TestVacuousTestConstantTautologyIsVacuous(t *testing.T) {
+	a := Attempt{Files: []File{{Path: "x_test.go", Content: `package x
+import "testing"
+func TestLooksReal(t *testing.T) {
+	if "ok" != "ok" {
+		t.Fatal("bad")
+	}
+}
+`}}}
+	if f := VacuousTest(a); f.Passed {
+		t.Error("a constant-tautology assertion must be flagged vacuous")
+	}
+}
+
+// require.Equal with two constant arguments is a tautology; with a computed
+// argument it is a real assertion.
+func TestVacuousTestAssertionLibNeedsComputedArg(t *testing.T) {
+	tautology := Attempt{Files: []File{{Path: "x_test.go", Content: `package x
+import (
+	"testing"
+	"github.com/stretchr/testify/require"
+)
+func TestConstReq(t *testing.T) {
+	require.Equal(t, "ok", "ok")
+}
+`}}}
+	if f := VacuousTest(tautology); f.Passed {
+		t.Error("require.Equal(t, \"ok\", \"ok\") is a tautology and must be flagged vacuous")
+	}
+
+	computed := Attempt{Files: []File{{Path: "x_test.go", Content: `package x
+import (
+	"testing"
+	"github.com/stretchr/testify/require"
+)
+func TestComputedReq(t *testing.T) {
+	require.Equal(t, "ok", compute())
+}
+`}}}
+	if f := VacuousTest(computed); !f.Passed {
+		t.Errorf("require.Equal on a computed value must count: %s", f.Detail)
+	}
+}
+
+// A guard over a COMPUTED value is a real assertion even though it is an if/Fatal
+// shape — only all-constant conditions are tautologies.
+func TestVacuousTestComputedGuardPasses(t *testing.T) {
+	a := Attempt{Files: []File{{Path: "x_test.go", Content: `package x
+import "testing"
+func TestComputed(t *testing.T) {
+	got := compute()
+	if got != "ok" {
+		t.Fatalf("got %q", got)
+	}
+}
+`}}}
+	if f := VacuousTest(a); !f.Passed {
+		t.Errorf("a guard over a computed value must count as a real assertion: %s", f.Detail)
+	}
+}
+
 // Passing t to a NON-asserting helper is not a real assertion — the setup-plus-
 // discarded-result shape must still be flagged (re-review BLOCKING: helper
 // delegation must credit only a helper that itself asserts).
@@ -311,6 +375,55 @@ func TestGet(t *testing.T) {
 	}
 	if f := AntiMock(a); f.Passed {
 		t.Error("an unexported mock-only test (fakeStore) must be rejected")
+	}
+}
+
+// AntiMock must apply to UNEXPORTED target code — a task changing an internal
+// helper (parseThing) whose test only exercises a fake must be rejected, not
+// waved through with "no exported target symbols" (Codex P2).
+func TestAntiMockAppliesToUnexportedTarget(t *testing.T) {
+	a := Attempt{
+		TargetFiles: []string{"svc.go"},
+		Files: []File{
+			{Path: "svc.go", Content: "package svc\nfunc parseThing(s string) string { return s }\n"},
+			{Path: "svc_test.go", Content: `package svc
+import "testing"
+type fakeParser struct{}
+func (fakeParser) parse() string { return "x" }
+func TestParse(t *testing.T) {
+	p := fakeParser{}
+	if p.parse() != "x" {
+		t.Fatal("bad")
+	}
+}
+`},
+		},
+	}
+	if f := AntiMock(a); f.Passed {
+		t.Error("a mock-only test of an unexported target (parseThing) must be rejected")
+	}
+}
+
+// A same-package test that calls the unexported target passes AntiMock even with a
+// mock present.
+func TestAntiMockUnexportedTargetReferencedPasses(t *testing.T) {
+	a := Attempt{
+		TargetFiles: []string{"svc.go"},
+		Files: []File{
+			{Path: "svc.go", Content: "package svc\nfunc parseThing(s string) string { return s }\n"},
+			{Path: "svc_test.go", Content: `package svc
+import "testing"
+type fakeDep struct{}
+func TestParse(t *testing.T) {
+	if parseThing("a") != "a" {
+		t.Fatal("bad")
+	}
+}
+`},
+		},
+	}
+	if f := AntiMock(a); !f.Passed {
+		t.Errorf("a test that calls the unexported target must pass: %s", f.Detail)
 	}
 }
 
