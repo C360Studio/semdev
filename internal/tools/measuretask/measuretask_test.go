@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
@@ -343,6 +345,30 @@ func TestMeasureRequiresRunEntity(t *testing.T) {
 	}
 	if res.Error == "" {
 		t.Error("a call without a run entity must fail")
+	}
+}
+
+// Anti-drift round-trip: what measure_task STAMPS (measurementTriples) must read
+// back through the review gate's reconstruction (measurement.ResultsFromFacts) as
+// the same measurement — the write and read sides of measurement.result.* are
+// inverse, so the reviewer sees exactly what the harness recorded.
+func TestMeasurementTriplesRoundTripThroughReconstruction(t *testing.T) {
+	// A failing run: the encoding a false measurement must survive intact.
+	r := measurement.Measure("0", "go test ./...", cliexec.Result{ExitCode: 1, Stdout: "boom"}, nil)
+	triples := measurementTriples(runEntity, 0, r, time.Unix(0, 0).UTC())
+
+	got, err := measurement.ResultsFromFacts(triples)
+	if err != nil {
+		t.Fatalf("reconstruct: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 reconstructed result, got %d", len(got))
+	}
+	g := got[0]
+	// Only the stamped fields survive the fact round-trip (stdout/stderr/run_error
+	// are LLM-facing, not stamped) — compare those.
+	if g.TaskID != "0" || g.Command != r.Command || g.Ran != r.Ran || g.ExitCode != r.ExitCode || g.TimedOut != r.TimedOut || g.Passed != r.Passed {
+		t.Errorf("round-trip drift: stamped %+v, read back %+v", r, g)
 	}
 }
 

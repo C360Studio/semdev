@@ -25,6 +25,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/listcomments"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
+	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -143,6 +144,16 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	var checkout measuretask.Workspace // nil until the checkout seam lands
 	if err := reg.RegisterExecutor(measuretask.New(factReader, cliexec.OSRunner{}, changeWriter, checkout, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
+	}
+
+	// submit_review (harness-measurement) is Quinn's gate: it reads the run's
+	// task.spec + measurement.result facts, derives the FLOORED verdict
+	// (measurement.CanApprove ∧ no findings), and stamps review.verdict. It reads via
+	// the shared changefacts.Reader and writes via the shared OwnedFactWriter (its own
+	// Source, reviewer-quinn — G5-safe). Takes no runner/workspace (it runs nothing).
+	// Both nil in the census (schema-only); Execute fails loudly if either is missing.
+	if err := reg.RegisterExecutor(submitreview.New(factReader, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}
 
 	// More semdev tools register here as later groups add them (floors, verify) —

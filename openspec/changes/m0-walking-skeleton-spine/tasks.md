@@ -64,8 +64,8 @@
 
 - [x] 7.1 Measurement tool over the `bash` executor: capture OS exit code → `measurement.result`; schema has NO outcome field
 - [x] 7.2 `measurement.result` single writer (G5 table entry); red-first: a non-zero exit records failure regardless of model text
-- [ ] 7.3 Reviewer (Quinn) reads `measurement.result` → `review.verdict`; additive-only, never weakens `task.spec`
-- [ ] 7.4 Review gates `open_pr` on harness facts; red-first: a false success claim cannot be approved
+- [x] 7.3 Reviewer (Quinn) reads `measurement.result` → `review.verdict`; additive-only, never weakens `task.spec`
+- [ ] 7.4 Review gates `open_pr` on harness facts; red-first: a false success claim cannot be approved <!-- pin DONE (submit_review derives approval from CanApprove; TestReviewCannotApproveFalseSuccess); the open_pr gate RULE defers to g8/g11 (needs verify.result + coordinator spawn rules) -->
 
 ## 8. clean-room-verify (G4, S2, T5, T6) — the make-or-break
 

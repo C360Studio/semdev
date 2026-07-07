@@ -49,6 +49,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `github_list_comments` | tool | forge-io | `github-list-comments-tool` |
 | `project_tasks` | tool | dev-from-task | `project-tasks-tool` |
 | `measure_task` | tool | harness-measurement | `measurement-tool` |
+| `submit_review` | tool | harness-measurement | `submit-review-tool` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

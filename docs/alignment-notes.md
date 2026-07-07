@@ -199,6 +199,38 @@ Template:
 - **Registry entry:** `measure_task` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## submit-review-tool
+
+- **Primitive considered:** a rule that reads `measurement.result` and stamps
+  `review.verdict`, or the reviewer persona (Quinn) deciding the verdict directly.
+- **Why it cannot express this:** the verdict must be FLOORED by the harness facts,
+  and that floor is `measurement.CanApprove` — "every REQUIRED task (each projected
+  `task.spec.<i>`) has exactly one passing measurement, re-derived from the raw exit
+  evidence." No rule can express it: a rule matches a triple, it cannot enumerate an
+  unknown number of required tasks, count exactly-one-measurement-each, and re-derive
+  a pass from `ran`/`exit_code`/`timed_out`. Nor can the persona own the outcome
+  (G3/D4): a false success claim must not earn approval however confidently the work
+  describes itself, so approval cannot be a model-supplied field — it is DERIVED here
+  (`approved ⟺ CanApprove(required, observed) ∧ no findings`). The tool reconstructs
+  the measurements via `measurement.ResultsFromFacts` (fails CLOSED on unparseable
+  evidence — a fact it cannot read is a failure, never a defaulted approve), reads
+  the required set from `task.spec.*`, and stamps the single `review.verdict`.
+- **Additive-only, structurally (7.3):** Quinn's only input is FINDINGS (required
+  changes); an open finding blocks approval, but a finding can never weaken
+  `task.spec` because this tool's single writer is `reviewer-quinn` and it stamps
+  ONLY `review.verdict` — it holds no writer for `task.spec` (G5 single-writer makes
+  the "findings never relax the spec" scenario impossible, not merely disallowed).
+- **Fact shape:** `review.verdict` is an EXACT predicate (not a namespace) — one
+  current verdict per run, upserted latest-wins (a re-review after fixes replaces it,
+  the graph's replace-per-`(subject,predicate)`), which is what the `open_pr` gate
+  rule reads. Contrast `measurement.result.*` (per-task namespace): a verdict is
+  singular per run, a measurement is per-task. Fires no transition (G2) — the gate is
+  a rule on `review.verdict` (wired with the coordinator spawn rules + clean-room
+  `verify.result` at a later group). Single G5 writer of `review.verdict`
+  (`reviewer-quinn`).
+- **Registry entry:** `submit_review` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's
