@@ -1,5 +1,7 @@
 package devtask
 
+import "strconv"
+
 // Fact-key suffixes for the execution-rich per-task facts that live on the run
 // entity under openspec.change.<slug>.task.<i>.<suffix>. These are GRAPH-ONLY
 // (design: not represented in tasks.md, see internal/openspec.model_change — the
@@ -24,3 +26,16 @@ const (
 // (openspec.change.<slug>.task.<i>.text); the projector copies it into task.spec so
 // the frozen task carries its own goal without a back-reference to the change.
 const FactGoal = "goal"
+
+// TaskSpecPrefix is the owned namespace the PROJECTED task.spec facts live under on
+// the run entity: task.spec.<i>.<suffix>. It anchors to the task.spec.* vocab
+// namespace (writer task-projector, G5). The projector (project_tasks) writes it;
+// downstream tools (measure_task) read the frozen fields back — sharing the prefix
+// between the write and read sides keeps them from drifting off the namespace.
+const TaskSpecPrefix = "task.spec."
+
+// TaskSpecKeyPrefix returns the per-task predicate prefix "task.spec.<i>." for the
+// task at index i — the prefix under which that task's frozen fields are keyed.
+func TaskSpecKeyPrefix(i int) string {
+	return TaskSpecPrefix + strconv.Itoa(i) + "."
+}

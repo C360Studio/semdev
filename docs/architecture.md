@@ -28,7 +28,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `task.spec.*` | task-projector | dev-from-task |
 | `task.attempt` | dev-loop-harness | dev-from-task |
 | `floor.finding` | floor-tools | dev-from-task |
-| `measurement.result` | measurement-harness | harness-measurement |
+| `measurement.result.*` | measurement-harness | harness-measurement |
 | `review.verdict` | reviewer-quinn | harness-measurement |
 | `verify.result` | verify-harness | clean-room-verify |
 | `evidence.run` | evidence-ledger | evidence-ledger |
@@ -48,6 +48,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `validate_change` | tool | openspec-io | `validate-change-cli-oracle` |
 | `github_list_comments` | tool | forge-io | `github-list-comments-tool` |
 | `project_tasks` | tool | dev-from-task | `project-tasks-tool` |
+| `measure_task` | tool | harness-measurement | `measurement-tool` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

@@ -160,6 +160,45 @@ Template:
 - **Registry entry:** `project_tasks` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## measurement-tool
+
+- **Primitive considered:** the framework's `bash` executor run directly by the dev
+  loop, or a rule/persona that reads the model's "tests pass" claim and records the
+  outcome.
+- **Why it cannot express this:** the measurement gate's whole value is that the
+  outcome is MEASURED, not asserted (G3). That means: read the IMMUTABLE
+  `task.spec.<i>.test_command` off the run entity (the projector froze it, so the
+  model cannot substitute a friendlier command), run it in the run's workspace,
+  and stamp `measurement.result.<i>` DERIVED from the real exit code — a non-zero
+  exit records failure regardless of the command's stdout or any model text, and a
+  command that never started (missing binary — a zero-value result with a runner
+  error) records `ran=false`/`passed=false` so it cannot false-green on the exit-0
+  a never-run process reports. No rule can run a subprocess or read an exit code.
+  The framework's `bash` tool captures an OS exit code (the mapped primitive), but
+  its schema takes a MODEL-SUPPLIED `command` — the exact G3 hazard this tool exists
+  to remove — and it neither reads the frozen command from the graph nor
+  derives-and-stamps the fact on the run entity. So semdev reuses only the
+  exit-code-capture seam it already owns (`internal/cliexec`, shared with
+  `validate_change` — a thin os/exec wrapper, not a re-created exec subsystem) and
+  adds the frozen-command read, the outcome-free schema, and the fact stamp (D9: the
+  OS exit-code→fact path is the native G3 shape; this tool is the thin harness that
+  wires it to the graph). It accepts no caller outcome (G3 — the schema takes only
+  the task index) and fires no transition (G2 — the reviewer reads the fact, a rule
+  advances the run).
+- **Fact shape:** `measurement.result` is a per-task OWNED namespace
+  (`measurement.result.<i>.{command,ran,exit_code,timed_out,passed}`), NOT a single
+  appended predicate. The graph merges replace-per-`(subject,predicate)`
+  (`graph.MergeTriples`), so a single exact predicate would let a second task's
+  measurement clobber the first; keying the task index into the predicate gives each
+  task its own owned sub-package, upserted independently (re-measuring a task
+  replaces its own facts — a measurement is a task's CURRENT outcome, not an
+  accumulating log; attempt history is `task.attempt`'s separate writer). This
+  mirrors the `task.spec.*` namespace and yields the "one measurement per required
+  task" shape `measurement.CanApprove` expects. Single G5 writer of
+  `measurement.result.*` (`measurement-harness`).
+- **Registry entry:** `measure_task` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's

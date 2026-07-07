@@ -41,9 +41,6 @@ const ToolName = "project_tasks"
 // declared for task.spec.* in internal/vocab (G5) — a conformance pin cross-checks.
 const Source = "task-projector"
 
-// taskSpecPrefix is the owned fact namespace on the run entity this tool writes.
-const taskSpecPrefix = "task.spec."
-
 // thinTextKey is the format engine's thin task-text sub-key (openspec.change.<slug>.
 // task.<i>.text) — the projector's goal comes from it (create_change writes it; the
 // round-trip test pins it).
@@ -99,7 +96,7 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 
 	// Immutability: task.spec is projected ONCE. If it already exists on this run,
 	// refuse — the dev loop converges on it, it does not redefine it.
-	existing, err := e.writer.ReadOwnedPredicates(ctx, runEntityID, taskSpecPrefix)
+	existing, err := e.writer.ReadOwnedPredicates(ctx, runEntityID, devtask.TaskSpecPrefix)
 	if err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "project_tasks: read existing task.spec on %s: %v", runEntityID, err)
 	}
@@ -242,7 +239,7 @@ func taskSpecTriples(runEntityID string, specs []devtask.TaskSpec, now time.Time
 		})
 	}
 	for _, s := range specs {
-		p := taskSpecPrefix + strconv.Itoa(s.Index) + "."
+		p := devtask.TaskSpecKeyPrefix(s.Index)
 		mk(p+devtask.FactGoal, s.Goal)
 		mk(p+devtask.FactTargetFiles, jsonArray(s.TargetFiles))
 		mk(p+devtask.FactTestCommand, s.TestCommand)

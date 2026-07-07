@@ -23,6 +23,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
+	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/writechange"
@@ -130,8 +131,22 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", projecttasks.ToolName, err)
 	}
 
-	// More semdev tools register here as later groups add them (measurement,
-	// floors, verify) — each G1-gated (registry.Entries) and G3-scanned.
+	// measure_task (harness-measurement) runs a projected task's IMMUTABLE
+	// task.spec.<i>.test_command and stamps the OS-level outcome as measurement.result
+	// (derived from the real exit code — G3). It reads the frozen command via the
+	// shared changefacts.Reader, runs it with the plain os/exec seam (cliexec.OSRunner,
+	// as validate_change does), and upserts the measurement via the shared
+	// OwnedFactWriter (its own Source, measurement-harness — G5-safe). WHERE the
+	// command runs — the run's checkout root — is the forge-io / clean-room workspace
+	// (nil here, schema-only like write_change's resolver; the group-11 journey injects
+	// a real one). Each nil dep makes Execute fail loudly, never silently drop a fact.
+	var checkout measuretask.Workspace // nil until the checkout seam lands
+	if err := reg.RegisterExecutor(measuretask.New(factReader, cliexec.OSRunner{}, changeWriter, checkout, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
+	}
+
+	// More semdev tools register here as later groups add them (floors, verify) —
+	// each G1-gated (registry.Entries) and G3-scanned.
 	return nil
 }
 

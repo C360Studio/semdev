@@ -40,6 +40,7 @@ var Entries = []Entry{
 	{Name: "validate_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "validate-change-cli-oracle"},
 	{Name: "github_list_comments", Kind: KindTool, Capability: "forge-io", AlignmentNote: "github-list-comments-tool"},
 	{Name: "project_tasks", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "project-tasks-tool"},
+	{Name: "measure_task", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "measurement-tool"},
 }
 
 // ComponentNames returns the declared names of Entries of KindComponent.

@@ -62,8 +62,8 @@
 
 ## 7. harness-measurement (G3, T4, S3)
 
-- [ ] 7.1 Measurement tool over the `bash` executor: capture OS exit code → `measurement.result`; schema has NO outcome field
-- [ ] 7.2 `measurement.result` single writer (G5 table entry); red-first: a non-zero exit records failure regardless of model text
+- [x] 7.1 Measurement tool over the `bash` executor: capture OS exit code → `measurement.result`; schema has NO outcome field
+- [x] 7.2 `measurement.result` single writer (G5 table entry); red-first: a non-zero exit records failure regardless of model text
 - [ ] 7.3 Reviewer (Quinn) reads `measurement.result` → `review.verdict`; additive-only, never weakens `task.spec`
 - [ ] 7.4 Review gates `open_pr` on harness facts; red-first: a false success claim cannot be approved
 
