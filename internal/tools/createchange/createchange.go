@@ -22,8 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -88,8 +91,16 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: %v", err)
 	}
 
-	change := p.toChange()
-	triples := changeTriples(runEntityID, change, time.Now().UTC())
+	change, richTasks := p.toChange()
+	now := time.Now().UTC()
+	// Thin facts (via the format engine) and the execution-rich, graph-only per-task
+	// facts are stamped TOGETHER in one atomic replace, so create_change's ownership
+	// of the whole openspec.change.<slug>.* package stays whole (design D14 / the
+	// architect's ruling — mock the intelligence, not the plumbing). richTasks are
+	// indexed by toChange as they enter change.Tasks, so their <i> equals the thin
+	// facts' <i> by construction.
+	triples := changeTriples(runEntityID, change, now)
+	triples = append(triples, richTaskTriples(runEntityID, p.Slug, richTasks, now)...)
 	if len(triples) == 0 {
 		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: authored change %q produced no facts", p.Slug)
 	}
@@ -125,6 +136,62 @@ func changeTriples(runEntityID string, change *openspec.Change, now time.Time) [
 		})
 	}
 	return out
+}
+
+// richTaskTriples emits the execution-rich, graph-only per-task facts create_change
+// authors ALONGSIDE the format engine's thin task facts — the fields dev-from-task
+// needs (target_files, test_command, assumptions, non_goals, budget) that OpenSpec's
+// thin tasks.md does not carry.
+//
+// Each rich task carries the flat index toChange assigned it as it entered
+// change.Tasks, so its <i> equals the thin facts' <i> BY CONSTRUCTION — one walk
+// assigns the index, no second flatten to drift (design D14). That <i> is the
+// projector's contiguous RawTask.Index.
+//
+// Presence is preserved and load-bearing: an ABSENT field emits NO fact, so the
+// projector reads nil (a gap) and fails toward the human; an authored-empty
+// assumptions/non_goals emits "[]" (a real value the projector accepts). This tool
+// does NOT validate the Karpathy schema — it records what was authored; the
+// projector owns gap detection (division of labor).
+func richTaskTriples(runEntityID, slug string, tasks []richTask, now time.Time) []message.Triple {
+	base := openspec.ChangeEntityPrefix(slug) + "task."
+	var out []message.Triple
+	mk := func(pred, obj string) {
+		out = append(out, message.Triple{
+			Subject:    runEntityID,
+			Predicate:  pred,
+			Object:     obj,
+			Source:     Source,
+			Timestamp:  now,
+			Confidence: 1.0,
+		})
+	}
+	for _, rt := range tasks {
+		p := base + strconv.Itoa(rt.Index) + "."
+		if rt.TargetFiles != nil {
+			mk(p+devtask.FactTargetFiles, jsonArray(rt.TargetFiles))
+		}
+		if strings.TrimSpace(rt.TestCommand) != "" {
+			mk(p+devtask.FactTestCommand, rt.TestCommand)
+		}
+		if rt.Assumptions != nil {
+			mk(p+devtask.FactAssumptions, jsonArray(rt.Assumptions))
+		}
+		if rt.NonGoals != nil {
+			mk(p+devtask.FactNonGoals, jsonArray(rt.NonGoals))
+		}
+		if rt.Budget != nil {
+			mk(p+devtask.FactBudget, strconv.Itoa(*rt.Budget))
+		}
+	}
+	return out
+}
+
+// jsonArray encodes a string slice as its JSON array form — the graph's string
+// form for a list, the same shape the projector reads back.
+func jsonArray(xs []string) string {
+	b, _ := json.Marshal(xs)
+	return string(b)
 }
 
 // writeErrKind distinguishes a handler-classified failure (a must-exist

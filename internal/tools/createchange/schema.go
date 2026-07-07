@@ -56,9 +56,22 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	// pre-completed. Task status is DERIVED from execution markers and gate facts
 	// (dev-from-task spec), not authored — the author tool coerces every task to
 	// not-done regardless of what the model supplies.
+	// The execution-rich fields are dev-from-task INPUTS (all authoring intent, no
+	// outcomes — G3): target_files is where the work lands, test_command is how it is
+	// checked (a command string, never a result), budget is the requested iteration
+	// bound (never an attempt count). They are graph-only (not rendered into
+	// tasks.md). The projector enforces the Karpathy schema over them; this tool only
+	// records them, so none is `required` here — a task authored without one is
+	// stamped partial and the projector fails it toward the human.
+	intBudget := map[string]any{"type": "integer", "description": "Requested iteration budget for this task; the projector clamps it to [1,5]."}
 	task := obj(map[string]any{
-		"number": map[string]any{"type": "string", "description": "OpenSpec dotted number, e.g. '1.1'."},
-		"text":   map[string]any{"type": "string", "description": "The task description."},
+		"number":       map[string]any{"type": "string", "description": "OpenSpec dotted number, e.g. '1.1'."},
+		"text":         map[string]any{"type": "string", "description": "The task description (the projector's goal)."},
+		"target_files": stringArray("Files this task will create or change (at least one)."),
+		"test_command": map[string]any{"type": "string", "description": "The command that verifies this task, e.g. 'go test ./...'."},
+		"assumptions":  stringArray("Assumptions the task relies on (state them even if empty)."),
+		"non_goals":    stringArray("What this task explicitly does NOT do (state them even if empty)."),
+		"budget":       intBudget,
 	}, "text")
 	taskSection := obj(map[string]any{
 		"section": map[string]any{"type": "string", "description": "The task group heading, e.g. '1. Foundation'."},
