@@ -59,9 +59,12 @@ type CheckResult struct {
 // Input is the clean-room execution evidence the verify harness gathered. Every
 // field is harness-measured (G3); Decide only judges it.
 type Input struct {
-	// Completed is true when the harness ran the resolve+build+test to completion
-	// (any outcome). False means it could NOT complete — a transport/infrastructure
-	// error, not a verdict. TransportError carries the reason.
+	// Completed is true when the harness reached a definitive artifact conclusion —
+	// it ran the resolve+build+test steps far enough to judge the artifact (all
+	// steps ran, OR a step failed GENUINELY so later steps are moot, e.g. a resolve
+	// that could not find a coordinate cold makes running the tests pointless).
+	// False means it could NOT complete — a transport/infrastructure error, not a
+	// verdict. TransportError carries the reason.
 	Completed      bool
 	TransportError string
 

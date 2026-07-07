@@ -231,6 +231,42 @@ Template:
 - **Registry entry:** `submit_review` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## verify-artifact-tool
+
+- **Primitive considered:** a rule that reads a build/test fact and stamps
+  `verify.result`, or reusing the framework's sandbox HTTP client / `bash` tool
+  directly to "run the tests."
+- **Why it cannot express this:** the clean-room gate (G4) must PROVE the delivered
+  artifact cold — provision fresh isolation with a distinct build-cache home (the
+  universal G4 control, D5), resolve/build from the artifact's OWN declarations, run
+  its OWN tests, and derive Pass/Fail/Retry from what happened. No rule can provision
+  a sandbox, run a subprocess, or read an exit code. The framework ships only an HTTP
+  client to an external sandbox and a git-diff tripwire (detection, not containment);
+  `pkg/sandbox` is proposal-only — so semdev owns a thin `cleanroom.Runner` seam
+  (Up/Exec/Down, mirroring semteams' sandboxmanager) with a MockRunner and an M0
+  LocalRunner (cache-home isolation on the host; a container Runner swaps in at M2
+  behind the same seam). The tool wires that Runner + the reproducibility manifest
+  (`internal/harness`) + the pure `verify.Decide` (`internal/verify`) and stamps
+  `verify.result`. It stamps no caller outcome (G3 — the schema takes NO arguments;
+  the model may only trigger the proof) and fires no transition (G2 — the open_pr
+  gate is a rule on `verify.result`).
+- **The transport-vs-genuine line (the make-or-break detail):** `verify.Decide` is
+  correct only if the harness sets `Completed=false` for ANY transport/infra fault, so
+  the tool draws that line — a failed provision, a step that could not run, or a
+  resolve failure the `cleanroom.ClassifyResolve` classifier reads as network-class
+  (registry unreachable, TLS/DNS/proxy, timeout) all yield **Retry**, never a terminal
+  reject of a good artifact. A GENUINE resolve failure (a missing/fabricated coordinate
+  the fresh cache could not mask) is `Resolved=false` → **Fail**: the
+  cache-masked-fabrication reject. Neither classification can produce a false-green (a
+  failed resolve is never Pass), so the classifier only decides Retry-vs-Fail; its
+  default for an unrecognized non-zero resolve is genuine (fail closed on the artifact).
+- **Fact shape:** `verify.result` is an EXACT scalar (pass/fail/retry) — one clean-room
+  verdict per run, upserted latest-wins (a retry re-run replaces it), which the open_pr
+  gate rule reads. Singular per run (the whole artifact proven as one unit), like
+  `review.verdict`. Single G5 writer of `verify.result` (`verify-harness`).
+- **Registry entry:** `verify_artifact` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's

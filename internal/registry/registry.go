@@ -42,6 +42,7 @@ var Entries = []Entry{
 	{Name: "project_tasks", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "project-tasks-tool"},
 	{Name: "measure_task", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "measurement-tool"},
 	{Name: "submit_review", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "submit-review-tool"},
+	{Name: "verify_artifact", Kind: KindTool, Capability: "clean-room-verify", AlignmentNote: "verify-artifact-tool"},
 }
 
 // ComponentNames returns the declared names of Entries of KindComponent.

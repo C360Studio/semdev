@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -27,6 +28,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
+	"github.com/c360studio/semdev/internal/tools/verifyartifact"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
@@ -156,8 +158,22 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}
 
-	// More semdev tools register here as later groups add them (floors, verify) —
-	// each G1-gated (registry.Entries) and G3-scanned.
+	// verify_artifact (clean-room-verify) is the G4 gate: it provisions fresh
+	// isolation via the cleanroom Runner, runs the artifact's own resolve+test cold,
+	// judges the evidence with verify.Decide, and stamps verify.result. The Runner is
+	// always supplied (LocalRunner — M0 cache-home isolation); WHERE the artifact lives
+	// (the checkout) and HOW to prove it (the reproducibility manifest) are the forge-io
+	// checkout + semdev-init seams, nil at M0 (schema-only, like write_change). It writes
+	// via the shared OwnedFactWriter (its own Source, verify-harness — G5-safe). Execute
+	// fails loudly if any nil seam is missing.
+	var checkout2 verifyartifact.Workspace // nil until the checkout seam lands
+	var manifests verifyartifact.Manifests // nil until semdev init lands
+	if err := reg.RegisterExecutor(verifyartifact.New(cleanroom.LocalRunner{}, checkout2, manifests, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
+	}
+
+	// More semdev tools register here as later groups add them (floors) — each
+	// G1-gated (registry.Entries) and G3-scanned.
 	return nil
 }
 

@@ -69,14 +69,14 @@
 
 ## 8. clean-room-verify (G4, S2, T5, T6) — the make-or-break
 
-- [ ] 8.1 Runner seam (`Up`/`Exec`) + `Mock` + local `ExecIsolated`; isolation product-supplied
-- [ ] 8.2 Reproducibility-contract manifest schema (language-agnostic) + the **Go profile** (fresh `GOMODCACHE`/`GOCACHE` per proof)
-- [ ] 8.3 `semdev init` (Go-profile slice): harvest → propose → prove-cold → commit `.semdev/harness.yaml`
-- [ ] 8.4 Verification-capability readiness gate (T5): `sandbox` vs `operator-ci` tier check; park/defer, never fake
-- [ ] 8.5 Port semspec `verify.Decide` (pure, offline-testable) + resolution-proof logic; **rule-wired, NOT the reconciler shell** (B3)
-- [ ] 8.6 Fresh cache-home per proof; `verify.result` harness-stamped, single writer
-- [ ] 8.7 G4 pins (red-first): cache-masked-fabrication fixture rejected; distinct build-cache home per run asserted; `open_pr` blocked until `verify.result` passes
-- [ ] 8.8 Fail-closed with transport-error retry (never terminal-reject on an infra hiccup)
+- [x] 8.1 Runner seam (`Up`/`Exec`) + `Mock` + local `ExecIsolated`; isolation product-supplied
+- [x] 8.2 Reproducibility-contract manifest schema (language-agnostic) + the **Go profile** (fresh `GOMODCACHE`/`GOCACHE` per proof)
+- [ ] 8.3 `semdev init` (Go-profile slice): harvest → propose → prove-cold → commit `.semdev/harness.yaml` <!-- deferred: the Manifests seam is nil@M0; verify_artifact reads the manifest via that seam, live harvest lands here -->
+- [x] 8.4 Verification-capability readiness gate (T5): `sandbox` vs `operator-ci` tier check; park/defer, never fake
+- [x] 8.5 Port semspec `verify.Decide` (pure, offline-testable) + resolution-proof logic; **rule-wired, NOT the reconciler shell** (B3)
+- [x] 8.6 Fresh cache-home per proof; `verify.result` harness-stamped, single writer
+- [ ] 8.7 G4 pins (red-first): cache-masked-fabrication fixture rejected; distinct build-cache home per run asserted; `open_pr` blocked until `verify.result` passes <!-- distinct-cache-home + cache-masked-fabrication(mock) pins DONE; the REAL fixture is 10.2; the open_pr gate RULE defers to g11 (needs coordinator spawn rules), same as 7.4 -->
+- [x] 8.8 Fail-closed with transport-error retry (never terminal-reject on an infra hiccup)
 
 ## 9. evidence-ledger (G7, S10)
 

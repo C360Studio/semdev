@@ -8,6 +8,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
+	"github.com/c360studio/semdev/internal/tools/verifyartifact"
 	"github.com/c360studio/semdev/internal/vocab"
 )
 
@@ -46,6 +47,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"project_tasks", projecttasks.Source, "task.spec.0.goal"},
 		{"measure_task", measuretask.Source, "measurement.result.0.passed"},
 		{"submit_review", submitreview.Source, submitreview.VerdictPredicate},
+		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 	}
 	for _, c := range cases {
 		writer, ok := vocab.WriterOf(c.predicate)
