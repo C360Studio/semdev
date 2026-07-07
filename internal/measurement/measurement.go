@@ -17,10 +17,15 @@ package measurement
 import "github.com/c360studio/semdev/internal/cliexec"
 
 // Result is the measurement fact the executing harness stamps: the OS-level
-// outcome of one test_command run. Passed is DERIVED — never a field a model or a
-// tool schema supplies (G3) — so a non-zero exit records failure no matter what
-// the command's stdout claims.
+// outcome of one task's test_command run, BOUND to the task identity it measured.
+// Passed is DERIVED — never a field a model or a tool schema supplies (G3) — so a
+// non-zero exit records failure no matter what the command's stdout claims.
 type Result struct {
+	// TaskID binds this measurement to the task whose test_command it ran, so the
+	// review gate can verify the REQUIRED evidence exists (not merely that some
+	// provided result passed). Command is the exact test_command that ran (audit).
+	TaskID  string
+	Command string
 	// Ran is true only when the command ran to completion. False means it could
 	// not be launched or was cancelled (a missing binary, a permission error): the
 	// "did it complete" bit lives in the runner's error, NOT in an exit code, so it
@@ -46,14 +51,17 @@ func passed(ran bool, exitCode int, timedOut bool) bool {
 	return ran && exitCode == 0 && !timedOut
 }
 
-// Measure derives a measurement Result from a completed command execution and the
-// error the runner returned alongside it. This is the G3 stamp point: Passed is
-// computed from the real exit status, timeout, AND completion (runErr), so neither
-// a model-supplied outcome nor a command that never started can enter the record
-// as a pass. A start failure yields Ran=false / Passed=false with RunError set.
-func Measure(r cliexec.Result, runErr error) Result {
+// Measure derives a measurement Result for a task's command execution from the
+// runner's Result and the error it returned alongside it. This is the G3 stamp
+// point: Passed is computed from the real exit status, timeout, AND completion
+// (runErr), so neither a model-supplied outcome nor a command that never started
+// can enter the record as a pass. A start failure yields Ran=false / Passed=false
+// with RunError set. taskID/command bind the fact to what it measured.
+func Measure(taskID, command string, r cliexec.Result, runErr error) Result {
 	ran := runErr == nil
 	res := Result{
+		TaskID:   taskID,
+		Command:  command,
 		Ran:      ran,
 		ExitCode: r.ExitCode,
 		TimedOut: r.TimedOut,
@@ -68,19 +76,36 @@ func Measure(r cliexec.Result, runErr error) Result {
 }
 
 // CanApprove is the deterministic floor under a semantic review verdict (7.4): a
-// review may record an approving verdict ONLY when every harness measurement
-// passed. It RE-DERIVES the pass condition from each Result's raw evidence rather
-// than trusting the Passed field, so the gate is authoritative no matter how a
-// Result was constructed. A model claiming success over a failing measurement
-// cannot be approved, and an EMPTY set cannot be approved either — an approval with
-// no harness evidence is the canonical false-green. Review findings are additive
-// constraints on top of this floor; they never relax it.
-func CanApprove(results []Result) bool {
-	if len(results) == 0 {
+// review may record an approving verdict ONLY when EVERY required task has a
+// passing measurement. It proves "the required task evidence exists and passed",
+// not merely "no provided result failed" — so a run cannot approve by omitting a
+// task's measurement entirely. For each required task it demands EXACTLY ONE
+// observed measurement (the loop supplies the latest attempt's; a missing one, or
+// an ambiguous/stale duplicate, blocks approval) and re-derives its pass from raw
+// evidence, ignoring the possibly-hand-set Passed field. An empty required set
+// cannot be approved — an approval with no required evidence is the canonical
+// false-green.
+//
+// Accepted M0 limit (carry-forward for the measurement-tool increment): the gate
+// proves a required task ran and exited zero, NOT that it ran a non-zero number of
+// tests — a command that exits 0 having run zero tests still passes. Closing that
+// needs harness-parsed test counts (itself G3-sensitive: counts from the real
+// output, never model text), which lands with the tool's stdout parse and its own
+// red-first pin.
+func CanApprove(requiredTaskIDs []string, observed []Result) bool {
+	if len(requiredTaskIDs) == 0 {
 		return false
 	}
-	for _, r := range results {
-		if !passed(r.Ran, r.ExitCode, r.TimedOut) {
+	byTask := map[string][]Result{}
+	for _, r := range observed {
+		byTask[r.TaskID] = append(byTask[r.TaskID], r)
+	}
+	for _, id := range requiredTaskIDs {
+		rs := byTask[id]
+		if len(rs) != 1 {
+			return false // missing (0) or ambiguous/stale (>1) evidence for a required task
+		}
+		if !passed(rs[0].Ran, rs[0].ExitCode, rs[0].TimedOut) {
 			return false
 		}
 	}

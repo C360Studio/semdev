@@ -3,8 +3,10 @@
 ### Requirement: Measurement facts are stamped by the executing harness
 
 The harness that executed a task's `test_command` SHALL stamp the measurement
-fact (`measurement.result`: exit code, pass/fail, test counts). No measurement
-fact SHALL originate from a model claim.
+fact (`measurement.result`: at minimum the exit code and derived pass/fail;
+test-count evidence is a per-profile addition that arrives with the harness's
+output parse, not an M0 guarantee). No measurement fact SHALL originate from a
+model claim.
 
 #### Scenario: A failing command records failure regardless of model text
 - **WHEN** the executed `test_command` exits non-zero

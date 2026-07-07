@@ -1,5 +1,7 @@
 package harness
 
+import "slices"
+
 // Readiness is the T5 verification-capability decision (design D8): before dev
 // builds toward a claim, is there a tier that can PROVE it, and where?
 type Readiness string
@@ -17,26 +19,32 @@ const (
 	ReadinessPark Readiness = "park"
 )
 
-// AssessReadiness reads the manifest's declared tiers and returns the T5 verdict
-// (D8). A sandbox tier wins (Ready); absent that, an operator-ci tier defers the
-// proof; absent any tier, the claim parks toward the human. It never invents a
-// tier or gates on evidence the sandbox cannot produce — the discipline that keeps
-// semdev out of the unwinnable "prove live/heavy behavior in-sandbox" trap.
-func AssessReadiness(tiers []Tier) Readiness {
-	hasSandbox := false
-	hasOperatorCI := false
+// AssessReadiness answers D8's CLAIM-SPECIFIC question: is there a tier that proves
+// the given claim, and where? Only a tier that actually proves the claim counts — a
+// sandbox tier that proves the claim wins (Ready); absent that, an operator-ci tier
+// that proves it defers the proof (Deferred, never faked); absent any tier that
+// proves it, the claim parks toward the human (Park). An unrelated sandbox tier
+// (e.g. a unit suite) does NOT make a claim ready that only an operator-ci tier
+// (e.g. SITL/hardware) proves — that separation is the whole point of the gate
+// (keeping semdev out of the unwinnable "prove live/heavy behavior in-sandbox" trap).
+func AssessReadiness(tiers []Tier, claim string) Readiness {
+	sandboxProves := false
+	operatorProves := false
 	for _, t := range tiers {
+		if !slices.Contains(t.Proves, claim) {
+			continue
+		}
 		switch t.Scope {
 		case TierSandbox:
-			hasSandbox = true
+			sandboxProves = true
 		case TierOperatorCI:
-			hasOperatorCI = true
+			operatorProves = true
 		}
 	}
 	switch {
-	case hasSandbox:
+	case sandboxProves:
 		return ReadinessReady
-	case hasOperatorCI:
+	case operatorProves:
 		return ReadinessDeferred
 	default:
 		return ReadinessPark

@@ -81,33 +81,43 @@ func TestDetectProfile(t *testing.T) {
 	}
 }
 
-// The T5 readiness gate (D8): a sandbox tier is Ready; only operator-ci defers;
-// no tier parks. A sandbox tier wins even when an operator-ci tier is also present.
+// The T5 readiness gate (D8) is CLAIM-SPECIFIC: only a tier that proves the claim
+// counts. A sandbox tier proving it → Ready; only an operator-ci tier proving it →
+// Deferred; no tier proving it → Park.
 func TestAssessReadiness(t *testing.T) {
+	unitSandbox := Tier{Name: "unit", Scope: TierSandbox, Proves: []string{"unit"}}
+	sitlOperator := Tier{Name: "sitl", Scope: TierOperatorCI, Proves: []string{"sitl"}}
+	mixed := []Tier{unitSandbox, sitlOperator}
+
 	cases := []struct {
 		name  string
 		tiers []Tier
+		claim string
 		want  Readiness
 	}{
-		{"sandbox", []Tier{{Name: "unit", Scope: TierSandbox}}, ReadinessReady},
-		{"operator-ci-only", []Tier{{Name: "sitl", Scope: TierOperatorCI}}, ReadinessDeferred},
-		{"both-sandbox-wins", []Tier{{Name: "sitl", Scope: TierOperatorCI}, {Name: "unit", Scope: TierSandbox}}, ReadinessReady},
-		{"none", nil, ReadinessPark},
-		{"unknown-scope-parks", []Tier{{Name: "x", Scope: "bogus"}}, ReadinessPark},
+		{"sandbox-proves-claim", []Tier{unitSandbox}, "unit", ReadinessReady},
+		{"operator-ci-proves-claim", []Tier{sitlOperator}, "sitl", ReadinessDeferred},
+		// The reviewer's case: a SITL-only claim must DEFER, not read Ready off the
+		// unrelated sandbox unit tier.
+		{"sitl-only-claim-defers-despite-sandbox-unit", mixed, "sitl", ReadinessDeferred},
+		{"unit-claim-ready-in-mixed", mixed, "unit", ReadinessReady},
+		{"no-tier-proves-claim", mixed, "e2e", ReadinessPark},
+		{"none", nil, "unit", ReadinessPark},
+		{"unknown-scope-parks", []Tier{{Name: "x", Scope: "bogus", Proves: []string{"unit"}}}, "unit", ReadinessPark},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := AssessReadiness(c.tiers); got != c.want {
-				t.Errorf("AssessReadiness(%+v) = %q, want %q", c.tiers, got, c.want)
+			if got := AssessReadiness(c.tiers, c.claim); got != c.want {
+				t.Errorf("AssessReadiness(%+v, %q) = %q, want %q", c.tiers, c.claim, got, c.want)
 			}
 		})
 	}
 }
 
-// The Go profile is Ready out of the box — its single sandbox tier proves the unit
-// suite in-sandbox.
+// The Go profile is Ready for its unit claim out of the box — its single sandbox
+// tier proves the unit suite in-sandbox.
 func TestGoProfileIsSandboxReady(t *testing.T) {
-	if got := AssessReadiness(GoProfile().Tiers); got != ReadinessReady {
-		t.Errorf("Go profile readiness = %q, want ready", got)
+	if got := AssessReadiness(GoProfile().Tiers, ClaimUnit); got != ReadinessReady {
+		t.Errorf("Go profile unit readiness = %q, want ready", got)
 	}
 }

@@ -37,12 +37,16 @@ const (
 	TierOperatorCI = "operator-ci"
 )
 
-// Tier is one declared test tier and where it can run. The split is harvested from
-// the repo's own test configuration (e.g. OSH already excludes its SITL tests), not
-// invented by the operator.
+// Tier is one declared test tier: where it can run AND which claims it proves. The
+// split is harvested from the repo's own test configuration (e.g. OSH already
+// excludes its SITL tests), not invented by the operator. Proves makes readiness
+// claim-specific (D8): a sandbox tier proves ONLY the claims it lists, so an
+// unrelated sandbox tier cannot make a claim ready that only an operator-ci tier
+// actually proves.
 type Tier struct {
-	Name  string `json:"name"`
-	Scope string `json:"scope"` // TierSandbox | TierOperatorCI
+	Name   string   `json:"name"`
+	Scope  string   `json:"scope"` // TierSandbox | TierOperatorCI
+	Proves []string `json:"proves"`
 }
 
 // Manifest is the reproducibility contract: how the clean-room harness resolves,
@@ -83,9 +87,14 @@ func GoProfile() Manifest {
 		CacheHomeEnvs: []string{"GOMODCACHE", "GOCACHE"},
 		ResolveCmd:    []string{"go", "mod", "download"},
 		TestCmd:       []string{"go", "test", "./..."},
-		Tiers:         []Tier{{Name: "unit", Scope: TierSandbox}},
+		Tiers:         []Tier{{Name: "unit", Scope: TierSandbox, Proves: []string{ClaimUnit}}},
 	}
 }
+
+// ClaimUnit is the M0 claim the Go unit suite proves — the whole artifact under
+// `go test ./...`. Richer claim vocabularies (per-requirement, SITL) arrive with
+// the JVM/OSH profiles at M2.
+const ClaimUnit = "unit"
 
 // profileMarkers maps a repo marker file to its ecosystem, checked in priority
 // order — a primary language manifest wins over package.json, which frequently
