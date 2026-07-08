@@ -224,7 +224,11 @@ func TestArchiveChangeIsDeclaredAndDisabled(t *testing.T) {
 }
 
 // Every rules_files path in the bootstrap config resolves to a real rule file —
-// a listed-but-missing path boots a processor that silently drops a rule.
+// a listed-but-missing path boots a processor that silently drops a rule (the
+// swallowed-rule-load class). rules_files are authored relative to the config
+// file's own directory (configs/), which boot.resolveRulePackPaths turns into
+// absolute paths at load so the rule engine is CWD-independent; this pin resolves
+// them the same way.
 func TestRulesFilesResolve(t *testing.T) {
 	root := repoRoot(t)
 	cfg, err := loadBootstrap(root)
@@ -234,9 +238,10 @@ func TestRulesFilesResolve(t *testing.T) {
 	if len(cfg.Components.Rule.Config.RulesFiles) == 0 {
 		t.Fatal("bootstrap lists no rules_files")
 	}
+	configDir := filepath.Join(root, "configs")
 	for _, rel := range cfg.Components.Rule.Config.RulesFiles {
-		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
-			t.Errorf("rules_files entry %q does not resolve: %v", rel, err)
+		if _, err := os.Stat(filepath.Join(configDir, rel)); err != nil {
+			t.Errorf("rules_files entry %q does not resolve relative to the config dir: %v", rel, err)
 		}
 	}
 }

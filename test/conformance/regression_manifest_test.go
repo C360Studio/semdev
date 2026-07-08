@@ -21,7 +21,7 @@ var regressionManifest = []struct {
 	{"G1", "test/conformance/g1_tools_test.go", []string{"TestSemdevToolsAreRegistered"},
 		"every semdev-added tool must carry a KindTool registry entry + alignment note"},
 	{"G1", "test/conformance/g1_parity_test.go", []string{"TestBinariesRegisterOnlyThroughBoot"},
-		"both binaries register only through boot.RegisterAll (half-wired-binary class)"},
+		"both binaries bring up their entire runtime only through boot.Run — registration, NATS, and the ServiceManager never wired independently (half-wired-binary class)"},
 	{"G1", "test/conformance/g1_alignment_test.go", []string{"TestRegistryEntriesHaveAlignmentNotes"},
 		"every registry entry links a resolvable framework-alignment note"},
 	{"G2", "test/conformance/g2_lifecycle_test.go", []string{"TestNoLifecycleTransitionCallersInProductGo", "TestLifecycleExceptionTableIsEmpty"},

@@ -32,9 +32,31 @@ tasks:
     cmds:
       - docker compose -f docker/compose/nats.yml down -v
 
+  nats:reset:
+    desc: >-
+      Wipe + restart NATS so the next boot loads config FROM FILE. The framework's
+      config.Manager stores config in a versioned KV: on boot it compares the file
+      version to the KV version and, when they are EQUAL (or the file is older), it
+      syncs from KV and IGNORES the file — so an edited config with an unbumped
+      version silently runs the stale KV copy. Any live boot that must reflect the
+      current config file MUST run against a fresh KV (this task) OR bump the config
+      `version`. See config/manager.go version-compare in the framework.
+    cmds:
+      - task: nats:down
+      - task: nats:up
+
+  test:integration:
+    desc: >-
+      Boot smoke test against a FRESH NATS (internal/boot/runtime_integration_test.go).
+      Resets NATS first so the runtime loads the config file under test, not a stale
+      versioned KV copy (see nats:reset).
+    deps: [nats:reset]
+    cmds:
+      - go test -tags=integration -count=1 ./internal/boot/...
+
   e2e:
     desc: Mock-LLM spine journey — zero paid tokens (mock ladder must be green)
-    deps: [nats:up]
+    deps: [nats:reset]
     cmds:
       - go test -race -tags=e2e ./test/e2e/...
 

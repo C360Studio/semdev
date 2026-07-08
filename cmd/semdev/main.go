@@ -1,28 +1,50 @@
-// Command semdev is the production binary: it registers components and runs the
-// arc over semstreams (issue → clean-room-verified PR). The NATS connection
-// (docker compose, never embedded), service manager, and run loop land in the
-// capability groups; this skeleton proves component registration is wired.
+// Command semdev is the production binary: it brings up the shared runtime
+// (NATS, docker compose, never embedded; every registry; every configured
+// service) and runs the arc over semstreams (issue → clean-room-verified PR).
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/c360studio/semdev/internal/boot"
 	"github.com/c360studio/semdev/internal/version"
-	"github.com/c360studio/semstreams/component"
 )
+
+// defaultConfigPath is the bootstrap config both semdev binaries boot from
+// unless overridden by SEMDEV_CONFIG. Repo-relative — matches how the config
+// itself references repo-relative rule-pack paths (see configs/semdev-bootstrap.json).
+const defaultConfigPath = "configs/semdev-bootstrap.json"
 
 func main() {
 	fmt.Printf("semdev %s\n", version.Version)
 
-	// Registration MUST go through boot.RegisterAll — the same path cmd/e2e-semdev
-	// uses — so the two binaries can never drift a component apart.
-	reg := component.NewRegistry()
-	if err := boot.RegisterAll(reg); err != nil {
-		fmt.Fprintf(os.Stderr, "semdev: register components: %v\n", err)
+	// Runtime boot MUST go through boot.Run — the same path cmd/e2e-semdev uses —
+	// so the two binaries can never drift a component, tool, or service apart
+	// (the half-wired-binary silent-flow-break class; see internal/boot/boot.go
+	// and internal/boot/runtime.go). Neither binary wires NATS, the component/
+	// tool/service registries, or the ServiceManager independently.
+	opts := boot.RunOptions{
+		ConfigPath:  configPath(),
+		GitHubToken: os.Getenv("GITHUB_TOKEN"),
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := boot.Run(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "semdev: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("registered %d component factories\n", len(reg.ListFactories()))
-	// TODO: NATS client + service manager + StartAll land with the capability groups.
+}
+
+// configPath returns SEMDEV_CONFIG when set, else defaultConfigPath.
+func configPath() string {
+	if p := os.Getenv("SEMDEV_CONFIG"); p != "" {
+		return p
+	}
+	return defaultConfigPath
 }

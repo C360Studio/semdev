@@ -136,6 +136,31 @@ func isSeparatorRow(cells []string) bool {
 	return true
 }
 
+// runCalls returns the qualified names (e.g. "boot.Run") of every call in src
+// to a function named exactly "Run". It is how the binary-parity pin proves
+// both mains bring up the runtime only through the shared boot.Run — never
+// wiring NATS, the registries, or the ServiceManager independently.
+func runCalls(src []byte) ([]string, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if name, ok := qualifiedFunc(call.Fun); ok {
+			if base := name[strings.LastIndex(name, ".")+1:]; base == "Run" {
+				out = append(out, name)
+			}
+		}
+		return true
+	})
+	return out, nil
+}
+
 // fileImports returns the import paths of a Go source file.
 func fileImports(src []byte) ([]string, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.ImportsOnly)
