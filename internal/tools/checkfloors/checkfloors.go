@@ -101,11 +101,21 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 
 	attempt, err := e.attempts.Resolve(ctx, runEntityID, idx)
 	if err != nil {
+		// Fail closed: a resolve/check failure must NOT leave a prior attempt's PASS
+		// readable as if it were the current attempt's — that is a direct route to a
+		// stale false-green once the gate reads these facts. Clear this task's findings
+		// so no current verdict is readable, then surface the resolve fault (retryable;
+		// the loop re-runs, and a persistent failure parks toward the human). The
+		// attempt-id binding is the belt to this clear's suspenders.
+		if cerr := e.clearFindings(ctx, runEntityID, idx); cerr != nil {
+			e.logger.Warn("check_floors: could not clear stale findings after a resolve fault",
+				slog.Int("task_index", idx), slog.Any("clear_error", cerr))
+		}
 		return errResult(call, agentic.ToolErrorInternal, "check_floors: resolve attempt for task %d: %v", idx, err)
 	}
 
 	findings := floors.CheckAll(attempt)
-	out := findingTriples(runEntityID, idx, findings, time.Now().UTC())
+	out := findingTriples(runEntityID, idx, floors.AttemptID(attempt), findings, time.Now().UTC())
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "check_floors: stamp floor.finding for task %d on %s: %v", idx, runEntityID, err)
 	}
@@ -125,12 +135,14 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 }
 
 // findingTriples projects the floor findings into the owned per-task package on the
-// run entity: floor.finding.<idx>.<floor>.{passed,detail}. The floor set is fixed
-// (CheckAll always returns the same five floors), so the sub-keys upsert by predicate
-// and re-evaluating the task replaces its prior findings without stale sub-keys.
-func findingTriples(runEntityID string, idx int, findings []floors.Finding, now time.Time) []message.Triple {
+// run entity: floor.finding.<idx>.attempt plus floor.finding.<idx>.<floor>.{passed,
+// detail}. The attempt id binds the whole set to the source it evaluated (so a gate
+// can reject a stale set). The floor set is fixed (CheckAll always returns the same
+// five floors), so the sub-keys upsert by predicate and re-evaluating the task
+// replaces its prior findings without leaving a stale sub-key.
+func findingTriples(runEntityID string, idx int, attemptID string, findings []floors.Finding, now time.Time) []message.Triple {
 	base := floors.FindingPrefix + strconv.Itoa(idx) + "."
-	out := make([]message.Triple, 0, len(findings)*2)
+	out := make([]message.Triple, 0, len(findings)*2+1)
 	mk := func(pred, obj string) {
 		out = append(out, message.Triple{
 			Subject:    runEntityID,
@@ -141,12 +153,28 @@ func findingTriples(runEntityID string, idx int, findings []floors.Finding, now 
 			Confidence: 1.0,
 		})
 	}
+	mk(base+floors.FactAttempt, attemptID)
 	for _, f := range findings {
 		p := base + f.Floor + "."
 		mk(p+floors.FactPassed, strconv.FormatBool(f.Passed))
 		mk(p+floors.FactDetail, f.Detail)
 	}
 	return out
+}
+
+// clearFindings removes this task's entire floor.finding.<idx>.* package (the "clear
+// my prefix" pattern), so a stale earlier attempt's pass is not left readable when
+// the current attempt cannot be evaluated. A no-op when nothing is stamped yet.
+func (e *Executor) clearFindings(ctx context.Context, runEntityID string, idx int) error {
+	prefix := floors.FindingPrefix + strconv.Itoa(idx) + "."
+	preds, err := e.writer.ReadOwnedPredicates(ctx, runEntityID, prefix)
+	if err != nil {
+		return err
+	}
+	if len(preds) == 0 {
+		return nil
+	}
+	return e.writer.ReplaceTriples(ctx, runEntityID, nil, preds)
 }
 
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {

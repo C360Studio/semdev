@@ -26,3 +26,11 @@ const (
 	FactPassed = "passed"
 	FactDetail = "detail"
 )
+
+// FactAttempt is the per-task sub-key holding the attempt identity (AttemptID) the
+// finding set evaluated: floor.finding.<taskIndex>.attempt. It binds the whole
+// finding set to a specific attempt so a gate can require the findings belong to the
+// run's CURRENT attempt before reading them as a pass — without it, a stale earlier
+// pass is indistinguishable from a current one. It is a sibling of the per-floor
+// sub-keys (no floor is named "attempt"), a scalar at the task level.
+const FactAttempt = "attempt"

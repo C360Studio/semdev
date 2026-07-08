@@ -24,6 +24,7 @@ func (f fakeAttempts) Resolve(_ context.Context, _ string, _ int) (floors.Attemp
 }
 
 type fakeWriter struct {
+	owned    []string // predicates ReadOwnedPredicates returns (the stale set)
 	replaces [][]message.Triple
 	removes  [][]string
 }
@@ -34,7 +35,7 @@ func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.T
 	return nil
 }
 func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
+	return w.owned, nil
 }
 
 func callFor(idx int) agentic.ToolCall {
@@ -154,6 +155,65 @@ func TestCheckFloorsReEvalUpserts(t *testing.T) {
 	for _, rm := range w.removes {
 		if len(rm) != 0 {
 			t.Errorf("check_floors cleared predicates %v; the fixed floor set should upsert without clears", rm)
+		}
+	}
+}
+
+// Codex P1: the finding set is bound to an attempt identity, and a CHANGED source
+// produces a DIFFERENT id — so a gate can tell whether a stamped finding evaluated
+// the current attempt or a stale earlier one, and cannot read attempt 1's pass as
+// current after attempt 2 changes the source.
+func TestCheckFloorsBindsAttemptIdentity(t *testing.T) {
+	w1 := &fakeWriter{}
+	facts1, _ := run(t, passingAttempt(), w1, 0)
+	id1 := facts1[floors.FindingPrefix+"0."+floors.FactAttempt]
+	if id1 == "" {
+		t.Fatal("finding set must stamp floor.finding.0.attempt (the evaluated-source identity)")
+	}
+	if id1 != floors.AttemptID(passingAttempt()) {
+		t.Errorf("stamped attempt id %q != AttemptID(attempt) — the gate cannot recompute it", id1)
+	}
+
+	// Attempt 2 changes the source: the id must differ from attempt 1's.
+	changed := passingAttempt()
+	changed.Files[0].Content += "\nfunc Sub(a, b int) int { return a - b }\n"
+	w2 := &fakeWriter{}
+	facts2, _ := run(t, changed, w2, 0)
+	if id2 := facts2[floors.FindingPrefix+"0."+floors.FactAttempt]; id2 == id1 {
+		t.Errorf("a changed attempt must produce a different attempt id (got %q for both)", id2)
+	}
+}
+
+// Codex P1: a resolve/check failure must NOT leave a prior attempt's pass readable.
+// The tool clears the task's stale findings (clear-my-prefix) and surfaces the error,
+// so semantic-review eligibility cannot read the stale pass as current.
+func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
+	stale := []string{
+		floors.FindingPrefix + "0." + floors.FactAttempt,
+		floors.FindingPrefix + "0." + floors.FloorSourceBuild + "." + floors.FactPassed,
+		floors.FindingPrefix + "0." + floors.FloorVacuousTest + "." + floors.FactPassed,
+	}
+	w := &fakeWriter{owned: stale}
+	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, nil).Execute(context.Background(), callFor(0))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error == "" {
+		t.Fatal("a failed resolve must surface an error")
+	}
+	// The stale findings must have been cleared (removed), and nothing new stamped.
+	cleared := false
+	for _, rm := range w.removes {
+		if len(rm) == len(stale) {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("a resolve failure must CLEAR the task's stale findings, got removes=%v", w.removes)
+	}
+	for _, batch := range w.replaces {
+		if len(batch) > 0 {
+			t.Errorf("a failed resolve must stamp no new findings, got %v", batch)
 		}
 	}
 }

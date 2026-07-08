@@ -285,14 +285,26 @@ Template:
   transition (G2) — the loop-gate that blocks advance-to-review on a rejecting
   `floor.finding` is a rule (task 6.6, wired with the bounded dev loop).
 - **Fact shape:** `floor.finding` is a per-(task, floor) OWNED namespace
-  (`floor.finding.<taskIndex>.<floorName>.{passed,detail}`), NOT a single appended
-  predicate. The graph merges replace-per-`(subject,predicate)`, so one exact
-  predicate would hold a single finding; keying both the task index and the floor name
-  into the predicate gives each floor its own sub-package, re-stamped each attempt
-  (latest-attempt-wins) so a task's current floor verdicts never clobber another
-  task's. The floor set is fixed (the five floors), so the sub-keys upsert without a
-  clear. Mirrors `measurement.result.*`; attempt history is `task.attempt`'s writer.
-  Single G5 writer of `floor.finding.*` (`floor-tools`).
+  (`floor.finding.<taskIndex>.<floorName>.{passed,detail}` plus a per-task
+  `floor.finding.<taskIndex>.attempt`), NOT a single appended predicate. The graph
+  merges replace-per-`(subject,predicate)`, so one exact predicate would hold a single
+  finding; keying both the task index and the floor name into the predicate gives each
+  floor its own sub-package, re-stamped each attempt (latest-attempt-wins) so a task's
+  current floor verdicts never clobber another task's. The floor set is fixed (the five
+  floors), so the sub-keys upsert without a clear. Mirrors `measurement.result.*`;
+  attempt history is `task.attempt`'s writer. Single G5 writer of `floor.finding.*`
+  (`floor-tools`).
+- **Current-attempt binding (Codex P1):** a finding without an attempt identity is a
+  stale-false-green route — a prior attempt's all-pass set is indistinguishable from
+  the current one after the loop authors a new attempt, or after a `check_floors` that
+  cannot resolve the checkout leaves the old passes readable. So the set is bound to
+  `floor.finding.<taskIndex>.attempt` = `floors.AttemptID` (a content hash of the
+  evaluated source; changes iff the source changes), and a resolve/check failure FAILS
+  CLOSED by clearing the task's `floor.finding.*` package (not leaving old passes
+  readable). Forward contract for the 6.6 gate: read a finding as a current pass ONLY
+  when its `attempt` matches the run's current attempt AND every floor passed —
+  never on the mere absence of a rejection (`AttemptID` is shared so the loop/gate
+  recompute the same id and cannot drift).
 - **Registry entry:** `check_floors` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
