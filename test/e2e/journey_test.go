@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,10 @@ const journeyIssueRef = "c360studio/semdev-journey#1"
 // terminal a coordinator picks for a newly admitted issue with no run yet.
 const journeyDecideAction = "issue_intake"
 
+// journeyChangeSlug is the slug the mock's scripted create_change authors. The
+// change facts land on the run entity under openspec.change.<slug>.*.
+const journeyChangeSlug = "journey-spine-change"
+
 // entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
 // lands in (graph-ingest's kv-write output). The journey scans it for the
 // coordinator's decision.
@@ -71,26 +76,37 @@ var wantAgenticHealthy = []string{
 // coordinator loop calls decide and stamps its routing decision. Later slices
 // grow the arc off that decision (mint the run → create_change → dev loop → …).
 func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
-	// The mock scripts a single decide turn keyed on the issue ref (a substring of
-	// the coordinator prompt). On any unscripted turn the completion path returns
-	// mockllm.UnmatchedSentinel, so a misfire fails loudly rather than green.
-	//
-	// The reason MUST carry the issue ref: the mint rule re-wakes the coordinator
-	// with a prompt that threads the prior decision reason, so the re-wake prompt
-	// then also contains the ref — which lets this same (sticky) fixture match the
-	// re-wake turn and terminate the child in one decide call rather than spinning
-	// on unmatched turns. (The re-wake's own decision is a no-op at this station:
-	// it re-lands issue_intake, which the mint rule's guard blocks from re-firing.)
-	mock := mockllm.New(mockllm.Fixture{
-		Marker: journeyIssueRef,
-		Tool: &mockllm.ToolCall{
-			Name: "decide",
-			Args: map[string]any{
+	// The mock scripts the arc's three sequential turns as a POSITIONAL sequence
+	// (cursor advances per matched tool call). The turns are causally ordered —
+	// each loop is spawned by a rule that fired on the prior loop's terminal — so
+	// the cursor lands each fixture on its turn:
+	//   1. C1 front-door coordinator → decide(issue_intake)   [mints the run]
+	//   2. C2 re-woken coordinator   → decide(create_change)  [routes to author]
+	//   3. A1 authoring coordinator  → create_change(<change>) [emits the change]
+	// Every marker is the issue ref: it is present in all three prompts (each rule
+	// threads the prior decision reason, which carries the ref), so the cursor —
+	// not the marker — distinguishes the turns. An unscripted turn returns
+	// mockllm.UnmatchedSentinel, failing loudly rather than green.
+	mock := mockllm.New(
+		mockllm.Fixture{
+			Marker: journeyIssueRef,
+			Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
 				"action": journeyDecideAction,
 				"reason": "new admitted issue " + journeyIssueRef + " needs a run",
-			},
+			}},
 		},
-	})
+		mockllm.Fixture{
+			Marker: journeyIssueRef,
+			Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
+				"action": "create_change",
+				"reason": "author the change for " + journeyIssueRef,
+			}},
+		},
+		mockllm.Fixture{
+			Marker: journeyIssueRef,
+			Tool:   &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()},
+		},
+	)
 	if err := mock.Start(); err != nil {
 		t.Fatalf("start mock LLM: %v", err)
 	}
@@ -140,6 +156,26 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	runEntityID := requireRunAnchor(ctx, t, taskID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	t.Logf("station 3: run %s minted and reached executing", runEntityID)
+
+	// Station 4 — the coordinator re-woke, decided create_change, and a rule
+	// spawned an authoring coordinator loop that called create_change. Assert the
+	// change facts landed on the run entity: proof the create_change spawn rule
+	// fired, the author inherited the run anchor, and the tool stamped
+	// openspec.change.<slug>.* on the run (the create_change→validate→approval arc
+	// hangs off these facts).
+	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
+	t.Logf("station 4: change %q authored onto run %s (mock RequestCount=%d)", journeyChangeSlug, runEntityID, mock.RequestCount())
+
+	// Exactly three model turns drove the arc (C1 decide(issue_intake),
+	// C2 decide(create_change), A1 create_change). create_change REPLACES its
+	// owned facts idempotently, so a re-spawn/loop regression would re-stamp the
+	// same facts and slip past requireChangeAuthored — RequestCount is the only
+	// signal of an extra turn, so pin it (the mockllm contract: assert turns ==
+	// expected). By here all three loops have terminated (StopLoop) and A1 spawns
+	// nothing, so no fourth call is in flight.
+	if got := mock.RequestCount(); got != 3 {
+		t.Fatalf("expected exactly 3 model turns (C1 decide, C2 decide, A1 create_change), got %d — extra turns indicate a re-spawn/loop or an unscripted turn", got)
+	}
 }
 
 // publishCoordinatorWake builds the front-door coordinator wake exactly as the
@@ -242,6 +278,61 @@ func requireRunPhase(ctx context.Context, t *testing.T, runEntityID, wantPhase s
 	}, "run entity "+runEntityID+" never reached agent.run.phase="+wantPhase+
 		" — the agent-run bridge did not advance it (check the handoff-marker rule fired on rule.spawned_task "+
 		"and the dispatched→executing rule on the run entity)")
+}
+
+// requireChangeAuthored polls the run entity until it carries at least one
+// openspec.change.<slug>.* triple — the proof the authoring loop's create_change
+// call stamped the change package on the run (it targets the run entity via the
+// inherited agent.run_entity_id). Fails naming the likely cause.
+func requireChangeAuthored(ctx context.Context, t *testing.T, runEntityID, slug string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	prefix := "openspec.change." + slug + "."
+	requireEventually(t, 45*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		for _, tr := range e.Triples {
+			if strings.HasPrefix(tr.Predicate, prefix) {
+				return true
+			}
+		}
+		return false
+	}, "run entity "+runEntityID+" never gained openspec.change."+slug+".* facts — the create_change "+
+		"spawn rule did not fire, the author did not inherit the run anchor (agent.run_entity_id), or the "+
+		"create_change tool call was not scripted/advertised")
+}
+
+// journeyChangeArgs is a minimal VALID create_change payload the mock's authoring
+// turn emits: a slug, a proposal with intent, one spec delta with an ADDED
+// RFC-2119 requirement carrying a Given/When/Then scenario, and one task section.
+// Mirrors the create_change tool's own test fixture so it passes the schema.
+func journeyChangeArgs() map[string]any {
+	return map[string]any{
+		"slug":     journeyChangeSlug,
+		"proposal": map[string]any{"intent": "make the spine journey author a real change", "scope_in": []any{"the spine"}},
+		"deltas": []any{map[string]any{
+			"capability": "spine",
+			"added": []any{map[string]any{
+				"name":      "Spine authors a change",
+				"statement": "The system SHALL author an OpenSpec change from an intaken issue.",
+				"scenarios": []any{map[string]any{
+					"name": "Issue intaken",
+					"steps": []any{
+						map[string]any{"kw": "WHEN", "text": "an admitted issue is routed to create_change"},
+						map[string]any{"kw": "THEN", "text": "openspec.change facts land on the run"},
+					},
+				}},
+			}},
+		}},
+		"tasks": []any{map[string]any{
+			"section": "1. Spine",
+			"items":   []any{map[string]any{"number": "1.1", "text": "emit the change onto the run"}},
+		}},
+	}
 }
 
 // scanEntities reads every entity in ENTITY_STATES into a map keyed by entity id.
