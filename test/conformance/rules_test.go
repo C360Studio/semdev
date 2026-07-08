@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -72,6 +73,61 @@ func (r ruleFile) hasAbsenceGuard(field string) bool {
 		}
 	}
 	return false
+}
+
+// spawnsNewRun reports whether the rule mints a run (a publish_agent with
+// run_scope "new") — the action that can put a fresh run anchor on the firing
+// coordinator, and (transitively) an inherited anchor on the spawned child.
+func (r ruleFile) spawnsNewRun() bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "publish_agent" && a.RunScope == "new" {
+			return true
+		}
+	}
+	return false
+}
+
+// handlesDualAnchor reports whether the rule is a dual-anchor handoff (semteams
+// agent-run/01b): it targets a coordinator carrying MORE than one run anchor,
+// detected by a length_gt guard on agent.run.entity_id. The single-anchor
+// handoff (01) uses length_eq 1 and silently stops matching once a coordinator
+// accumulates two anchors, so 01b is what keeps the self-minted run's handoff
+// firing in that case.
+func (r ruleFile) handlesDualAnchor() bool {
+	for _, c := range r.Conditions {
+		if c.Field == "agent.run.entity_id" && c.Operator == "length_gt" {
+			return true
+		}
+	}
+	return false
+}
+
+// dualAnchorGuardViolation returns a non-empty message when the rule set can put
+// a coordinator into a two-anchor state (more than one run-minting rule) without
+// a dual-anchor handoff to keep that coordinator's handoff firing. Empty when
+// safe. Pure over the parsed rules so the pin can be exercised with synthetic
+// input.
+func dualAnchorGuardViolation(rules []ruleFile) string {
+	minters, dualAnchor := 0, false
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		if r.spawnsNewRun() {
+			minters++
+		}
+		if r.handlesDualAnchor() {
+			dualAnchor = true
+		}
+	}
+	if minters > 1 && !dualAnchor {
+		return fmt.Sprintf("%d rules mint a run (run_scope=new) but no dual-anchor handoff rule is present "+
+			"(a length_gt guard on agent.run.entity_id) — a coordinator that inherits one anchor and mints a second "+
+			"makes the single-anchor handoff (length_eq 1) silently stop matching, wedging the self-minted run in "+
+			"dispatched. Port semteams agent-run/01b (or land the framework replace-on-mint fix) in the same change "+
+			"that adds the second run_scope=new rule", minters)
+	}
+	return ""
 }
 
 // G2 / 3.4 — every lifecycle_transition rule targets a VALID agent-run edge. The
@@ -205,6 +261,50 @@ func TestParkExclusionPinLogic(t *testing.T) {
 	}
 	if !guarded.hasAbsenceGuard("run.awaiting_human") {
 		t.Error("guarded rule not recognized as carrying the absence guard")
+	}
+}
+
+// The dual-anchor forward guard. At M0 exactly one rule mints a run
+// (coordinator/01-issue-intake-mint-run, guarded so a coordinator never
+// accumulates two anchors), so the single-anchor handoff (agent-run/01,
+// length_eq 1) suffices and semteams' 01b is intentionally not ported. This pin
+// fails the moment a SECOND run_scope=new rule lands (create_change, recovery
+// re-dispatch, …) without a dual-anchor handoff — the exact change at which a
+// coordinator can reach a two-anchor state and the length_eq 1 guard would
+// silently wedge the self-minted run in dispatched. It forces 01b (or the
+// framework fix) to land in the same change, not silently after.
+func TestDualAnchorHandoffPresentWhenMultipleRunScopeNew(t *testing.T) {
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	if msg := dualAnchorGuardViolation(rules); msg != "" {
+		t.Error(msg)
+	}
+}
+
+// Red-first: the dual-anchor guard helper must classify correctly — one minter
+// is safe, two minters without a dual-anchor handoff is a violation, and adding
+// the handoff clears it.
+func TestDualAnchorGuardLogic(t *testing.T) {
+	mint := ruleFile{ID: "mint", Enabled: true, OnEnter: []ruleAction{{Type: "publish_agent", RunScope: "new"}}}
+	dualAnchor := ruleFile{ID: "handoff-01b", Enabled: true, Conditions: []ruleCondition{
+		{Field: "agent.run.entity_id", Operator: "length_gt", Value: float64(1)},
+	}}
+
+	if msg := dualAnchorGuardViolation([]ruleFile{mint}); msg != "" {
+		t.Errorf("one minter should be safe, got violation: %s", msg)
+	}
+	if msg := dualAnchorGuardViolation([]ruleFile{mint, mint}); msg == "" {
+		t.Error("two minters without a dual-anchor handoff should violate, got none")
+	}
+	if msg := dualAnchorGuardViolation([]ruleFile{mint, mint, dualAnchor}); msg != "" {
+		t.Errorf("two minters WITH a dual-anchor handoff should be safe, got violation: %s", msg)
+	}
+	// A disabled second minter does not arm the guard.
+	disabledMint := ruleFile{ID: "mint-off", Enabled: false, OnEnter: []ruleAction{{Type: "publish_agent", RunScope: "new"}}}
+	if msg := dualAnchorGuardViolation([]ruleFile{mint, disabledMint}); msg != "" {
+		t.Errorf("a disabled second minter should not arm the guard, got violation: %s", msg)
 	}
 }
 

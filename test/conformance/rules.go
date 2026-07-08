@@ -86,6 +86,7 @@ type ruleAction struct {
 	Predicate string   `json:"predicate"`
 	Object    string   `json:"object"`
 	Tools     []string `json:"tools"`
+	RunScope  string   `json:"run_scope"`
 }
 
 // ruleFile is a single expression rule.

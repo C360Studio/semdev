@@ -36,6 +36,7 @@ import (
 	"github.com/c360studio/semdev/internal/boot"
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/mockllm"
+	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
@@ -73,6 +74,13 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	// The mock scripts a single decide turn keyed on the issue ref (a substring of
 	// the coordinator prompt). On any unscripted turn the completion path returns
 	// mockllm.UnmatchedSentinel, so a misfire fails loudly rather than green.
+	//
+	// The reason MUST carry the issue ref: the mint rule re-wakes the coordinator
+	// with a prompt that threads the prior decision reason, so the re-wake prompt
+	// then also contains the ref — which lets this same (sticky) fixture match the
+	// re-wake turn and terminate the child in one decide call rather than spinning
+	// on unmatched turns. (The re-wake's own decision is a no-op at this station:
+	// it re-lands issue_intake, which the mint rule's guard blocks from re-firing.)
 	mock := mockllm.New(mockllm.Fixture{
 		Marker: journeyIssueRef,
 		Tool: &mockllm.ToolCall{
@@ -116,12 +124,22 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireAgenticHealthy(ctx, t, rt)
 	taskID := publishCoordinatorWake(ctx, t)
 
-	// The loop is served asynchronously off the AGENT stream. Poll the graph until
-	// the coordinator's decide triple lands — the proof it routed, not merely that
-	// it reached the model. Bind the scan to THIS wake's task id so a coordinator
-	// decision left by a prior run cannot false-green the assertion.
+	// Station 2 — the coordinator routed. Poll the graph until the coordinator's
+	// decide triple lands (the proof it routed, not merely that it reached the
+	// model), bound to THIS wake's task id so a stale prior-run decision can't
+	// false-green.
 	requireCoordinatorDecision(ctx, t, taskID, journeyDecideAction)
-	t.Logf("coordinator routed via decide: task=%s next_action=%s (mock RequestCount=%d)", taskID, journeyDecideAction, mock.RequestCount())
+	t.Logf("station 2: coordinator routed via decide: task=%s next_action=%s (mock RequestCount=%d)", taskID, journeyDecideAction, mock.RequestCount())
+
+	// Station 3 — the decision minted a run. The issue_intake spawn rule fires
+	// publish_agent run_scope=new on the coordinator loop; the framework mints the
+	// run (rooted at the coordinator's loop id) and the agent-run bridge advances
+	// it dispatched→executing. Read the run anchor off THIS coordinator loop, then
+	// assert the run entity reaches executing — proof the mint + bridge rules fired
+	// live, not just that a decision was stamped.
+	runEntityID := requireRunAnchor(ctx, t, taskID)
+	requireRunPhase(ctx, t, runEntityID, "executing")
+	t.Logf("station 3: run %s minted and reached executing", runEntityID)
 }
 
 // publishCoordinatorWake builds the front-door coordinator wake exactly as the
@@ -165,42 +183,10 @@ func requireCoordinatorDecision(ctx context.Context, t *testing.T, wantTaskID, w
 	defer func() { _ = client.Close(context.Background()) }()
 
 	requireEventually(t, 45*time.Second, func() bool {
-		bucket, err := client.GetKeyValueBucket(ctx, entityStatesBucket)
-		if err != nil {
-			return false // graph-ingest may not have created the bucket yet
-		}
-		kv := client.NewKVStore(bucket)
-		keys, err := kv.Keys(ctx)
-		if err != nil {
-			return false // no keys yet (empty bucket surfaces as an error)
-		}
-		for _, key := range keys {
-			entry, err := kv.Get(ctx, key)
-			if err != nil {
-				continue
-			}
-			var e graph.EntityState
-			if err := json.Unmarshal(entry.Value, &e); err != nil {
-				continue
-			}
-			var role, task, action string
-			for _, tr := range e.Triples {
-				switch tr.Predicate {
-				case agvocab.LoopRole:
-					if s, ok := tr.Object.(string); ok {
-						role = s
-					}
-				case agvocab.LoopTask:
-					if s, ok := tr.Object.(string); ok {
-						task = s
-					}
-				case agvocab.CoordinatorNextAction:
-					if s, ok := tr.Object.(string); ok {
-						action = s
-					}
-				}
-			}
-			if role == "coordinator" && task == wantTaskID && action == wantAction {
+		for _, e := range scanEntities(ctx, client) {
+			if tripleString(e, agvocab.LoopRole) == "coordinator" &&
+				tripleString(e, agvocab.LoopTask) == wantTaskID &&
+				tripleString(e, agvocab.CoordinatorNextAction) == wantAction {
 				return true
 			}
 		}
@@ -208,6 +194,95 @@ func requireCoordinatorDecision(ctx context.Context, t *testing.T, wantTaskID, w
 	}, "coordinator loop (task "+wantTaskID+") never stamped decision.next_action="+wantAction+
 		" — check the front-door tool config (nil tools / tool_choice=required / allowlist), "+
 		"persona seeding, the decide registration, or the mock decide fixture marker")
+}
+
+// requireRunAnchor polls until THIS wake's coordinator loop carries an
+// agent.run.entity_id triple — the run anchor stamped by publish_agent
+// run_scope=new — and returns that run entity id. Its presence is the proof the
+// issue_intake spawn rule fired and minted a run rooted at the coordinator loop.
+func requireRunAnchor(ctx context.Context, t *testing.T, wantTaskID string) string {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	var runEntityID string
+	requireEventually(t, 45*time.Second, func() bool {
+		entities := scanEntities(ctx, client)
+		for _, e := range entities {
+			if tripleString(e, agvocab.LoopTask) != wantTaskID {
+				continue
+			}
+			if id := tripleString(e, agvocab.LoopRunEntityID); id != "" {
+				runEntityID = id
+				return true
+			}
+		}
+		return false
+	}, "coordinator loop (task "+wantTaskID+") never gained an agent.run.entity_id anchor "+
+		"— the issue_intake spawn rule (run_scope=new) did not fire; check the rule conditions "+
+		"(coordinator role / next_action=issue_intake / no prior run anchor) and that the lifecycle manager is wired")
+	return runEntityID
+}
+
+// requireRunPhase polls the run entity until agent.run.phase == wantPhase, or
+// fails. Reaching `executing` proves the agent-run bridge (handoff-marker →
+// dispatched-to-executing) advanced the freshly-minted run.
+func requireRunPhase(ctx context.Context, t *testing.T, runEntityID, wantPhase string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	requireEventually(t, 45*time.Second, func() bool {
+		entities := scanEntities(ctx, client)
+		e, ok := entities[runEntityID]
+		if !ok {
+			return false
+		}
+		return tripleString(e, agentrun.PhasePredicate) == wantPhase
+	}, "run entity "+runEntityID+" never reached agent.run.phase="+wantPhase+
+		" — the agent-run bridge did not advance it (check the handoff-marker rule fired on rule.spawned_task "+
+		"and the dispatched→executing rule on the run entity)")
+}
+
+// scanEntities reads every entity in ENTITY_STATES into a map keyed by entity id.
+// Returns an empty map on any transient read error (bucket not yet created, no
+// keys yet) so callers poll rather than fail on a not-yet-populated graph.
+func scanEntities(ctx context.Context, client *natsclient.Client) map[string]graph.EntityState {
+	out := map[string]graph.EntityState{}
+	bucket, err := client.GetKeyValueBucket(ctx, entityStatesBucket)
+	if err != nil {
+		return out
+	}
+	kv := client.NewKVStore(bucket)
+	keys, err := kv.Keys(ctx)
+	if err != nil {
+		return out
+	}
+	for _, key := range keys {
+		entry, err := kv.Get(ctx, key)
+		if err != nil {
+			continue
+		}
+		var e graph.EntityState
+		if err := json.Unmarshal(entry.Value, &e); err != nil {
+			continue
+		}
+		out[e.ID] = e
+	}
+	return out
+}
+
+// tripleString returns the first string object of the entity's triple for
+// predicate, or "" if absent / non-string.
+func tripleString(e graph.EntityState, predicate string) string {
+	for _, tr := range e.Triples {
+		if tr.Predicate == predicate {
+			if s, ok := tr.Object.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // connectFrontDoor opens a NATS client to the local runtime for publishing the
