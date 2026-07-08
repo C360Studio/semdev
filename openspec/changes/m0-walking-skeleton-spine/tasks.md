@@ -53,12 +53,12 @@
 
 ## 6. dev-from-task (T2, T3, S1)
 
-- [ ] 6.1 Task projector: approved change → immutable `task.spec` facts (reuse `project_spec_tasks` pattern); mutation rejected
-- [ ] 6.2 Karpathy schema enforcement at stamp (assumptions, non_goals, ≥1 target_file, required test_command); missing → fail toward human
-- [ ] 6.3 Budget clamp `[1,5]` at stamp; escalate rule fires by iteration 6
-- [ ] 6.4 Bounded dev loop on `agentic-loop`; record `task.attempt` per iteration; escalate + halt on exhaustion
-- [ ] 6.5 Deterministic floor checks as pure functions + red-first tables (S1): source-build, vacuous-test, stub, anti-mock, tests-must-exist → `floor.finding`
-- [ ] 6.6 Floors gate the loop (cannot skip); a rejecting `floor.finding` blocks advance to review
+- [x] 6.1 Task projector: approved change → immutable `task.spec` facts (reuse `project_spec_tasks` pattern); mutation rejected
+- [x] 6.2 Karpathy schema enforcement at stamp (assumptions, non_goals, ≥1 target_file, required test_command); missing → fail toward human
+- [ ] 6.3 Budget clamp `[1,5]` at stamp; escalate rule fires by iteration 6 <!-- clamp DONE (devtask.ClampBudget); the escalate RULE is loop wiring, deferred to g11 with 6.4 -->
+- [ ] 6.4 Bounded dev loop on `agentic-loop`; record `task.attempt` per iteration; escalate + halt on exhaustion <!-- deferred: needs the live agentic-loop + shared runtime path (g11) -->
+- [x] 6.5 Deterministic floor checks as pure functions + red-first tables (S1): source-build, vacuous-test, stub, anti-mock, tests-must-exist → `floor.finding`
+- [ ] 6.6 Floors gate the loop (cannot skip); a rejecting `floor.finding` blocks advance to review <!-- check_floors stamps floor.finding + returns AnyRejected; the loop-gate RULE that blocks advance-to-review defers to g11 (needs the bounded dev loop) -->
 
 ## 7. harness-measurement (G3, T4, S3)
 

@@ -27,7 +27,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `openspec.archived` | openspec-archive-harness | openspec-io |
 | `task.spec.*` | task-projector | dev-from-task |
 | `task.attempt` | dev-loop-harness | dev-from-task |
-| `floor.finding` | floor-tools | dev-from-task |
+| `floor.finding.*` | floor-tools | dev-from-task |
 | `measurement.result.*` | measurement-harness | harness-measurement |
 | `review.verdict` | reviewer-quinn | harness-measurement |
 | `verify.result` | verify-harness | clean-room-verify |
@@ -51,6 +51,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `measure_task` | tool | harness-measurement | `measurement-tool` |
 | `submit_review` | tool | harness-measurement | `submit-review-tool` |
 | `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
+| `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

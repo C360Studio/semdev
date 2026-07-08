@@ -3,6 +3,7 @@ package conformance
 import (
 	"testing"
 
+	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
@@ -48,6 +49,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"measure_task", measuretask.Source, "measurement.result.0.passed"},
 		{"submit_review", submitreview.Source, submitreview.VerdictPredicate},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
+		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
 	}
 	for _, c := range cases {
 		writer, ok := vocab.WriterOf(c.predicate)

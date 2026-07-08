@@ -267,6 +267,35 @@ Template:
 - **Registry entry:** `verify_artifact` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## floor-tools-wrapper
+
+- **Primitive considered:** a rule that inspects an attempt and stamps
+  `floor.finding`, or trusting the persona's own claim that its test is real.
+- **Why it cannot express this:** the floors are STRUCTURAL source analysis — parse
+  every authored `.go` file, walk the AST to decide whether a test exists, whether it
+  asserts on computed behavior (vs a constant tautology), whether it ships a stub, and
+  whether it "tests" only a mock of the target symbols. No rule can parse Go and walk
+  an AST; and the whole point (S1) is that a persona cannot be trusted to answer these
+  fabrication-shaped questions about its OWN work, so the verdict must be a
+  deterministic harness computation, never a model claim (G3 — the schema takes only
+  the task index; `floor.finding` carries a harness-derived `passed`). The pure floor
+  library (`internal/floors`) does the analysis; this tool only WRAPS it with
+  fact-stamping (the floors package writes no facts, which keeps them offline-testable
+  and G5-clean). It records the findings and reports whether any rejected; it fires no
+  transition (G2) — the loop-gate that blocks advance-to-review on a rejecting
+  `floor.finding` is a rule (task 6.6, wired with the bounded dev loop).
+- **Fact shape:** `floor.finding` is a per-(task, floor) OWNED namespace
+  (`floor.finding.<taskIndex>.<floorName>.{passed,detail}`), NOT a single appended
+  predicate. The graph merges replace-per-`(subject,predicate)`, so one exact
+  predicate would hold a single finding; keying both the task index and the floor name
+  into the predicate gives each floor its own sub-package, re-stamped each attempt
+  (latest-attempt-wins) so a task's current floor verdicts never clobber another
+  task's. The floor set is fixed (the five floors), so the sub-keys upsert without a
+  clear. Mirrors `measurement.result.*`; attempt history is `task.attempt`'s writer.
+  Single G5 writer of `floor.finding.*` (`floor-tools`).
+- **Registry entry:** `check_floors` (`tool`)
+- **Change:** m0-walking-skeleton-spine
+
 ## brownfield-spec-projector
 
 - **Primitive considered:** a rule/persona that reads a target repo's

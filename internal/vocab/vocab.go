@@ -42,7 +42,7 @@ var Predicates = []Predicate{
 	{"openspec.archived", "openspec-archive-harness", "openspec-io", m0},
 	{"task.spec.*", "task-projector", "dev-from-task", m0},
 	{"task.attempt", "dev-loop-harness", "dev-from-task", m0},
-	{"floor.finding", "floor-tools", "dev-from-task", m0},
+	{"floor.finding.*", "floor-tools", "dev-from-task", m0},
 	{"measurement.result.*", "measurement-harness", "harness-measurement", m0},
 	{"review.verdict", "reviewer-quinn", "harness-measurement", m0},
 	{"verify.result", "verify-harness", "clean-room-verify", m0},

@@ -21,6 +21,7 @@ import (
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
+	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
@@ -172,8 +173,16 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
 	}
 
-	// More semdev tools register here as later groups add them (floors) — each
-	// G1-gated (registry.Entries) and G3-scanned.
+	// check_floors (dev-from-task) is the floor-tools wrapper: it runs the pure floor
+	// library over a task's current attempt and stamps floor.finding. WHICH files the
+	// attempt authored is checkout/git state (the Attempts seam), nil at M0 (schema-
+	// only); it writes via the shared OwnedFactWriter (its own Source, floor-tools —
+	// G5-safe). Execute fails loudly if either seam is missing.
+	var attempts checkfloors.Attempts // nil until the bounded dev loop / checkout seam lands
+	if err := reg.RegisterExecutor(checkfloors.New(attempts, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", checkfloors.ToolName, err)
+	}
+
 	return nil
 }
 
