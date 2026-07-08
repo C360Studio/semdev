@@ -43,6 +43,7 @@ import (
 	"github.com/c360studio/semstreams/natsclient"
 	"github.com/c360studio/semstreams/payloadbuiltins"
 	"github.com/c360studio/semstreams/payloadregistry"
+	"github.com/c360studio/semstreams/persona"
 	"github.com/c360studio/semstreams/pkg/lifecycle"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
@@ -108,6 +109,14 @@ type RunOptions struct {
 	// from the environment at the composition edge (cmd/*'s main), never
 	// here — keeps this package hermetic to its caller's choice.
 	GitHubToken string
+	// PersonasDir is the root of the role-fragment tree (<root>/<role>/*.md)
+	// seeded into the PERSONAS KV bucket at boot. Empty derives it from the
+	// config file's own directory (<configDir>/personas/fragments), which is
+	// correct for both binaries (config + personas ship together in configs/).
+	// The group-11 journey copies only the config JSON to a temp dir, so it sets
+	// this explicitly to the repo's real fragment tree — otherwise the coordinator
+	// would run on the framework's default persona instead of Sarah's contract.
+	PersonasDir string
 	// Logger receives every log line the runtime boot emits. Nil defaults to
 	// slog.Default().
 	Logger *slog.Logger
@@ -222,6 +231,73 @@ func resolveRulePackPaths(cfg *config.Config, configDir string) error {
 		}
 		comp.Config = rewritten
 		cfg.Components[key] = comp
+	}
+	return nil
+}
+
+// personasDir resolves the persona fragment root: an explicit RunOptions
+// override, else the convention path beside the config file
+// (<configDir>/personas/fragments). Deriving from the config dir keeps the
+// two binaries CWD-independent for the same reason resolveRulePackPaths does
+// for rules — config and personas ship together under configs/.
+func personasDir(opts RunOptions) string {
+	if opts.PersonasDir != "" {
+		return opts.PersonasDir
+	}
+	return filepath.Join(filepath.Dir(opts.ConfigPath), "personas", "fragments")
+}
+
+// RequiredCoordinatorFragments are the coordinator persona fragment IDs (role
+// dir + filename stem, per persona.LoadFromDirectory's ID scheme) the front door
+// cannot route without: 00-identity establishes Sarah, 10-decision-contract
+// carries the closed decide taxonomy the whole arc routes on. seedPersonas
+// requires them present after loading, and the integration pin asserts the same
+// set — one invariant, two consumers, so they cannot drift.
+var RequiredCoordinatorFragments = []string{
+	"coordinator/00-identity",
+	"coordinator/10-decision-contract",
+}
+
+// seedPersonas upserts every role fragment under dir into the PERSONAS KV
+// bucket so the agentic-loop assembles semdev's own coordinator/developer/
+// reviewer prompts (Sarah/Amelia/Quinn) instead of the framework defaults.
+//
+// It FAILS CLOSED — but on the CONTENT that matters, not merely a dir stat.
+// semstreams' LoadFromDirectory is tolerant by design: a missing dir, a wrong
+// dir with no <role>/*.md, or an unreadable fragment all warn-and-return-nil,
+// loading zero fragments while boot proceeds green. That is exactly the silent
+// arc-misroute the constitution bars (the coordinator persona carries the closed
+// decision-taxonomy contract).
+//
+// So after loading we bind the check to THIS boot's load: for each load-bearing
+// coordinator fragment we read the file this call intended to seed
+// (<dir>/<id>.md — a mis-set path or removed file fails HERE) and require the
+// PERSONAS bucket to hold exactly that content. Verifying against the on-disk
+// source, not just "some value is present," is what makes a later boot with a
+// bad path fail rather than silently keep routing on a prior boot's stale
+// fragments (the bucket persists across boots; a bare re-Get would pass on them).
+func seedPersonas(ctx context.Context, client *natsclient.Client, dir string, logger *slog.Logger) error {
+	mgr, err := persona.NewManager(client)
+	if err != nil {
+		return fmt.Errorf("open persona manager: %w", err)
+	}
+	if err := persona.LoadFromDirectory(ctx, dir, mgr, logger); err != nil {
+		return fmt.Errorf("seed personas from %s: %w", dir, err)
+	}
+	for _, id := range RequiredCoordinatorFragments {
+		// The fragment file this boot intends to seed. LoadFromDirectory's ID
+		// scheme is <role>/<stem>, mapping to <dir>/<role>/<stem>.md.
+		want, err := os.ReadFile(filepath.Join(dir, id+".md"))
+		if err != nil {
+			return fmt.Errorf("read required coordinator persona fragment %q under %s: %w", id, dir, err)
+		}
+		p, err := mgr.Get(ctx, id)
+		if err != nil {
+			return fmt.Errorf("required coordinator persona fragment %q not seeded from %s: %w", id, dir, err)
+		}
+		if p == nil || p.Content != string(want) {
+			return fmt.Errorf("required coordinator persona fragment %q in the PERSONAS bucket does not match %s (this boot's seed did not take)", id, dir)
+		}
 	}
 	return nil
 }
@@ -433,6 +509,16 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 
 	svcMgr, toolRegistry, err := wireServices(ctx, cfg, natsClient, configMgr, opts, logger)
 	if err != nil {
+		_ = configMgr.Stop(5 * time.Second)
+		_ = natsClient.Close(ctx)
+		return nil, err
+	}
+
+	// Seed the PERSONAS KV bucket from the fragment tree BEFORE Start, so the
+	// agentic-loop's per-task persona assembly reads Sarah/Amelia/Quinn rather
+	// than the framework defaults. A wiring fault (wrong path) fails boot here
+	// rather than silently degrading the coordinator's routing prompt.
+	if err := seedPersonas(ctx, natsClient, personasDir(opts), logger); err != nil {
 		_ = configMgr.Stop(5 * time.Second)
 		_ = natsClient.Close(ctx)
 		return nil, err

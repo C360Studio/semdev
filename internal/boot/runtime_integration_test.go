@@ -15,9 +15,12 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/c360studio/semstreams/natsclient"
+	"github.com/c360studio/semstreams/persona"
 	"github.com/c360studio/semstreams/service"
 )
 
@@ -152,6 +155,64 @@ func TestRuntimeStartsCleanlyAgainstLiveNATS(t *testing.T) {
 	for _, name := range wantAdvertisedTools {
 		if !got[name] {
 			t.Errorf("tool %q not advertised by the ExecutorRegistry; got %d tools", name, len(tools))
+		}
+	}
+}
+
+// TestRuntimeSeedsCoordinatorPersona proves NewRuntime seeds the PERSONAS KV
+// bucket from the fragment tree, so the agentic-loop assembles Sarah's decision
+// contract rather than the framework's default persona. The coordinator front
+// door routes the entire issue→PR arc off this prompt (the closed decide
+// taxonomy lives in 10-decision-contract.md), so a mis-resolved persona path is
+// a silent arc-routing fault — this is the regression guard for that wiring.
+//
+// It only wires (NewRuntime), never Starts: seeding happens during wiring, so
+// this needs no running components and sidesteps the #508 shutdown wedge.
+//
+// Hermetic by construction: it DELETES the required fragments first, so the
+// assertion proves THIS NewRuntime re-seeded them rather than reading fragments
+// a prior run left behind (the PERSONAS bucket name is a fixed framework const,
+// so the test cannot isolate into its own bucket — it must clean the keys it
+// checks). It does not rely on the harness resetting NATS first.
+func TestRuntimeSeedsCoordinatorPersona(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	client, err := natsclient.NewClient("nats://localhost:4222")
+	if err != nil {
+		t.Fatalf("persona-read NATS client: %v", err)
+	}
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("persona-read connect: %v", err)
+	}
+	defer func() { _ = client.Close(context.Background()) }()
+	if err := client.WaitForConnection(ctx); err != nil {
+		t.Fatalf("persona-read wait for connection: %v", err)
+	}
+
+	mgr, err := persona.NewManager(client)
+	if err != nil {
+		t.Fatalf("open persona manager: %v", err)
+	}
+	// Pre-clean the keys under test so a stale seed from a prior run cannot pass a
+	// broken/removed seed step. Delete of an absent key is tolerated best-effort.
+	for _, id := range RequiredCoordinatorFragments {
+		_ = mgr.Delete(ctx, id)
+	}
+
+	rt, err := NewRuntime(ctx, RunOptions{ConfigPath: bootstrapConfigPath(t)})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer func() { _ = rt.Stop(5 * time.Second) }()
+
+	for _, id := range RequiredCoordinatorFragments {
+		p, err := mgr.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("coordinator persona fragment %q absent from PERSONAS bucket after NewRuntime (seed step unwired or path mis-resolved): %v", id, err)
+		}
+		if p == nil || strings.TrimSpace(p.Content) == "" {
+			t.Errorf("coordinator persona fragment %q seeded empty; want the fragment's markdown body", id)
 		}
 	}
 }

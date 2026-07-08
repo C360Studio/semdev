@@ -2,14 +2,22 @@
 
 // The mock-LLM spine journey (group 11). It boots the REAL shared runtime against
 // the in-process mock LLM (zero paid tokens) and drives the issue→PR arc through
-// it, growing one station at a time. This first slice proves the load-bearing live
-// plumbing every later station depends on: the config points the agentic-model
-// endpoint at the in-process mock, the runtime assembles the agentic-execution
-// plane, a coordinator TaskMessage published to the front door actually spawns a
-// loop, and that loop reaches the mock. If the front-door subject, the BaseMessage
-// envelope, the stream wiring, or the model endpoint override is wrong, the loop
-// never runs and RequestCount stays 0 — so this is the regression guard for the
-// whole live path before the dev-loop rail layers onto it.
+// it, growing one station at a time.
+//
+// Station 1 proved the live plumbing: the config points the agentic-model
+// endpoint at the mock, the runtime assembles the agentic-execution plane, a
+// coordinator TaskMessage published to the front door spawns a loop, and that
+// loop reaches the mock.
+//
+// Station 2 (this slice) proves the coordinator actually ROUTES: the front-door
+// wake is built exactly as the intake adapter will build it (via
+// intake.CoordinatorTask — nil tools = global discovery, tool_choice=required,
+// the closed decide-action allowlist), the seeded coordinator persona is live,
+// and the mock's scripted decide turn lands a coordinator.decision.next_action
+// triple on the loop entity. If the tool config, the persona seeding, the front
+// door subject, or the decide registration is wrong, the loop reaches the model
+// but never routes and no decision fact appears — so this is the regression guard
+// for the whole route-a-decision path the dev-loop rail layers onto.
 //
 // Run via `task e2e`, which resets NATS first so the runtime loads the journey's
 // patched config from file rather than a stale versioned-KV copy.
@@ -26,18 +34,28 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/boot"
+	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/mockllm"
-	"github.com/c360studio/semstreams/agentic"
+	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
 	"github.com/c360studio/semstreams/service"
+	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 )
 
-// journeyMarker is a distinctive substring of the coordinator prompt this journey
-// publishes; the mock keys its scripted response on it so an unscripted turn fails
-// loudly (mockllm.UnmatchedSentinel) rather than passing green on the framework
-// mock's default output.
-const journeyMarker = "JOURNEY_SPINE_SMOKE"
+// journeyIssueRef is the host-neutral issue ref this journey admits. It is
+// distinctive so the mock can key its scripted decide turn on it as a substring
+// of the coordinator prompt (intake.CoordinatorTask always embeds the ref).
+const journeyIssueRef = "c360studio/semdev-journey#1"
+
+// journeyDecideAction is the action the mock's scripted decide returns — the
+// terminal a coordinator picks for a newly admitted issue with no run yet.
+const journeyDecideAction = "issue_intake"
+
+// entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
+// lands in (graph-ingest's kv-write output). The journey scans it for the
+// coordinator's decision.
+const entityStatesBucket = "ENTITY_STATES"
 
 // wantAgenticHealthy are the components the coordinator loop needs live before the
 // front-door message can be served: the agentic-execution plane plus the graph
@@ -47,14 +65,23 @@ var wantAgenticHealthy = []string{
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
 }
 
-// TestSpineJourneyCoordinatorRunsAgainstMock is the first spine slice: publish a
-// coordinator TaskMessage to the front door and prove the agentic plane runs a loop
-// that reaches the mock LLM. Later slices assert the resulting decision fact and
-// grow the arc (create_change → approval → dev loop → …).
-func TestSpineJourneyCoordinatorRunsAgainstMock(t *testing.T) {
+// TestSpineJourneyCoordinatorDecidesAgainstMock is the second spine slice:
+// publish an admitted issue's coordinator wake to the front door and prove the
+// coordinator loop calls decide and stamps its routing decision. Later slices
+// grow the arc off that decision (mint the run → create_change → dev loop → …).
+func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
+	// The mock scripts a single decide turn keyed on the issue ref (a substring of
+	// the coordinator prompt). On any unscripted turn the completion path returns
+	// mockllm.UnmatchedSentinel, so a misfire fails loudly rather than green.
 	mock := mockllm.New(mockllm.Fixture{
-		Marker:  journeyMarker,
-		Content: "Acknowledged — coordinator smoke turn.",
+		Marker: journeyIssueRef,
+		Tool: &mockllm.ToolCall{
+			Name: "decide",
+			Args: map[string]any{
+				"action": journeyDecideAction,
+				"reason": "new admitted issue " + journeyIssueRef + " needs a run",
+			},
+		},
 	})
 	if err := mock.Start(); err != nil {
 		t.Fatalf("start mock LLM: %v", err)
@@ -64,7 +91,13 @@ func TestSpineJourneyCoordinatorRunsAgainstMock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	rt, err := boot.NewRuntime(ctx, boot.RunOptions{ConfigPath: journeyConfigPath(t, mock.Endpoint())})
+	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
+		ConfigPath: journeyConfigPath(t, mock.Endpoint()),
+		// The patched config lives in a temp dir, so point persona seeding at the
+		// repo's real fragment tree — otherwise the coordinator would route on the
+		// framework default persona instead of Sarah's decision contract.
+		PersonasDir: journeyPersonasDir(t),
+	})
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -81,53 +114,117 @@ func TestSpineJourneyCoordinatorRunsAgainstMock(t *testing.T) {
 	}()
 
 	requireAgenticHealthy(ctx, t, rt)
-	publishCoordinatorTask(ctx, t, journeyMarker)
+	taskID := publishCoordinatorWake(ctx, t)
 
-	// The loop is served asynchronously off the AGENT stream; poll until it reaches
-	// the mock. RequestCount rising off zero proves the whole live path end to end.
-	requireEventually(t, 45*time.Second, func() bool { return mock.RequestCount() >= 1 },
-		"coordinator loop never reached the mock LLM (RequestCount stayed 0) — check the front-door subject, the BaseMessage envelope, or the model endpoint override")
-
-	t.Logf("coordinator loop reached the mock LLM: RequestCount=%d", mock.RequestCount())
+	// The loop is served asynchronously off the AGENT stream. Poll the graph until
+	// the coordinator's decide triple lands — the proof it routed, not merely that
+	// it reached the model. Bind the scan to THIS wake's task id so a coordinator
+	// decision left by a prior run cannot false-green the assertion.
+	requireCoordinatorDecision(ctx, t, taskID, journeyDecideAction)
+	t.Logf("coordinator routed via decide: task=%s next_action=%s (mock RequestCount=%d)", taskID, journeyDecideAction, mock.RequestCount())
 }
 
-// publishCoordinatorTask publishes a coordinator TaskMessage to the front door
-// (agent.task.coordinator on the AGENT JetStream) exactly as semdev's intake
-// adapter will: BaseMessage-wrapped and PublishToStream'd. A bare marshal or a core
-// publish is silently dropped by the loop consumer, so this mirrors the framework
-// contract precisely.
-func publishCoordinatorTask(ctx context.Context, t *testing.T, marker string) {
+// publishCoordinatorWake builds the front-door coordinator wake exactly as the
+// intake adapter will (intake.CoordinatorTask), then publishes it to the front
+// door (intake.FrontDoorSubject on the AGENT JetStream) BaseMessage-wrapped via
+// PublishToStream — the real framework contract. A bare marshal or a core publish
+// is silently dropped by the loop consumer, so this mirrors it precisely. Returns
+// the wake's task id so the caller can bind its assertion to this run's loop
+// (the framework stamps it on the loop entity as agent.loop.task).
+func publishCoordinatorWake(ctx context.Context, t *testing.T) string {
 	t.Helper()
-	client, err := natsclient.NewClient("nats://localhost:4222")
+
+	task, err := intake.CoordinatorTask(intake.Intake{Relevant: true, IssueRef: journeyIssueRef}, "mock")
 	if err != nil {
-		t.Fatalf("front-door NATS client: %v", err)
-	}
-	if err := client.Connect(ctx); err != nil {
-		t.Fatalf("front-door connect: %v", err)
-	}
-	defer func() { _ = client.Close(context.Background()) }()
-	if err := client.WaitForConnection(ctx); err != nil {
-		t.Fatalf("front-door wait for connection: %v", err)
+		t.Fatalf("build coordinator wake: %v", err)
 	}
 
-	task := &agentic.TaskMessage{
-		TaskID: "journey-coordinator-1",
-		Role:   "coordinator",
-		Model:  "mock",
-		Prompt: marker + ": a new admitted issue needs a run. Decide the next action.",
-		Tools:  []agentic.ToolDefinition{},
-	}
-	if err := task.Validate(); err != nil {
-		t.Fatalf("TaskMessage invalid: %v", err)
-	}
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
 	base := message.NewBaseMessage(task.Schema(), task, "journey-frontdoor")
 	data, err := json.Marshal(base)
 	if err != nil {
-		t.Fatalf("marshal TaskMessage envelope: %v", err)
+		t.Fatalf("marshal coordinator wake envelope: %v", err)
 	}
-	if err := client.PublishToStream(ctx, "agent.task.coordinator", data); err != nil {
-		t.Fatalf("publish coordinator TaskMessage: %v", err)
+	if err := client.PublishToStream(ctx, intake.FrontDoorSubject, data); err != nil {
+		t.Fatalf("publish coordinator wake: %v", err)
 	}
+	return task.TaskID
+}
+
+// requireCoordinatorDecision polls the ENTITY_STATES fact-store until THIS run's
+// coordinator loop carries coordinator.decision.next_action == wantAction, or
+// fails naming the likely cause. The loop id is minted by the framework, so the
+// journey does not know the entity id up front — it scans (the deep-research
+// scenario's pattern) and binds by the loop's spawn-stamped agent.loop.task
+// (== the wake's task id), so a decision left by a prior run cannot false-green.
+func requireCoordinatorDecision(ctx context.Context, t *testing.T, wantTaskID, wantAction string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	requireEventually(t, 45*time.Second, func() bool {
+		bucket, err := client.GetKeyValueBucket(ctx, entityStatesBucket)
+		if err != nil {
+			return false // graph-ingest may not have created the bucket yet
+		}
+		kv := client.NewKVStore(bucket)
+		keys, err := kv.Keys(ctx)
+		if err != nil {
+			return false // no keys yet (empty bucket surfaces as an error)
+		}
+		for _, key := range keys {
+			entry, err := kv.Get(ctx, key)
+			if err != nil {
+				continue
+			}
+			var e graph.EntityState
+			if err := json.Unmarshal(entry.Value, &e); err != nil {
+				continue
+			}
+			var role, task, action string
+			for _, tr := range e.Triples {
+				switch tr.Predicate {
+				case agvocab.LoopRole:
+					if s, ok := tr.Object.(string); ok {
+						role = s
+					}
+				case agvocab.LoopTask:
+					if s, ok := tr.Object.(string); ok {
+						task = s
+					}
+				case agvocab.CoordinatorNextAction:
+					if s, ok := tr.Object.(string); ok {
+						action = s
+					}
+				}
+			}
+			if role == "coordinator" && task == wantTaskID && action == wantAction {
+				return true
+			}
+		}
+		return false
+	}, "coordinator loop (task "+wantTaskID+") never stamped decision.next_action="+wantAction+
+		" — check the front-door tool config (nil tools / tool_choice=required / allowlist), "+
+		"persona seeding, the decide registration, or the mock decide fixture marker")
+}
+
+// connectFrontDoor opens a NATS client to the local runtime for publishing the
+// wake and scanning the fact-store.
+func connectFrontDoor(ctx context.Context, t *testing.T) *natsclient.Client {
+	t.Helper()
+	client, err := natsclient.NewClient("nats://localhost:4222")
+	if err != nil {
+		t.Fatalf("NATS client: %v", err)
+	}
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	if err := client.WaitForConnection(ctx); err != nil {
+		t.Fatalf("NATS wait for connection: %v", err)
+	}
+	return client
 }
 
 // requireAgenticHealthy polls the component-manager until the agentic-execution
@@ -221,6 +318,14 @@ func journeyConfigPath(t *testing.T, mockURL string) string {
 		t.Fatalf("write journey config: %v", err)
 	}
 	return path
+}
+
+// journeyPersonasDir is the repo's real persona fragment tree, passed explicitly
+// because the journey's patched config lives in a temp dir where the convention
+// path (<configDir>/personas/fragments) would not resolve.
+func journeyPersonasDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "configs", "personas", "fragments")
 }
 
 func mustMap(t *testing.T, m map[string]any, key string) map[string]any {
