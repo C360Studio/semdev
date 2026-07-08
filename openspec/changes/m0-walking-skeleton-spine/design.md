@@ -220,13 +220,14 @@ is the checked-in artifact the G5/G9 pins compare against.
 | `verify.result` | verify harness | clean-room-verify |
 | `evidence.run` | evidence ledger | evidence-ledger |
 
-### D13 — Upstream asks (two forge-io payload gaps, found in group 5)
+### D13 — Upstream asks (two forge-io payload gaps + one runtime deadlock)
 
 The four beta.115-era suspicions are closed; fan-out/fan-in exist. Two real gaps
 surfaced building forge-io intake, both in the `github_webhook` input's
-**flattened** published payload (it drops fields the raw GitHub webhook carries).
-Per the constitution the move is: file the upstream ask, scope M0 to what is
-safely supportable, record it — never a silent Go workaround (B7/G2).
+**flattened** published payload (it drops fields the raw GitHub webhook carries);
+a third — a framework shutdown deadlock — surfaced standing up the agentic-execution
+plane (UA-3 below). Per the constitution the move is: file the upstream ask, scope
+M0 to what is safely supportable, record it — never a silent Go workaround (B7/G2).
 
 - **UA-1 — `labeled` action drops the specific added label.** `IssuePayload.Labels`
   is the AGGREGATE current set, not the single label the sender just added, so a
@@ -240,6 +241,21 @@ safely supportable, record it — never a silent Go workaround (B7/G2).
   reply cannot be tied to its run. Ask: carry the parent issue/PR number (and
   comment id) on `github.event.comment` (`IssueEvent`/`PREvent` already carry
   `Number`; mirror it on `CommentEvent`). **Filed: C360Studio/semstreams#494.**
+- **UA-3 — `ComponentManager` leaks a `cm.mu` reader on a health-check timeout,
+  deadlocking `Stop`.** `performDetailedHealthCheck` spawns a goroutine that
+  `RLock`s `cm.mu` and, on its 50 ms timeout branch, abandons it without the
+  matching `RUnlock` — a permanent leaked reader after which every
+  `updateComponentState` writer and `stopAllComponents`' `RLock` block forever.
+  Surfaced adding the agentic-execution plane: 100% reproducible on a cold boot
+  (fresh JetStream), never with the three fast-starting substrate components
+  alone; the trigger is `cm.mu` contention during the slow first-boot startup
+  window. Present through beta.144 (a framework bump does not fix it). **Filed:
+  C360Studio/semstreams#508.** M0 mitigation (not a workaround for the bug — a
+  bound so the process cannot hang): `boot.Runtime.Stop` runs `svcMgr.StopAll`
+  under an OUTER deadline (`timeout + stopServicesGrace`) and, on a wedge, logs +
+  abandons it and still closes the config manager and NATS, so a SIGINT on the
+  live binary always returns. The boot smoke test's teardown is best-effort (it
+  proves clean *startup*, not shutdown). Remove the bound once #508 lands.
 
 **M0 scope decision:** intake triggers on issue **`opened`** only — the one flow
 the flattened payload fully supports (actor == opener; initial labels + body are

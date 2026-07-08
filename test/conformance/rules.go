@@ -149,9 +149,24 @@ func (r ruleFile) nextActionValues() []string {
 	return out
 }
 
+// agenticComponent is the minimal shape a pin reads off an agentic-execution
+// component declaration: the factory `name` (which selects the framework
+// factory — distinct from the arbitrary map key) and whether it is enabled.
+type agenticComponent struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+// streamDecl is the minimal shape a pin reads off a JetStream stream declaration.
+type streamDecl struct {
+	Subjects []string `json:"subjects"`
+}
+
 // bootstrapConfig is the minimal shape of configs/semdev-bootstrap.json the pins
 // read.
 type bootstrapConfig struct {
+	Version    string                `json:"version"`
+	Streams    map[string]streamDecl `json:"streams"`
 	Components struct {
 		Rule struct {
 			Config struct {
@@ -159,10 +174,15 @@ type bootstrapConfig struct {
 			} `json:"config"`
 		} `json:"rule"`
 		AgenticTools struct {
-			Config struct {
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+			Config  struct {
 				AllowedTools []string `json:"allowed_tools"`
 			} `json:"config"`
 		} `json:"agentic-tools"`
+		AgenticModel    agenticComponent `json:"agentic-model"`
+		AgenticLoop     agenticComponent `json:"agentic-loop"`
+		AgenticDispatch agenticComponent `json:"agentic-dispatch"`
 	} `json:"components"`
 }
 

@@ -12,6 +12,7 @@ package boot
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -19,6 +20,27 @@ import (
 
 	"github.com/c360studio/semstreams/service"
 )
+
+// onlyKnownStopWedge reports whether err is EXACTLY the known #508 StopAll wedge
+// (errStopServicesWedged) and nothing else. Stop returns errors.Join, whose
+// Unwrap() []error we walk: if any joined sub-error is something other than the
+// known wedge (a configMgr/NATS fault, or a different failure), it is NOT a
+// tolerable teardown outcome and the caller fails the test. A lone wrapped wedge
+// (no Join) is handled by the errors.Is fallback.
+func onlyKnownStopWedge(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			if !errors.Is(e, errStopServicesWedged) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, errStopServicesWedged)
+}
 
 // bootstrapConfigPath returns the absolute path to the same config both
 // semdev binaries boot from. config.Loader rejects any relative path whose
@@ -58,14 +80,27 @@ var wantAdvertisedTools = []string{
 	"check_floors",
 }
 
-// wantHealthyComponents are the substrate processors the runtime must bring to
-// healthy: the graph fact-store and the rule engine. Reaching healthy proves the
-// runtime actually ASSEMBLED against live NATS (each needs a real NATS client and,
-// for rule, a rule pack that resolved and loaded) — not merely that the service
-// objects exist. rule is the load-bearing one: it goes healthy only if rules_files
-// resolved (the CWD-independent path fix, resolveRulePackPaths), so this assertion
-// is also the regression guard for the swallowed-rule-load-failure class.
-var wantHealthyComponents = []string{"graph-ingest", "graph-query", "rule"}
+// wantHealthyComponents are the processors the runtime must bring to healthy: the
+// graph fact-store, the rule engine, and the four agentic-execution components.
+// Reaching healthy proves the runtime actually ASSEMBLED against live NATS (each
+// needs a real NATS client and, for rule, a rule pack that resolved and loaded) —
+// not merely that the service objects exist. rule is load-bearing: it goes healthy
+// only if rules_files resolved (the CWD-independent path fix, resolveRulePackPaths),
+// so this assertion is also the regression guard for the swallowed-rule-load class.
+// The agentic-* entries prove the newly-added execution plane (agentic-tools/model/
+// loop/dispatch over the AGENT/TOOL/USER streams) constructs and binds its consumers
+// against the real framework — the first end-to-end proof that config is valid. They
+// go healthy on consumer bind alone (no LLM traffic needed), so an unreachable mock
+// endpoint does not gate this; a bad port/stream/model_registry declaration does.
+var wantHealthyComponents = []string{
+	"graph-ingest",
+	"graph-query",
+	"rule",
+	"agentic-tools",
+	"agentic-model",
+	"agentic-loop",
+	"agentic-dispatch",
+}
 
 // TestRuntimeStartsCleanlyAgainstLiveNATS is the NATS-gated boot smoke test (run
 // via `task test:integration`, which resets NATS first): wire a Runtime against the
@@ -84,9 +119,23 @@ func TestRuntimeStartsCleanlyAgainstLiveNATS(t *testing.T) {
 	if err := rt.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// Teardown. This test proves the runtime STARTS cleanly and the plane reaches
+	// healthy — that is its whole contract. Graceful shutdown is currently subject
+	// to a known semstreams ComponentManager deadlock on cold boot (a leaked cm.mu
+	// reader in the framework's health check; filed upstream C360Studio/semstreams#508
+	// — see runtime.Stop / design.md D13). runtime.Stop bounds StopAll so it returns
+	// instead of hanging. We TOLERATE only that specific known wedge (errStopServicesWedged)
+	// and fail on anything else, so this NATS-gated test cannot let a NOVEL shutdown
+	// fault (a configMgr/NATS error or a different deadlock) ride green. Tighten back
+	// to a hard "no error" assertion when #508 lands and the bound is removed.
 	defer func() {
-		if err := rt.Stop(5 * time.Second); err != nil {
-			t.Errorf("Stop: %v", err)
+		switch err := rt.Stop(5 * time.Second); {
+		case err == nil:
+			// Clean shutdown (e.g. a warm boot that did not trip #508).
+		case onlyKnownStopWedge(err):
+			t.Logf("Stop hit the known semstreams shutdown deadlock (#508), tolerated: %v", err)
+		default:
+			t.Errorf("Stop returned an unexpected shutdown fault (not the known #508 wedge): %v", err)
 		}
 	}()
 

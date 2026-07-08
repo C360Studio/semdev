@@ -71,6 +71,27 @@ const natsConnectTimeout = 10 * time.Second
 // so it is a constant until one lands.
 const runtimeShutdownTimeout = 30 * time.Second
 
+// stopServicesGrace is the slack Stop adds on top of the caller's timeout before
+// it abandons a wedged svcMgr.StopAll and proceeds to close the remaining
+// resources. It exists because of a known semstreams shutdown deadlock: on a cold
+// boot the framework's ComponentManager can leak a cm.mu reader (its
+// performDetailedHealthCheck spawns a goroutine that RLocks and, on a 50ms
+// timeout, is abandoned without the matching RUnlock), after which
+// stopAllComponents' own RLock never returns — so StopAll blocks BEFORE it ever
+// reaches the stage its internal timeout guards. A healthy StopAll returns within
+// `timeout`; this grace only ever elapses when StopAll is genuinely wedged, at
+// which point Stop logs and moves on rather than hanging the process forever.
+// Filed upstream (see Stop) — remove this bound once the framework fix lands.
+const stopServicesGrace = 3 * time.Second
+
+// errStopServicesWedged marks the Stop path where svcMgr.StopAll blew its bounded
+// window — the signature of the known upstream ComponentManager deadlock
+// (C360Studio/semstreams#508). Stop wraps it with %w so a caller or test can
+// errors.Is it and tell the KNOWN wedge apart from a novel shutdown fault (a
+// configMgr/NATS error, or a different hang), instead of blanket-tolerating every
+// Stop error. Remove alongside the bound once #508 lands.
+var errStopServicesWedged = errors.New("stop services: bounded shutdown window exceeded (known semstreams ComponentManager deadlock, C360Studio/semstreams#508)")
+
 // RunOptions configures the shared runtime-boot path (NewRuntime and Run). It
 // is the seam through which cmd/semdev and cmd/e2e-semdev pass their only
 // permitted point of divergence — which config file to boot from and which
@@ -445,15 +466,45 @@ func (r *Runtime) Start(ctx context.Context) error {
 // an earlier one fails — best-effort, matching semteams' deferred-cleanup
 // posture — and every failure is joined into the returned error so a caller
 // sees the whole picture instead of just the first fault.
+//
+// svcMgr.StopAll is bounded by an OUTER deadline (timeout + stopServicesGrace),
+// not just the timeout StopAll takes internally, because of a known semstreams
+// ComponentManager shutdown deadlock (filed upstream: C360Studio/semstreams —
+// see design.md D13). On a cold boot with the agentic-execution plane the
+// framework leaks a cm.mu reader in its health check, after which
+// stopAllComponents' RLock never returns and StopAll wedges BEFORE reaching the
+// stage its own timeout guards. Without this bound, Stop — and therefore a
+// SIGINT on the live binary — would hang forever. When the bound elapses we log
+// the wedge, abandon the StopAll goroutine (it leaks, but the process is on its
+// way out), and still close the config manager and NATS so those resources are
+// released. Remove the bound once the upstream fix lands.
 func (r *Runtime) Stop(timeout time.Duration) error {
 	var errs []error
-	if err := r.svcMgr.StopAll(timeout); err != nil {
-		errs = append(errs, fmt.Errorf("stop services: %w", err))
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- r.svcMgr.StopAll(timeout) }()
+	stopTimer := time.NewTimer(timeout + stopServicesGrace)
+	defer stopTimer.Stop()
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stop services: %w", err))
+		}
+	case <-stopTimer.C:
+		r.logger.Warn("svcMgr.StopAll did not return within the shutdown budget; abandoning it and continuing shutdown (known semstreams ComponentManager deadlock, C360Studio/semstreams#508 — see runtime.Stop docs)",
+			slog.Duration("budget", timeout+stopServicesGrace))
+		errs = append(errs, fmt.Errorf("%w (after %s)", errStopServicesWedged, timeout+stopServicesGrace))
 	}
+
 	if err := r.configMgr.Stop(timeout); err != nil {
 		errs = append(errs, fmt.Errorf("stop config manager: %w", err))
 	}
-	if err := r.nats.Close(context.Background()); err != nil {
+	// Bound nats.Close too: the wedge path has already abandoned StopAll to keep
+	// the "Stop always returns" property, so a hung Close on context.Background()
+	// would re-introduce the very unbounded hang this method exists to prevent.
+	closeCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := r.nats.Close(closeCtx); err != nil {
 		errs = append(errs, fmt.Errorf("close NATS client: %w", err))
 	}
 	return errors.Join(errs...)

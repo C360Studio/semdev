@@ -1,6 +1,6 @@
 {
-  "_comment": "semdev bootstrap config (M0 foundation). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), and the rule engine (run-lifecycle pack), with the ExecutorRegistry advertising semdev tools live. The agentic EXECUTION layer (agentic-tools/agentic-loop/agentic-model/agentic-dispatch components + their JetStream streams) is deferred to the g11 mock journey, which configures and validates it end-to-end. The default sim input is disabled (no semdev factory). rules_files are repo-relative (run from repo root); path resolution is finalized with g11. VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect.",
-  "version": "0.1.1",
+  "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect.",
+  "version": "0.2.0",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -15,7 +15,29 @@
       "nats://localhost:4222"
     ]
   },
-  "streams": {},
+  "streams": {
+    "AGENT": {
+      "subjects": [
+        "agent.>"
+      ],
+      "storage": "file",
+      "max_age": "24h"
+    },
+    "TOOL": {
+      "subjects": [
+        "tool.>"
+      ],
+      "storage": "file",
+      "max_age": "24h"
+    },
+    "USER": {
+      "subjects": [
+        "user.>"
+      ],
+      "storage": "file",
+      "max_age": "1h"
+    }
+  },
   "model_registry": {
     "capabilities": {
       "coordinator": {
@@ -135,6 +157,223 @@
           "rules/run-lifecycle/04-archive-change-loop-closer.json"
         ],
         "inline_rules": []
+      }
+    },
+    "agentic-tools": {
+      "type": "processor",
+      "name": "agentic-tools",
+      "enabled": true,
+      "config": {
+        "stream_name": "TOOL",
+        "timeout": "10s",
+        "allowed_tools": null,
+        "restricted_decide_actions": [],
+        "ports": {
+          "inputs": [
+            {
+              "name": "tool.execute",
+              "type": "jetstream",
+              "subject": "tool.execute.>",
+              "stream_name": "TOOL",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "name": "tool.result",
+              "type": "jetstream",
+              "subject": "tool.result.*",
+              "stream_name": "TOOL",
+              "required": true
+            }
+          ],
+          "kv_read": [
+            {
+              "name": "entity_states",
+              "type": "kv-read",
+              "bucket": "ENTITY_STATES"
+            }
+          ]
+        }
+      }
+    },
+    "agentic-model": {
+      "type": "processor",
+      "name": "agentic-model",
+      "enabled": true,
+      "config": {
+        "stream_name": "AGENT",
+        "timeout": "30s",
+        "retry": {
+          "max_attempts": 3,
+          "backoff": "exponential"
+        },
+        "ports": {
+          "inputs": [
+            {
+              "name": "agent.request",
+              "type": "jetstream",
+              "subject": "agent.request.>",
+              "stream_name": "AGENT",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "name": "agent.response",
+              "type": "jetstream",
+              "subject": "agent.response.*",
+              "stream_name": "AGENT",
+              "required": true
+            }
+          ]
+        }
+      }
+    },
+    "agentic-loop": {
+      "type": "processor",
+      "name": "agentic-loop",
+      "enabled": true,
+      "config": {
+        "max_iterations": 20,
+        "timeout": "300s",
+        "stream_name": "AGENT",
+        "loops_bucket": "AGENT_LOOPS",
+        "ports": {
+          "inputs": [
+            {
+              "name": "agent.task",
+              "type": "jetstream",
+              "subject": "agent.task.*",
+              "stream_name": "AGENT",
+              "required": true
+            },
+            {
+              "name": "agent.response",
+              "type": "jetstream",
+              "subject": "agent.response.>",
+              "stream_name": "AGENT",
+              "required": true
+            },
+            {
+              "name": "tool.result",
+              "type": "jetstream",
+              "subject": "tool.result.>",
+              "stream_name": "TOOL",
+              "required": true
+            },
+            {
+              "name": "agent.approval_response",
+              "type": "jetstream",
+              "subject": "agent.approval_response.*",
+              "stream_name": "AGENT"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "agent.request",
+              "type": "jetstream",
+              "subject": "agent.request.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "tool.execute",
+              "type": "jetstream",
+              "subject": "tool.execute.*",
+              "stream_name": "TOOL"
+            },
+            {
+              "name": "agent.complete",
+              "type": "jetstream",
+              "subject": "agent.complete.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "agent.failed",
+              "type": "jetstream",
+              "subject": "agent.failed.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "agent.approval_pending",
+              "type": "jetstream",
+              "subject": "agent.approval_pending.*",
+              "stream_name": "AGENT"
+            }
+          ],
+          "kv_write": [
+            {
+              "name": "loops",
+              "type": "kv-write",
+              "bucket": "AGENT_LOOPS"
+            },
+            {
+              "name": "trajectories",
+              "type": "kv-write",
+              "bucket": "AGENT_TRAJECTORIES"
+            }
+          ]
+        }
+      }
+    },
+    "agentic-dispatch": {
+      "type": "processor",
+      "name": "agentic-dispatch",
+      "enabled": true,
+      "config": {
+        "default_role": "coordinator",
+        "auto_continue": true,
+        "default_tools": [
+          "decide",
+          "read_loop_result",
+          "scratchpad",
+          "query_entity"
+        ],
+        "stream_name": "USER",
+        "ports": {
+          "inputs": [
+            {
+              "name": "user.message",
+              "type": "jetstream",
+              "subject": "user.message.>",
+              "stream_name": "USER",
+              "required": true
+            },
+            {
+              "name": "agent.complete",
+              "type": "jetstream",
+              "subject": "agent.complete.*",
+              "stream_name": "AGENT",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "name": "agent.task",
+              "type": "jetstream",
+              "subject": "agent.task.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "user.response",
+              "type": "nats",
+              "subject": "user.response.*"
+            },
+            {
+              "name": "agent.approval_response",
+              "type": "jetstream",
+              "subject": "agent.approval_response.*",
+              "stream_name": "AGENT"
+            }
+          ]
+        },
+        "permissions": {
+          "view": ["*"],
+          "submit_task": ["*"],
+          "cancel_own": true,
+          "cancel_any": [],
+          "approve": ["*"]
+        }
       }
     },
     "sim": {
