@@ -58,8 +58,10 @@ func measurementFacts(i, exit int, ran, timedOut, passed bool) []message.Triple 
 	}
 }
 
-func call(findings ...string) agentic.ToolCall {
-	args := map[string]any{}
+// call builds a submit_review call reviewing one task. findings is variadic; an
+// empty variadic omits the findings arg entirely (the absent-vs-empty case).
+func call(taskIndex int, findings ...string) agentic.ToolCall {
+	args := map[string]any{"task_index": taskIndex}
 	if findings != nil {
 		fs := make([]any, len(findings))
 		for i, f := range findings {
@@ -75,26 +77,40 @@ func call(findings ...string) agentic.ToolCall {
 	}
 }
 
-// run executes the tool and returns the stamped review.verdict (or "" if none) and
-// the result.
-func run(t *testing.T, facts []message.Triple, w *fakeWriter, findings ...string) (string, agentic.ToolResult) {
-	t.Helper()
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call(findings...))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
+// verdictFor returns the verdict stamped for a task index across the writer's
+// captured replaces (or "" if none).
+func verdictFor(w *fakeWriter, taskIndex int) string {
+	want := verdictPredicate(taskIndex)
 	verdict := ""
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate == VerdictPredicate {
+			if tr.Predicate == want {
 				verdict = tr.Object.(string)
 			}
 		}
 	}
-	return verdict, res
+	return verdict
 }
 
-// oneTaskPassing is a run with one projected task and a passing measurement for it.
+// runTask executes the tool reviewing taskIndex and returns the stamped per-task
+// verdict (or "") and the result.
+func runTask(t *testing.T, facts []message.Triple, w *fakeWriter, taskIndex int, findings ...string) (string, agentic.ToolResult) {
+	t.Helper()
+	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call(taskIndex, findings...))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	return verdictFor(w, taskIndex), res
+}
+
+// run reviews task 0 (the common single-task case).
+func run(t *testing.T, facts []message.Triple, w *fakeWriter, findings ...string) (string, agentic.ToolResult) {
+	t.Helper()
+	return runTask(t, facts, w, 0, findings...)
+}
+
+// oneTaskPassing is a run with one projected task (index 0) and a passing
+// measurement for it.
 func oneTaskPassing() []message.Triple {
 	var f []message.Triple
 	f = append(f, taskSpecFact(0, "goal", "add the guard"), taskSpecFact(0, "test_command", "go test ./..."))
@@ -102,9 +118,9 @@ func oneTaskPassing() []message.Triple {
 	return f
 }
 
-// Happy path: every required task has a passing measurement and the reviewer raised
-// no findings — the verdict is approved, stamped with the reviewer Source on the run
-// entity.
+// Happy path: the reviewed task has a passing measurement and the reviewer raised
+// no findings — the per-task verdict is approved, stamped with the reviewer Source
+// on the run entity.
 func TestReviewApprovesWhenMeasuredPassAndNoFindings(t *testing.T) {
 	w := &fakeWriter{}
 	verdict, res := run(t, oneTaskPassing(), w)
@@ -122,13 +138,16 @@ func TestReviewApprovesWhenMeasuredPassAndNoFindings(t *testing.T) {
 			if tr.Subject != runEntity {
 				t.Errorf("verdict subject = %q, want run entity (D15)", tr.Subject)
 			}
+			if tr.Predicate != verdictPredicate(0) {
+				t.Errorf("verdict predicate = %q, want %q (per-task namespace)", tr.Predicate, verdictPredicate(0))
+			}
 		}
 	}
 }
 
-// 7.4 red-first, the spec scenario: the measured outcome is a FAILURE (exit 1) —
-// the reviewer cannot record an approving verdict even with no findings and however
-// the change describes itself. Approval reads the stamped fact, not the prose.
+// Red-first, the spec scenario: the reviewed task's measured outcome is a FAILURE
+// (exit 1) — the reviewer cannot record an approving verdict even with no findings
+// and however the change describes itself. Approval reads the stamped fact.
 func TestReviewCannotApproveFalseSuccess(t *testing.T) {
 	var f []message.Triple
 	f = append(f, taskSpecFact(0, "test_command", "go test ./..."))
@@ -143,14 +162,16 @@ func TestReviewCannotApproveFalseSuccess(t *testing.T) {
 	}
 }
 
-// A required task with NO measurement blocks approval — the gate proves the required
-// evidence EXISTS, not merely that nothing observed failed.
-func TestReviewBlocksWhenRequiredMeasurementMissing(t *testing.T) {
-	// Two tasks projected, only task 0 measured.
+// The reviewed task with NO measurement blocks its approval — the per-task gate
+// proves THIS task's evidence EXISTS and passed, not merely that nothing failed.
+func TestReviewBlocksWhenThisTasksMeasurementMissing(t *testing.T) {
+	// Two tasks projected; only task 0 is measured. Reviewing task 1 (unmeasured)
+	// cannot approve.
 	var f []message.Triple
 	f = append(f, taskSpecFact(0, "test_command", "go test ./..."), taskSpecFact(1, "test_command", "go test ./..."))
 	f = append(f, measurementFacts(0, 0, true, false, true)...)
-	verdict, res := run(t, f, &fakeWriter{})
+	w := &fakeWriter{}
+	verdict, res := runTask(t, f, w, 1)
 	if res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
@@ -159,8 +180,26 @@ func TestReviewBlocksWhenRequiredMeasurementMissing(t *testing.T) {
 	}
 }
 
-// A reviewer finding blocks approval even when every measurement passes — findings
-// are additive constraints the reviewer may require.
+// A passing task's verdict is unaffected by a DIFFERENT task's failure (the spec's
+// per-task-independence scenario): task 0 passes, task 1 fails; reviewing task 0
+// approves.
+func TestReviewIsIndependentPerTask(t *testing.T) {
+	var f []message.Triple
+	f = append(f, taskSpecFact(0, "test_command", "go test ./..."), taskSpecFact(1, "test_command", "go test ./..."))
+	f = append(f, measurementFacts(0, 0, true, false, true)...)  // task 0 passes
+	f = append(f, measurementFacts(1, 1, true, false, false)...) // task 1 fails
+	w := &fakeWriter{}
+	verdict, res := runTask(t, f, w, 0)
+	if res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	if verdict != VerdictApproved {
+		t.Errorf("verdict = %q, want %q — task 0 passes; task 1's failure must not affect it", verdict, VerdictApproved)
+	}
+}
+
+// A reviewer finding blocks approval even when the task's measurement passes —
+// findings are additive constraints the reviewer may require.
 func TestReviewFindingBlocksEvenWhenMeasuredPass(t *testing.T) {
 	verdict, res := run(t, oneTaskPassing(), &fakeWriter{}, "error handling swallows the context error")
 	if res.Error != "" {
@@ -171,16 +210,16 @@ func TestReviewFindingBlocksEvenWhenMeasuredPass(t *testing.T) {
 	}
 }
 
-// Findings never weaken task.spec: the review tool writes ONLY review.verdict and
-// holds no writer for task.spec, so a finding is structurally incapable of removing
-// or relaxing a task.spec requirement (G5 single-writer).
+// Findings never weaken task.spec: the review tool writes ONLY review.verdict.<i>
+// and holds no writer for task.spec, so a finding is structurally incapable of
+// removing or relaxing a task.spec requirement (G5 single-writer).
 func TestReviewWritesOnlyVerdictNeverTaskSpec(t *testing.T) {
 	w := &fakeWriter{}
 	run(t, oneTaskPassing(), w, "please also add a benchmark")
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate != VerdictPredicate {
-				t.Errorf("review stamped %q — it must write only %q (findings are additive, never weaken task.spec)", tr.Predicate, VerdictPredicate)
+			if tr.Predicate != verdictPredicate(0) {
+				t.Errorf("review stamped %q — it must write only %q (findings are additive, never weaken task.spec)", tr.Predicate, verdictPredicate(0))
 			}
 			if strings.HasPrefix(tr.Predicate, "task.spec.") {
 				t.Errorf("review wrote a task.spec predicate %q — findings must not touch the immutable spec", tr.Predicate)
@@ -189,16 +228,29 @@ func TestReviewWritesOnlyVerdictNeverTaskSpec(t *testing.T) {
 	}
 }
 
-// A run with no projected tasks is an ordering error, not a verdict — you cannot
-// review work that was never projected.
-func TestReviewErrorsWhenNoTasksProjected(t *testing.T) {
+// Reviewing a task that was never projected is an ordering error, not a verdict —
+// you cannot review work that was never projected.
+func TestReviewErrorsWhenTaskNotProjected(t *testing.T) {
 	w := &fakeWriter{}
 	_, res := run(t, measurementFacts(0, 0, true, false, true), w) // measurements but no task.spec
 	if res.Error == "" {
-		t.Fatal("expected an error when there are no task.spec facts to review")
+		t.Fatal("expected an error when the reviewed task has no task.spec")
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a failed review must stamp no verdict")
+	}
+}
+
+// task_index is required and must be non-negative.
+func TestReviewRequiresTaskIndex(t *testing.T) {
+	c := call(0)
+	delete(c.Arguments, "task_index")
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, &fakeWriter{}, nil).Execute(context.Background(), c)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error == "" {
+		t.Error("a missing task_index must fail loudly (absent != task 0)")
 	}
 }
 
@@ -225,48 +277,32 @@ func TestReviewFailsClosedOnMalformedMeasurement(t *testing.T) {
 	}
 }
 
-// Re-review upserts the latest verdict (replace-by-predicate): a run that regressed
-// records changes_requested over a prior approved.
+// Re-review upserts the latest verdict (replace-by-predicate): a task that regressed
+// records changes_requested over a prior approved, on the same per-task predicate.
 func TestReviewReReviewUpserts(t *testing.T) {
 	w := &fakeWriter{}
-	if v, _ := runW(t, oneTaskPassing(), w); v != VerdictApproved {
+	if v, _ := runTask(t, oneTaskPassing(), w, 0); v != VerdictApproved {
 		t.Fatalf("first review verdict = %q, want approved", v)
 	}
-	// Now a finding appears on re-review.
-	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, nil).Execute(context.Background(), call("regression found"))
+	// Now a finding appears on re-review of the same task.
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, nil).Execute(context.Background(), call(0, "regression found"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if res.Error != "" {
 		t.Fatalf("re-review error: %s", res.Error)
 	}
-	// The verdict predicate upserts, so both writes target review.verdict.
 	if len(w.replaces) != 2 {
-		t.Fatalf("expected two verdict upserts, got %d", len(w.replaces))
+		t.Fatalf("expected two verdict upserts on the same predicate, got %d", len(w.replaces))
 	}
-}
-
-// runW is run() but keeps the writer across calls (for the re-review test).
-func runW(t *testing.T, facts []message.Triple, w *fakeWriter) (string, agentic.ToolResult) {
-	t.Helper()
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call())
-	if err != nil {
-		t.Fatalf("execute: %v", err)
+	if v := verdictFor(w, 0); v != VerdictChangesRequested {
+		t.Errorf("re-review verdict = %q, want %q", v, VerdictChangesRequested)
 	}
-	verdict := ""
-	for _, batch := range w.replaces {
-		for _, tr := range batch {
-			if tr.Predicate == VerdictPredicate {
-				verdict = tr.Object.(string)
-			}
-		}
-	}
-	return verdict, res
 }
 
 // Schema-only registration (nil reader/writer) fails loudly if executed.
 func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil).Execute(context.Background(), call())
+	res, err := New(nil, nil, nil).Execute(context.Background(), call(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -275,19 +311,22 @@ func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
 	}
 }
 
-// G3 at the schema surface: the input schema accepts only findings — no outcome or
-// approve/verdict field. The verdict is derived from the measured facts.
+// G3 at the schema surface: the input schema accepts only the task selector and
+// findings — no outcome or approve/verdict field. The verdict is derived from the
+// measured facts.
 func TestReviewSchemaTakesNoOutcomeField(t *testing.T) {
 	defs := (&Executor{}).ListTools()
 	if len(defs) != 1 {
 		t.Fatalf("want one tool definition, got %d", len(defs))
 	}
 	props, _ := defs[0].Parameters["properties"].(map[string]any)
-	if len(props) != 1 {
-		t.Errorf("schema exposes %d properties, want exactly 1 (findings): %v", len(props), props)
+	if len(props) != 2 {
+		t.Errorf("schema exposes %d properties, want exactly 2 (task_index, findings): %v", len(props), props)
 	}
-	if _, ok := props["findings"]; !ok {
-		t.Errorf("schema must expose findings; has %v", props)
+	for _, want := range []string{"task_index", "findings"} {
+		if _, ok := props[want]; !ok {
+			t.Errorf("schema must expose %q; has %v", want, props)
+		}
 	}
 	for _, banned := range []string{"approve", "approved", "verdict", "pass", "passed", "outcome", "decision", "success"} {
 		if _, present := props[banned]; present {

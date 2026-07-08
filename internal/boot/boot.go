@@ -149,12 +149,13 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
 	}
 
-	// submit_review (harness-measurement) is Quinn's gate: it reads the run's
-	// task.spec + measurement.result facts, derives the FLOORED verdict
-	// (measurement.CanApprove ∧ no findings), and stamps review.verdict. It reads via
-	// the shared changefacts.Reader and writes via the shared OwnedFactWriter (its own
-	// Source, reviewer-quinn — G5-safe). Takes no runner/workspace (it runs nothing).
-	// Both nil in the census (schema-only); Execute fails loudly if either is missing.
+	// submit_review (harness-measurement) is Quinn's PER-TASK adversarial gate: given
+	// a task_index it reads that task's task.spec + measurement.result facts, derives
+	// the FLOORED verdict (measurement.CanApprove over that task ∧ no findings), and
+	// stamps review.verdict.<i>. It reads via the shared changefacts.Reader and writes
+	// via the shared OwnedFactWriter (its own Source, reviewer-quinn — G5-safe). Takes
+	// no runner/workspace (it runs nothing). Both nil in the census (schema-only);
+	// Execute fails loudly if either is missing.
 	if err := reg.RegisterExecutor(submitreview.New(factReader, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}

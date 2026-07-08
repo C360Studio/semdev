@@ -47,7 +47,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"validate_change", validatechange.Source, validatechange.ValidatedPredicate},
 		{"project_tasks", projecttasks.Source, "task.spec.0.goal"},
 		{"measure_task", measuretask.Source, "measurement.result.0.passed"},
-		{"submit_review", submitreview.Source, submitreview.VerdictPredicate},
+		{"submit_review", submitreview.Source, "review.verdict.0"},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
 	}

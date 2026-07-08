@@ -1,31 +1,32 @@
-// Package submitreview is the submit_review tool (harness-measurement, tasks
-// 7.3/7.4): the reviewer persona Quinn's gate. Quinn reviews the developed work
-// against the immutable task.spec and records a verdict (review.verdict) — but the
-// verdict is FLOORED by the harness facts, not by Quinn's prose. That is the whole
-// point of gating review on measurements (G3): a false success claim cannot earn an
-// approving verdict, however confidently the change describes itself.
+// Package submitreview is the submit_review tool (harness-measurement, task 7.3):
+// the reviewer persona Quinn's gate, run PER TASK. Quinn reviews one unit of work —
+// one projected task — adversarially (trying to refute the attempt) against its
+// immutable task.spec, and records a per-task verdict (review.verdict.<i>) — but the
+// verdict is FLOORED by that task's harness fact, not by Quinn's prose. That is the
+// whole point of gating review on measurements (G3): a false success claim cannot
+// earn an approving verdict, however confidently the change describes itself.
 //
 // The asymmetry is deliberate and structural:
 //
-//   - Quinn's only input is FINDINGS — required changes it raises reviewing the
-//     work. A finding is an ADDITIVE constraint: it can require more, never approve
-//     past a failure. The schema takes no outcome/approve field (G3); the verdict is
-//     DERIVED here from the measured facts.
-//   - Approval requires the deterministic floor: measurement.CanApprove proves every
-//     required task (each projected task.spec.<i>) has exactly one passing
-//     measurement, re-derived from the raw exit evidence (ignoring any stored
-//     passed). A failing or missing measurement blocks approval regardless of
-//     findings; an open finding blocks approval regardless of the measurements.
-//     approved ⟺ CanApprove(required, observed) ∧ no findings.
+//   - Quinn's inputs are the task selector (task_index) and FINDINGS — required
+//     changes it raises reviewing THAT task. A finding is an ADDITIVE constraint: it
+//     can require more, never approve past a failure. The schema takes no
+//     outcome/approve field (G3); the verdict is DERIVED here from the measured fact.
+//   - Approval requires the deterministic floor: measurement.CanApprove over the
+//     single reviewed task proves it has exactly one passing measurement, re-derived
+//     from the raw exit evidence (ignoring any stored passed). A failing or missing
+//     measurement blocks approval regardless of findings; an open finding blocks
+//     approval regardless of the measurement. approved ⟺ CanApprove([task], observed)
+//     ∧ no findings.
 //   - Findings NEVER weaken task.spec (7.3): this tool's single writer is
-//     reviewer-quinn and it stamps ONLY review.verdict — it holds no writer for
+//     reviewer-quinn and it stamps ONLY review.verdict.<i> — it holds no writer for
 //     task.spec, so a finding is structurally incapable of removing or relaxing a
 //     task.spec requirement (G5 single-writer).
 //
-// It fires no lifecycle transition (G2): it stamps the verdict; the open_pr gate is
-// a rule reading review.verdict (wired with the coordinator spawn rules + the
-// clean-room verify.result at a later group). It reads evidence it cannot parse as a
-// FAILURE, never a defaulted approve (measurement.ResultsFromFacts fails closed).
+// It fires no lifecycle transition (G2): it stamps the per-task verdict; the open_pr
+// gate is a rule that rolls up every review.verdict.* (wired with the coordinator
+// spawn rules + the clean-room verify.result at a later group). It reads evidence it
+// cannot parse as a FAILURE, never a defaulted approve (ResultsFromFacts fails closed).
 package submitreview
 
 import (
@@ -33,6 +34,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,13 +51,23 @@ import (
 // ToolName is the registered tool name and the reviewer's verdict handler.
 const ToolName = "submit_review"
 
-// Source is stamped on the review.verdict triple. It MUST equal the writer declared
-// for review.verdict in internal/vocab (G5) — a conformance pin cross-checks it.
+// Source is stamped on every review.verdict.<i> triple. It MUST equal the writer
+// declared for the review.verdict.* namespace in internal/vocab (G5) — a conformance
+// pin cross-checks it.
 const Source = "reviewer-quinn"
 
-// VerdictPredicate is the milestone fact this tool owns on the run entity: the
-// reviewer's current verdict. Exact predicate → latest-wins (a re-review upserts).
-const VerdictPredicate = "review.verdict"
+// VerdictPrefix is the namespace this tool owns on the run entity: the reviewer's
+// current per-task verdict, keyed by task index (review.verdict.<i>). Per-task
+// keying makes each task's verdict its own predicate — independently upserted on a
+// re-review, mirroring measurement.result.* — so the open_pr gate can require every
+// task's verdict without one task clobbering another (the graph merges replace
+// per-(subject, predicate)).
+const VerdictPrefix = "review.verdict."
+
+// verdictPredicate returns the per-task verdict predicate for a task index.
+func verdictPredicate(taskIndex int) string {
+	return VerdictPrefix + strconv.Itoa(taskIndex)
+}
 
 // The two verdicts. A rule gates open_pr on VerdictApproved (wired later).
 const (
@@ -82,8 +94,11 @@ func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger 
 }
 
 type payload struct {
-	// Findings are the required changes Quinn raises. Absent/empty means none;
-	// each is an additive constraint that blocks approval until addressed.
+	// TaskIndex is a pointer so an ABSENT argument is distinguishable from index 0
+	// (a valid task). Absent → error; a negative index → error.
+	TaskIndex *int `json:"task_index"`
+	// Findings are the required changes Quinn raises against THIS task. Absent/empty
+	// means none; each is an additive constraint that blocks this task's approval.
 	Findings []string `json:"findings"`
 }
 
@@ -107,6 +122,15 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: decode arguments: %v", err)
 	}
+	if p.TaskIndex == nil {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: task_index is required")
+	}
+	idx := *p.TaskIndex
+	if idx < 0 {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: task_index must be non-negative, got %d", idx)
+	}
+	idxStr := strconv.Itoa(idx)
+
 	findings := nonBlank(p.Findings)
 	if dropped := len(p.Findings) - len(findings); dropped > 0 {
 		// A blank finding carries no objection and cannot block (nonBlank is safe —
@@ -114,18 +138,17 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		// surface it: a finding stripped to whitespace upstream is a would-be block
 		// that silently evaporated, worth seeing rather than swallowing.
 		e.logger.Warn("submit_review dropped blank findings",
-			slog.Int("dropped", dropped), slog.Int("kept", len(findings)))
+			slog.Int("dropped", dropped), slog.Int("kept", len(findings)), slog.Int("task_index", idx))
 	}
 
-	// The required work is every projected task. No task.spec is an ordering error,
-	// not a verdict — you cannot review work that was never projected.
+	// The reviewed task must be a projected task — you cannot review work that was
+	// never projected. Read the task.spec.* namespace and confirm this index is in it.
 	specTriples, err := e.reader.ReadFacts(ctx, runEntityID, devtask.TaskSpecPrefix)
 	if err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "submit_review: read task.spec on %s: %v", runEntityID, err)
 	}
-	required := requiredTaskIDs(specTriples)
-	if len(required) == 0 {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: no task.spec on %s — nothing to review (was the change projected?)", runEntityID)
+	if !slices.Contains(projectedTaskIDs(specTriples), idxStr) {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: task.spec.%d not on %s — nothing to review (was the change projected, and is %d a real task?)", idx, runEntityID, idx)
 	}
 
 	// Reconstruct the measurements. A fact we cannot parse fails the review CLOSED —
@@ -139,42 +162,44 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInternal, "submit_review: unparseable measurement evidence on %s: %v", runEntityID, err)
 	}
 
-	// The floor: every required task has exactly one passing measurement (re-derived
-	// from raw exit evidence). Approval also requires that Quinn raised no finding.
-	measurementsPass := measurement.CanApprove(required, observed)
-	approved := measurementsPass && len(findings) == 0
+	// The floor for THIS task: it has exactly one passing measurement (re-derived from
+	// raw exit evidence). Approval also requires Quinn raised no finding against it.
+	measurementPass := measurement.CanApprove([]string{idxStr}, observed)
+	approved := measurementPass && len(findings) == 0
 	verdict := VerdictChangesRequested
 	if approved {
 		verdict = VerdictApproved
 	}
 
-	if err := e.stampVerdict(ctx, runEntityID, verdict); err != nil {
-		return errResult(call, writeErrKind(err), "submit_review: stamp %s on %s: %v", VerdictPredicate, runEntityID, err)
+	if err := e.stampVerdict(ctx, runEntityID, idx, verdict); err != nil {
+		return errResult(call, writeErrKind(err), "submit_review: stamp %s on %s: %v", verdictPredicate(idx), runEntityID, err)
 	}
 
 	e.logger.Info("submit_review recorded verdict",
 		slog.String("run_entity_id", runEntityID),
+		slog.Int("task_index", idx),
 		slog.String("verdict", verdict),
-		slog.Bool("measurements_pass", measurementsPass),
-		slog.Int("findings", len(findings)),
-		slog.Int("required_tasks", len(required)))
+		slog.Bool("measurement_pass", measurementPass),
+		slog.Int("findings", len(findings)))
 
 	summary, _ := json.Marshal(map[string]any{
-		"verdict":           verdict,
-		"approved":          approved,
-		"measurements_pass": measurementsPass,
-		"required_tasks":    required,
-		"findings":          findings,
+		"task_index":       idx,
+		"verdict":          verdict,
+		"approved":         approved,
+		"measurement_pass": measurementPass,
+		"findings":         findings,
 	})
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
-// stampVerdict upserts review.verdict on the run entity (replace-by-predicate, so a
-// re-review replaces the prior verdict rather than appending a second one).
-func (e *Executor) stampVerdict(ctx context.Context, runEntityID, verdict string) error {
+// stampVerdict upserts review.verdict.<taskIndex> on the run entity (replace-by-
+// predicate, so a re-review of that task replaces its prior verdict rather than
+// appending a second one; other tasks' verdicts, being distinct predicates, are
+// untouched).
+func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskIndex int, verdict string) error {
 	triple := message.Triple{
 		Subject:    runEntityID,
-		Predicate:  VerdictPredicate,
+		Predicate:  verdictPredicate(taskIndex),
 		Object:     verdict,
 		Source:     Source,
 		Timestamp:  time.Now().UTC(),
@@ -183,10 +208,10 @@ func (e *Executor) stampVerdict(ctx context.Context, runEntityID, verdict string
 	return e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
 }
 
-// requiredTaskIDs returns the distinct projected task indices (as strings, matching
-// measurement Result.TaskID) present under the task.spec.* namespace, sorted. Each
-// is a task whose passing measurement CanApprove requires.
-func requiredTaskIDs(triples []message.Triple) []string {
+// projectedTaskIDs returns the distinct projected task indices (as strings, matching
+// measurement Result.TaskID) present under the task.spec.* namespace, sorted — the
+// set a reviewed task_index must belong to.
+func projectedTaskIDs(triples []message.Triple) []string {
 	seen := map[int]bool{}
 	for _, tr := range triples {
 		rest, ok := strings.CutPrefix(tr.Predicate, devtask.TaskSpecPrefix)

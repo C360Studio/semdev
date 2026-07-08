@@ -203,31 +203,35 @@ Template:
 
 - **Primitive considered:** a rule that reads `measurement.result` and stamps
   `review.verdict`, or the reviewer persona (Quinn) deciding the verdict directly.
-- **Why it cannot express this:** the verdict must be FLOORED by the harness facts,
-  and that floor is `measurement.CanApprove` — "every REQUIRED task (each projected
-  `task.spec.<i>`) has exactly one passing measurement, re-derived from the raw exit
-  evidence." No rule can express it: a rule matches a triple, it cannot enumerate an
-  unknown number of required tasks, count exactly-one-measurement-each, and re-derive
-  a pass from `ran`/`exit_code`/`timed_out`. Nor can the persona own the outcome
-  (G3/D4): a false success claim must not earn approval however confidently the work
-  describes itself, so approval cannot be a model-supplied field — it is DERIVED here
-  (`approved ⟺ CanApprove(required, observed) ∧ no findings`). The tool reconstructs
-  the measurements via `measurement.ResultsFromFacts` (fails CLOSED on unparseable
-  evidence — a fact it cannot read is a failure, never a defaulted approve), reads
-  the required set from `task.spec.*`, and stamps the single `review.verdict`.
-- **Additive-only, structurally (7.3):** Quinn's only input is FINDINGS (required
-  changes); an open finding blocks approval, but a finding can never weaken
-  `task.spec` because this tool's single writer is `reviewer-quinn` and it stamps
-  ONLY `review.verdict` — it holds no writer for `task.spec` (G5 single-writer makes
-  the "findings never relax the spec" scenario impossible, not merely disallowed).
-- **Fact shape:** `review.verdict` is an EXACT predicate (not a namespace) — one
-  current verdict per run, upserted latest-wins (a re-review after fixes replaces it,
-  the graph's replace-per-`(subject,predicate)`), which is what the `open_pr` gate
-  rule reads. Contrast `measurement.result.*` (per-task namespace): a verdict is
-  singular per run, a measurement is per-task. Fires no transition (G2) — the gate is
-  a rule on `review.verdict` (wired with the coordinator spawn rules + clean-room
-  `verify.result` at a later group). Single G5 writer of `review.verdict`
-  (`reviewer-quinn`).
+- **Why it cannot express this:** review runs PER TASK and its verdict must be
+  FLOORED by that task's harness fact, and that floor is `measurement.CanApprove`
+  over the single reviewed task — "the reviewed `task.spec.<i>` has exactly one
+  passing measurement, re-derived from the raw exit evidence." No rule can express
+  it: a rule matches a triple, it cannot re-derive a pass from `ran`/`exit_code`/
+  `timed_out`. Nor can the persona own the outcome (G3/D4): a false success claim
+  must not earn approval however confidently the work describes itself, so approval
+  cannot be a model-supplied field — it is DERIVED here (`approved ⟺
+  CanApprove([task], observed) ∧ no findings against that task`). The tool
+  reconstructs the measurements via `measurement.ResultsFromFacts` (fails CLOSED on
+  unparseable evidence — a fact it cannot read is a failure, never a defaulted
+  approve), confirms the reviewed index is a projected `task.spec.<i>`, and stamps
+  the per-task `review.verdict.<i>`.
+- **Adversarial + additive-only, structurally (7.3):** Quinn reviews each task
+  adversarially (refutes the attempt), and its only input beyond the task selector is
+  FINDINGS (required changes); an open finding blocks THAT task's approval, but a
+  finding can never weaken `task.spec` because this tool's single writer is
+  `reviewer-quinn` and it stamps ONLY `review.verdict.<i>` — it holds no writer for
+  `task.spec` (G5 single-writer makes the "findings never relax the spec" scenario
+  impossible, not merely disallowed).
+- **Fact shape:** `review.verdict.*` is a per-task NAMESPACE (mirroring
+  `measurement.result.*`): one verdict per task, each its own predicate
+  (`review.verdict.<i>`), upserted latest-wins on a re-review (the graph's
+  replace-per-`(subject,predicate)`) so re-reviewing one task never clobbers
+  another's verdict. Review moved INTO the per-task dev loop — adversarial review on
+  every unit of work, not just the PR (design D16). Fires no transition (G2) — the
+  `open_pr` gate is a rule that ROLLS UP every `review.verdict.*` (approved) with the
+  clean-room `verify.result` + `openspec.validated` (wired with the coordinator spawn
+  rules at a later group). Single G5 writer of `review.verdict.*` (`reviewer-quinn`).
 - **Registry entry:** `submit_review` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 

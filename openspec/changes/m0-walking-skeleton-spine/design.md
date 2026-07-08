@@ -100,7 +100,7 @@ class (M:N story wipe, SITL infinite-reject gate, CI-executor over-scope).
 The `bash` executor already captures the OS exit code and the model supplies only
 the command — semdev's measurement tool simply must not add an outcome field to
 its schema. The reviewer (Quinn) reads `measurement.result`, not the model's
-claim, and issues an additive-only `review.verdict`. No persona owns the outcome.
+claim, and issues an additive-only per-task `review.verdict.<i>`. No persona owns the outcome.
 
 ### D5 — Clean room = a thin swappable Runner seam; isolation is product-supplied
 
@@ -216,7 +216,7 @@ is the checked-in artifact the G5/G9 pins compare against.
 | `task.attempt` | dev-loop harness | dev-from-task |
 | `floor.finding` | floor tools | dev-from-task |
 | `measurement.result` | executing harness | harness-measurement |
-| `review.verdict` | reviewer (Quinn) | harness-measurement |
+| `review.verdict.*` | reviewer (Quinn) | harness-measurement |
 | `verify.result` | verify harness | clean-room-verify |
 | `evidence.run` | evidence ledger | evidence-ledger |
 
@@ -278,7 +278,7 @@ taxonomy is that every OpenSpec checkpoint maps to a semdev action or fact:
 | `new` | `create_change` → `openspec.change.*` | LLM-authored, hydrated from graph |
 | `validate` | validate sub-step → `openspec.validated` | deterministic CLI oracle |
 | `apply` | `dev_from_task` → `task.spec`/`task.attempt` | bounded loop |
-| `verify` (coherence) | *structural* — `openspec.validated` + derived completion + `review.verdict` | no separate action |
+| `verify` (coherence) | *structural* — `openspec.validated` + derived completion + every `review.verdict.*` | no separate action |
 | — (outcome, G4) | `verify` → `verify.result` | deterministic clean-room harness |
 | `archive` | `archive_change` → `openspec.archived` | deterministic CLI oracle (M1-wired) |
 
@@ -350,6 +350,41 @@ so a later group cannot break them silently:
    (they need a live Manager); group 11 wires them into a shared runtime-boot path
    that BOTH binaries call, guarded by a parity pin — the same half-wired-binary
    class `boot.RegisterAll` already prevents for components.
+
+### D16 — Flow-validation decisions (review is per-task and adversarial)
+
+Stepping back over the whole issue→PR arc (before wiring the branch rules)
+surfaced five decisions. Four confirm the design already written; one changes it.
+
+- **Adversarial review runs per unit of work, not just at the PR (the change).**
+  The proven agentic-dev pattern — and this project's own (red-first pins +
+  reviewer agents per increment) — is to refute each unit before accepting it.
+  So review moves INTO the per-task dev loop: `submit_review` becomes per-task
+  (`submit_review(task_index)` → `review.verdict.<i>`), Quinn refuting each
+  attempt, still floored by that task's `measurement.result` (G3 — the reviewer
+  adds only blocking findings, never turns a failing test green). `review.verdict`
+  becomes the namespace `review.verdict.*` (mirroring `measurement.result.*`),
+  and the `open_pr` coherence gate rolls up `verify.result eq pass` ∧ every
+  `review.verdict.* eq approved` ∧ `openspec.validated ne ""`. The run-level
+  `submit_review` shipped first (`c245d27`); this refactors it. *Alternative
+  rejected:* a single run-level review — it defers the first adversarial read to
+  the whole change, when a per-task read catches a bad unit before the next is
+  built on it. The human PR review (gate 2) remains, as the cross-change check.
+- **No auto-close (D1).** A "no" or a "maybe" both route `ask_human` carrying a
+  recommendation with citations/refs (a recommend-close note, or a follow-up
+  question); the human closes. semdev never closes an issue itself, so no
+  `decline` action is added — the taxonomy stays closed.
+- **Triage stays folded (D2).** "Is it a valid ask?" is the coordinator's first
+  `decide`, not a separate research role at M0; it must land yes/no/maybe and
+  iterate with the author over issue comments (`ask_human ⇄ respond`, whose live
+  routing waits on semstreams #494 — D13 UA-2).
+- **Retry loops are the norm (D4).** Floors reject, measurement fail, and a
+  `changes_requested` verdict all re-enter a fresh attempt on the same task
+  within budget; exhaustion parks (`ask_human`), never a silent fail — already
+  the shape of the "Bounded dev loop with escalation" requirement.
+- **Rework re-validates (D5).** Already the D15 #0 forward-contract: a re-authored
+  change re-runs `validate_change` before the approval gate re-reads
+  `openspec.validated`.
 
 ## Risks / Trade-offs
 

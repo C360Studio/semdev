@@ -29,7 +29,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `task.attempt` | dev-loop-harness | dev-from-task |
 | `floor.finding.*` | floor-tools | dev-from-task |
 | `measurement.result.*` | measurement-harness | harness-measurement |
-| `review.verdict` | reviewer-quinn | harness-measurement |
+| `review.verdict.*` | reviewer-quinn | harness-measurement |
 | `verify.result` | verify-harness | clean-room-verify |
 | `evidence.run` | evidence-ledger | evidence-ledger |
 
