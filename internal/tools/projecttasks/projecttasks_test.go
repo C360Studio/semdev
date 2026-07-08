@@ -6,9 +6,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
+
+// validatedFor is the run's openspec.validated marker naming its validated change —
+// project_tasks binds to it before freezing task.spec (Codex P1).
+func validatedFor(slug string) message.Triple {
+	return message.Triple{Predicate: validatechange.ValidatedPredicate, Object: slug, Source: validatechange.Source}
+}
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
 
@@ -96,6 +103,9 @@ func withField(facts []message.Triple, i int, field, obj string) []message.Tripl
 // map (empty when nothing was stamped) plus the tool result.
 func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string, agentic.ToolResult) {
 	t.Helper()
+	// Seed the run's validated-change marker so the fixtures reach the projection
+	// logic; the alternate/absent cases are pinned separately below.
+	facts = append(facts, validatedFor("demo"))
 	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -202,6 +212,42 @@ func TestProjectRejectsReProjection(t *testing.T) {
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a rejected re-projection must stamp nothing")
+	}
+}
+
+// Codex P1 red-first: a run with NO openspec.validated marker cannot have its
+// task.spec frozen — project_tasks fails closed rather than freeze an unvalidated
+// change (nothing stamped).
+func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
+	w := &fakeWriter{}
+	res, err := New(&fakeReader{facts: validTaskFacts(0)}, w, nil).Execute(context.Background(), callFor("demo"))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error == "" || !strings.Contains(res.Error, "validated") {
+		t.Fatalf("an unvalidated slug must be refused, got %q", res.Error)
+	}
+	if len(w.replaces) != 0 {
+		t.Error("a refused projection must stamp nothing")
+	}
+}
+
+// Codex P1 red-first: the run's validated change is "other", but demo's task facts
+// are also present (a stale/alternate authored package). A call for "demo" must be
+// refused — project_tasks freezes ONLY the run's validated change, never an
+// alternate slug, so a later gate cannot prove the wrong work.
+func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
+	facts := append(validTaskFacts(0), validatedFor("other-change"))
+	w := &fakeWriter{}
+	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error == "" || !strings.Contains(res.Error, "validated") {
+		t.Fatalf("an alternate validated slug must be refused, got %q", res.Error)
+	}
+	if len(w.replaces) != 0 {
+		t.Error("a refused projection must stamp nothing")
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/openspec"
+	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
@@ -105,6 +106,23 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 			"project_tasks: task.spec already projected for this run (%d facts) — it is immutable; the dev loop converges on it, it does not redefine it", len(existing))
 	}
 
+	// Bind the projection to the run's VALIDATED change. project_tasks freezes the
+	// IMMUTABLE task.spec, so it must refuse any slug that is not the change the
+	// validate harness blessed on this run (openspec.validated). A stale or alternate
+	// authored package still present on the run would otherwise be frozen, and every
+	// downstream gate (measurement / review / verify) would then prove the WRONG work
+	// against an immutable spec. Fail closed: no validated marker, or a marker naming a
+	// different slug, is a refusal — the model chooses WHICH validated change to freeze,
+	// never an unvalidated one.
+	validated, err := e.readValidatedSlug(ctx, runEntityID)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "project_tasks: read %s on %s: %v", validatechange.ValidatedPredicate, runEntityID, err)
+	}
+	if validated != p.Slug {
+		return errResult(call, agentic.ToolErrorInvalidArgs,
+			"project_tasks: slug %q is not this run's validated change (%s=%q) — refusing to freeze task.spec from an unvalidated or alternate change", p.Slug, validatechange.ValidatedPredicate, validated)
+	}
+
 	prefix := openspec.ChangeEntityPrefix(p.Slug) + "task."
 	triples, err := e.reader.ReadFacts(ctx, runEntityID, prefix)
 	if err != nil {
@@ -136,6 +154,24 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.Int("task_count", len(specs)))
 	summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "tasks": len(specs), "run_entity": runEntityID})
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
+}
+
+// readValidatedSlug returns the slug the validate harness stamped as this run's
+// validated change (openspec.validated on the run entity), or "" if no marker is
+// present. It reads the producer's own predicate name (validatechange) so the
+// reader and writer of that fact cannot drift.
+func (e *Executor) readValidatedSlug(ctx context.Context, runEntityID string) (string, error) {
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, validatechange.ValidatedPredicate)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate == validatechange.ValidatedPredicate {
+			s, _ := tr.Object.(string)
+			return s, nil
+		}
+	}
+	return "", nil
 }
 
 // rawTasksFromFacts reconstructs the authored tasks from the change's task facts,
