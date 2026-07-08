@@ -80,7 +80,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	if deps.NATSClient != nil {
 		changeWriter = agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
 	}
-	if err := reg.RegisterExecutor(createchange.New(changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(createchange.New(changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", createchange.ToolName, err)
 	}
 

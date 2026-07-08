@@ -23,7 +23,7 @@ func richTaskCall(item map[string]any) agentic.ToolCall {
 func stampedFacts(t *testing.T, call agentic.ToolCall) (map[string]string, []message.Triple) {
 	t.Helper()
 	w := &fakeWriter{}
-	res, err := New(w, nil).Execute(context.Background(), call)
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}

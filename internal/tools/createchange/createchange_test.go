@@ -7,7 +7,12 @@ import (
 
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/types"
 )
+
+// testPlatform matches the org/platform of runEntity so a loop entity id built
+// from a test LoopID shares the same 6-part prefix.
+var testPlatform = types.PlatformMeta{Org: "org", Platform: "plat"}
 
 // fakeWriter records replace calls and returns a scripted prior owned package, so
 // the replace-by-predicate path is testable without a live NATS graph.
@@ -65,7 +70,7 @@ func sampleCall() agentic.ToolCall {
 // with the vocab writer Source, and never an outcome fact.
 func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(w, nil).Execute(context.Background(), sampleCall())
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -117,6 +122,60 @@ func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 	}
 }
 
+// With a loop_id present, the tool stamps the authored marker
+// (openspec.change.authored = slug) on the AUTHORING LOOP entity as a SECOND
+// mutation after the run facts — the slug-independent signal the validate station
+// fires on. It carries the vocab writer Source and upserts (removePredicates
+// clears any prior marker).
+func TestCreateChangeStampsAuthoredMarkerOnLoop(t *testing.T) {
+	w := &fakeWriter{}
+	call := sampleCall()
+	call.LoopID = "loop-1"
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	if len(w.replaces) != 2 {
+		t.Fatalf("expected two mutations (run facts + loop marker), got %d", len(w.replaces))
+	}
+	marker := w.replaces[1]
+	if len(marker.add) != 1 {
+		t.Fatalf("marker mutation should add exactly one triple, got %d", len(marker.add))
+	}
+	tr := marker.add[0]
+	if tr.Predicate != AuthoredPredicate {
+		t.Errorf("marker predicate = %q, want %q", tr.Predicate, AuthoredPredicate)
+	}
+	if tr.Object != "fix-null-deref" {
+		t.Errorf("marker object = %v, want the slug %q", tr.Object, "fix-null-deref")
+	}
+	if tr.Source != Source {
+		t.Errorf("marker Source = %q, want the vocab writer %q (G5)", tr.Source, Source)
+	}
+	// Stamped on the LOOP entity (not the run) — the same loop-execution entity the
+	// spawn identity (agent.loop.role, agent.run) lives on, so the validate rule can
+	// match role + marker + inherit the run anchor on one entity.
+	if !strings.HasSuffix(tr.Subject, ".execution.loop-1") || tr.Subject == runEntity {
+		t.Errorf("marker subject = %q, want the authoring loop entity (…execution.loop-1)", tr.Subject)
+	}
+	if !contains(marker.remove, AuthoredPredicate) {
+		t.Errorf("marker mutation must clear the prior %q (upsert), remove=%v", AuthoredPredicate, marker.remove)
+	}
+}
+
+// Without a loop_id (a degenerate unit-test-only case), the marker is skipped but
+// the change facts still land — the tool does not fail an otherwise-authored change.
+func TestCreateChangeSkipsMarkerWithoutLoopID(t *testing.T) {
+	w := &fakeWriter{}
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	if len(w.replaces) != 1 {
+		t.Fatalf("expected only the run-facts mutation (no marker without loop_id), got %d", len(w.replaces))
+	}
+}
+
 // Re-author REPLACES the owned package: the prior predicates are cleared (passed
 // as removePredicates) so a shrunk/renamed re-author leaves no phantom facts.
 func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
@@ -125,7 +184,7 @@ func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 		"openspec.change.fix-null-deref.delta.handler.old-req.statement",
 	}
 	w := &fakeWriter{owned: prior}
-	res, err := New(w, nil).Execute(context.Background(), sampleCall())
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -162,7 +221,7 @@ func TestCreateChangeIgnoresAuthoredTaskCompletion(t *testing.T) {
 	items[0].(map[string]any)["done"] = true
 
 	w := &fakeWriter{}
-	res, err := New(w, nil).Execute(context.Background(), call)
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
@@ -185,7 +244,7 @@ func TestCreateChangeRejectsUnsafeSlug(t *testing.T) {
 		call := sampleCall()
 		call.Arguments["slug"] = bad
 		w := &fakeWriter{}
-		res, _ := New(w, nil).Execute(context.Background(), call)
+		res, _ := New(w, testPlatform, nil).Execute(context.Background(), call)
 		if res.Error == "" {
 			t.Errorf("slug %q was accepted; want a rejection", bad)
 		}
@@ -199,7 +258,7 @@ func TestCreateChangeRejectsUnsafeSlug(t *testing.T) {
 func TestCreateChangeFailsWithoutRunEntity(t *testing.T) {
 	call := sampleCall()
 	call.Metadata = nil
-	res, _ := New(&fakeWriter{}, nil).Execute(context.Background(), call)
+	res, _ := New(&fakeWriter{}, testPlatform, nil).Execute(context.Background(), call)
 	if res.Error == "" {
 		t.Error("expected an error when agent.run_entity_id is missing")
 	}
@@ -207,7 +266,7 @@ func TestCreateChangeFailsWithoutRunEntity(t *testing.T) {
 
 // A nil writer fails loudly rather than dropping facts.
 func TestCreateChangeFailsWithoutWriter(t *testing.T) {
-	res, _ := New(nil, nil).Execute(context.Background(), sampleCall())
+	res, _ := New(nil, testPlatform, nil).Execute(context.Background(), sampleCall())
 	if res.Error == "" {
 		t.Error("expected an error when no owned-fact writer is wired")
 	}
@@ -217,7 +276,7 @@ func TestCreateChangeFailsWithoutWriter(t *testing.T) {
 // task-completion field anywhere (an authoring tool must not let the model
 // pre-complete tasks).
 func TestSchemaHasNoOutcomeOrCompletionField(t *testing.T) {
-	defs := New(nil, nil).ListTools()
+	defs := New(nil, testPlatform, nil).ListTools()
 	if len(defs) != 1 || defs[0].Name != ToolName {
 		t.Fatalf("want one tool %q, got %+v", ToolName, defs)
 	}

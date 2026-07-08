@@ -80,13 +80,14 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	// (cursor advances per matched tool call). The turns are causally ordered —
 	// each loop is spawned by a rule that fired on the prior loop's terminal — so
 	// the cursor lands each fixture on its turn:
-	//   1. C1 front-door coordinator → decide(issue_intake)   [mints the run]
-	//   2. C2 re-woken coordinator   → decide(create_change)  [routes to author]
+	//   1. C1 front-door coordinator → decide(issue_intake)    [mints the run]
+	//   2. C2 re-woken coordinator   → decide(create_change)   [routes to author]
 	//   3. A1 authoring coordinator  → create_change(<change>) [emits the change]
-	// Every marker is the issue ref: it is present in all three prompts (each rule
-	// threads the prior decision reason, which carries the ref), so the cursor —
-	// not the marker — distinguishes the turns. An unscripted turn returns
-	// mockllm.UnmatchedSentinel, failing loudly rather than green.
+	//   4. V1 validate coordinator   → validate_change(<slug>) [validates → gate]
+	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
+	// which carries it); turn 4's prompt threads openspec.change.authored, so it
+	// marks on the slug. The cursor — not the marker — distinguishes the turns. An
+	// unscripted turn returns mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -105,6 +106,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
 			Tool:   &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()},
+		},
+		mockllm.Fixture{
+			Marker: journeyChangeSlug,
+			Tool:   &mockllm.ToolCall{Name: "validate_change", Args: map[string]any{"slug": journeyChangeSlug}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -166,15 +171,25 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
 	t.Logf("station 4: change %q authored onto run %s (mock RequestCount=%d)", journeyChangeSlug, runEntityID, mock.RequestCount())
 
-	// Exactly three model turns drove the arc (C1 decide(issue_intake),
-	// C2 decide(create_change), A1 create_change). create_change REPLACES its
-	// owned facts idempotently, so a re-spawn/loop regression would re-stamp the
-	// same facts and slip past requireChangeAuthored — RequestCount is the only
-	// signal of an extra turn, so pin it (the mockllm contract: assert turns ==
-	// expected). By here all three loops have terminated (StopLoop) and A1 spawns
-	// nothing, so no fourth call is in flight.
-	if got := mock.RequestCount(); got != 3 {
-		t.Fatalf("expected exactly 3 model turns (C1 decide, C2 decide, A1 create_change), got %d — extra turns indicate a re-spawn/loop or an unscripted turn", got)
+	// Station 5 — the authored marker chained a validate loop that ran the OpenSpec
+	// CLI oracle and stamped openspec.validated on the run, which fired the existing
+	// change-approval gate (run-lifecycle/01) executing→awaiting_approval. Asserting
+	// the phase reached awaiting_approval proves the whole chain: create_change's
+	// loop marker → the validate rule → validate_change → openspec.validated → the
+	// gate. (The gate requires openspec.validated present, so awaiting_approval
+	// implies it was stamped.)
+	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
+	t.Logf("station 5: change validated → run reached awaiting_approval (gate fired); mock RequestCount=%d", mock.RequestCount())
+
+	// Exactly four model turns drove the arc (C1 decide(issue_intake),
+	// C2 decide(create_change), A1 create_change, V1 validate_change). The
+	// authoring/validate tools REPLACE their facts idempotently, so a re-spawn/loop
+	// regression would re-stamp the same facts and slip past the fact/phase checks —
+	// RequestCount is the only signal of an extra turn, so pin it (the mockllm
+	// contract). By here every loop has terminated (StopLoop) and awaiting_approval
+	// spawns nothing (it waits for a human), so no fifth call is in flight.
+	if got := mock.RequestCount(); got != 4 {
+		t.Fatalf("expected exactly 4 model turns (C1 decide, C2 decide, A1 create_change, V1 validate_change), got %d — extra turns indicate a re-spawn/loop or an unscripted turn", got)
 	}
 }
 
@@ -276,8 +291,8 @@ func requireRunPhase(ctx context.Context, t *testing.T, runEntityID, wantPhase s
 		}
 		return tripleString(e, agentrun.PhasePredicate) == wantPhase
 	}, "run entity "+runEntityID+" never reached agent.run.phase="+wantPhase+
-		" — the agent-run bridge did not advance it (check the handoff-marker rule fired on rule.spawned_task "+
-		"and the dispatched→executing rule on the run entity)")
+		" — no rule advanced it there (for executing: the agent-run handoff→dispatched→executing bridge; "+
+		"for awaiting_approval: validate stamping openspec.validated → the change-approval gate)")
 }
 
 // requireChangeAuthored polls the run entity until it carries at least one

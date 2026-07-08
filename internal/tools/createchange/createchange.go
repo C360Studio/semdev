@@ -32,6 +32,7 @@ import (
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/pkg/errs"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	"github.com/c360studio/semstreams/types"
 )
 
 // ToolName is the registered tool name and the coordinator's create_change action
@@ -44,20 +45,32 @@ const ToolName = "create_change"
 // comment.
 const Source = "create-change-author-tool"
 
+// AuthoredPredicate is the fixed marker create_change stamps on the AUTHORING
+// LOOP entity (value = the slug) once the change facts land on the run. It is the
+// slug-independent "a change was authored here" signal the validate station's
+// rule fires on — the run's own facts are slug-namespaced (openspec.change.<slug>.*),
+// which no rule condition can wildcard-match. It lives on the LOOP (not the run)
+// so the validate rule fires on an entity that carries agent.run for run_scope=inherit.
+// It is under the openspec.change.* vocab namespace, so its single writer stays
+// create-change-author-tool (G5) with no new vocabulary (G9).
+const AuthoredPredicate = "openspec.change.authored"
+
 // Executor stamps authored change content onto the run entity as facts.
 type Executor struct {
-	writer agentictools.OwnedFactWriter
-	logger *slog.Logger
+	writer   agentictools.OwnedFactWriter
+	platform types.PlatformMeta
+	logger   *slog.Logger
 }
 
 // New builds the create_change executor. writer may be nil for schema-only
 // registration (the tool censuses inspect ListTools without a live NATS client);
-// Execute fails loudly if it is nil.
-func New(writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// Execute fails loudly if it is nil. platform builds the authoring loop's entity
+// ID for the authored marker.
+func New(writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{writer: writer, logger: logger}
+	return &Executor{writer: writer, platform: platform, logger: logger}
 }
 
 // Execute maps the authored content to a change, projects it to openspec.change.*
@@ -114,6 +127,41 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, triples, prior); err != nil {
 		return errResult(call, writeErrKind(err), "create_change: replace %d change facts on %s: %v", len(triples), runEntityID, err)
+	}
+
+	// Stamp the authored marker on THIS loop entity (value = slug) so the validate
+	// station's rule can fire and inherit the run anchor. The change facts (the
+	// substance) are written FIRST; the marker (the chaining signal) follows, so a
+	// marker-write failure surfaces only AFTER the change is durably recorded.
+	//
+	// Failure posture: a marker-write error returns via errResult WITHOUT StopLoop,
+	// so the loop retries this turn (tool_choice=function re-forces create_change,
+	// which re-stamps the same facts idempotently) until the marker lands or
+	// MaxIterations trips and the loop fails — never a silent green. The two writes
+	// are NOT atomic across entities: a process crash BETWEEN them leaves the change
+	// authored but unmarked, so the run stalls in executing with no validate chain
+	// (M0-acceptable; no Go backstop ticker by design — the escalation belongs
+	// upstream, G2). LoopID is always present at runtime; a missing one (unit-test-
+	// only) skips the marker with a loud warn rather than failing an authored change.
+	if call.LoopID == "" {
+		e.logger.Warn("create_change: no loop_id on the tool call — skipping the authored marker; the validate station will not trigger for this change",
+			"slug", p.Slug, "run_entity", runEntityID)
+	} else {
+		loopEntityID, err := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
+		if err != nil {
+			return errResult(call, agentic.ToolErrorInternal, "create_change: construct authoring loop entity id: %v", err)
+		}
+		marker := []message.Triple{{
+			Subject:    loopEntityID,
+			Predicate:  AuthoredPredicate,
+			Object:     p.Slug,
+			Source:     Source,
+			Timestamp:  now,
+			Confidence: 1.0,
+		}}
+		if err := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{AuthoredPredicate}); err != nil {
+			return errResult(call, writeErrKind(err), "create_change: stamp %s on %s: %v", AuthoredPredicate, loopEntityID, err)
+		}
 	}
 
 	summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "facts": len(triples), "run_entity": runEntityID})

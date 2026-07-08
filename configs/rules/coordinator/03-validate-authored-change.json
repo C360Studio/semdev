@@ -1,0 +1,35 @@
+{
+  "id": "coordinator_validate_authored_change",
+  "type": "expression",
+  "name": "Authored change → validate it with the OpenSpec CLI oracle",
+  "description": "The validate station. `validate` is a SUB-STEP of the OpenSpec lifecycle, not a coordinator taxonomy action, so no coordinator decision routes it — instead this rule chains off the authored marker. When an authoring loop calls create_change, the tool stamps openspec.change.authored=<slug> on THAT loop entity (the slug-independent signal; the run's own facts are slug-namespaced and no rule condition can wildcard-match them). This rule fires on that marker and spawns a validate loop that calls validate_change, which hydrates the change from the run's facts, shells `openspec validate <slug> --strict --json --no-interactive` in a temp dir, and — from the real exit code (G3) — stamps openspec.validated on the run (pass) or clears it (fail). The existing run-lifecycle/01-offer-change-approval gate then advances executing→awaiting_approval.\n\nWHY the marker lives on the LOOP (not the run): this rule fires on the authoring loop entity, which carries agent.run (inherited via the create_change spawn's run_scope=inherit), so run_scope=inherit here propagates the SAME run to the validate loop — its validate_change call targets the run the change was authored on. A run entity carries no agent.run triple, so a run-fired rule could not inherit.\n\nROLE = coordinator (3-role roster; validate is a coordinator sub-step like authoring). tool_choice=function forces validate_change and tools stays nil (global discovery advertises it), so the validate loop runs the oracle and terminates (StopLoop) rather than deciding — it writes openspec.validated (not coordinator.decision.*), triggering no coordinator decision rule. Edge-triggered firing means the marker fires this exactly once; the validate loop carries no marker, so it does not re-fire.\n\nNo openspec.validated guard: the rule fires on the LOOP marker, and openspec.validated lives on the RUN — not readable from the firing loop entity. Edge-triggering (fire-once on the authoring loop) is the re-fire guard; a rework re-author is a NEW loop entity, a legitimate fresh trigger (D5/D15#0: a re-author re-validates).",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "openspec.change.authored", "operator": "ne", "value": "", "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.coordinator",
+      "role": "coordinator",
+      "model": "coordinator",
+      "tool_choice": { "mode": "function", "function_name": "validate_change" },
+      "properties": {
+        "phase": "validate"
+      },
+      "prompt": "SEMDEV — validate this run's authored OpenSpec change.\n\nThe change $entity.triple.openspec.change.authored has been authored onto the run. Validate it against the real OpenSpec CLI with the validate_change tool (pass the slug $entity.triple.openspec.change.authored). You supply only the slug — never a pass/fail; the harness reads the CLI's real exit code. Calling validate_change completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "coordinator",
+    "capability": "openspec-io / run-lifecycle",
+    "station": "validate — run the OpenSpec CLI oracle on the authored change",
+    "trigger": "openspec.change.authored on the authoring loop entity (create-change-author-tool stamps it; slug-independent so a rule can match it).",
+    "run_scope_rationale": "inherit — fires on the authoring LOOP (carries agent.run), so the validate loop inherits the same run the change was authored on. A run-entity-fired rule could not inherit (no agent.run there).",
+    "advances": "openspec.validated on the run → run-lifecycle/01-offer-change-approval fires executing→awaiting_approval."
+  }
+}
