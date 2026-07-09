@@ -222,32 +222,27 @@ func objectOf(triples []message.Triple, predicate string) string {
 	return ""
 }
 
-// D15 #0: create_change stamps the content revision on the run — both the
-// run-level, slug-independent openspec.change.revision (the slug-blind gate rule
-// reads it) and the slug-scoped openspec.change.<slug>.revision (project_tasks
-// binds it) — with the same value and the openspec.change.* writer Source.
+// D15 #0: create_change stamps the slug-scoped content revision
+// (openspec.change.<slug>.revision) on the run — project_tasks binds it, and
+// validate_change echoes it into openspec.validated — with the openspec.change.*
+// writer Source and a sha256 prefix (so the rule engine never compares it
+// numerically).
 func TestCreateChangeStampsContentRevision(t *testing.T) {
 	w := &fakeWriter{}
 	if res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall()); err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
 	triples := w.replaces[0].add
-	runRev := objectOf(triples, RevisionPredicate)
-	slugRev := objectOf(triples, SlugRevisionPredicate("fix-null-deref"))
-	if runRev == "" {
-		t.Errorf("run-level %s not stamped — the slug-blind gate rule cannot compare openspec.validated", RevisionPredicate)
-	}
+	slugRevPredicate := SlugRevisionPredicate("fix-null-deref")
+	slugRev := objectOf(triples, slugRevPredicate)
 	if slugRev == "" {
-		t.Errorf("slug-scoped %s not stamped — project_tasks cannot bind slug+content", SlugRevisionPredicate("fix-null-deref"))
+		t.Errorf("slug-scoped %s not stamped — project_tasks cannot bind slug+content", slugRevPredicate)
 	}
-	if runRev != slugRev {
-		t.Errorf("run-level (%q) and slug-scoped (%q) revisions must be the same value", runRev, slugRev)
-	}
-	if !strings.HasPrefix(runRev, "sha256:") {
-		t.Errorf("revision %q must be sha256-prefixed so the rule engine never compares it numerically", runRev)
+	if !strings.HasPrefix(slugRev, "sha256:") {
+		t.Errorf("revision %q must be sha256-prefixed so the rule engine never compares it numerically", slugRev)
 	}
 	for _, tr := range triples {
-		if tr.Predicate == RevisionPredicate && tr.Source != Source {
+		if tr.Predicate == slugRevPredicate && tr.Source != Source {
 			t.Errorf("revision Source = %q, want the vocab writer %q (G5)", tr.Source, Source)
 		}
 	}
@@ -266,7 +261,7 @@ func TestCreateChangeRevisionTracksContent(t *testing.T) {
 		if res, err := New(w, testPlatform, nil).Execute(context.Background(), c); err != nil || res.Error != "" {
 			t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 		}
-		return objectOf(w.replaces[0].add, RevisionPredicate)
+		return objectOf(w.replaces[0].add, SlugRevisionPredicate("fix-null-deref"))
 	}
 
 	base := revFor(nil)

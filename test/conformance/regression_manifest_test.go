@@ -40,8 +40,8 @@ var regressionManifest = []struct {
 		"the architecture docs' fact-vocabulary and component/tool tables match the code registry"},
 	{"T1", "test/conformance/taxonomy_test.go", []string{"TestPersonaDeclaresExactTaxonomy", "TestNoRuleRoutesOutOfTaxonomyAction"},
 		"the coordinator persona declares exactly the closed taxonomy; no rule routes an out-of-taxonomy action"},
-	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestChangeApprovalGateRequiresContentRevisionMatch", "TestParkRuleStampsAwaitingHuman", "TestLifecycleTransitionRulesExcludeParkedRuns"},
-		"lifecycle transitions target valid agent-run edges; gate ordering, content-revision freshness (D15 #0), park, and park-exclusion (D15) hold"},
+	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestChangeApprovalGateFreshnessForwardContract", "TestParkRuleStampsAwaitingHuman", "TestLifecycleTransitionRulesExcludeParkedRuns"},
+		"lifecycle transitions target valid agent-run edges; gate ordering, deferred content-freshness tripwire (D15 #0), park, and park-exclusion (D15) hold"},
 	{"T7", "test/conformance/host_neutrality_test.go", []string{"TestNoArcRuleReferencesHostSpecificField"},
 		"no arc rule names a code host in a predicate position (forge-io host-neutrality — swap-the-adapter contract)"},
 }

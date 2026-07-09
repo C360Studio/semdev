@@ -256,6 +256,20 @@ M0 to what is safely supportable, record it — never a silent Go workaround (B7
   abandons it and still closes the config manager and NATS, so a SIGINT on the
   live binary always returns. The boot smoke test's teardown is best-effort (it
   proves clean *startup*, not shutdown). Remove the bound once #508 lands.
+- **UA-4 — no warn-free scalar field-to-field comparison in expression-rule
+  conditions.** Comparing one triple against another on the same entity has only
+  one scalar form — `$entity.triple.<pred>` in a condition `value` — and it floods a
+  `"likely silent-pass bug"` WARN on every entity that lacks `<pred>` (the rule is
+  evaluated, and its values substituted, against every changed entity incl.
+  agentic-loop steps; substitution is eager over all conditions before evaluation,
+  so a guard condition cannot short-circuit it; the graceful `.length`/`.triples`
+  forms don't warn but are count/array, not scalar equality). Surfaced wiring the
+  D15 #0 change-approval gate freshness. **Filed: C360Studio/semstreams#519.** M0
+  handling: the gate stays presence-only and the reachable content-freshness guard
+  lives in `project_tasks` (Go, warn-free); a tripwire pin
+  (`TestChangeApprovalGateFreshnessForwardContract`) blocks re-introducing the
+  warn-flooding form until #519 lands or a rework path forces the gate to adopt a
+  warn-free compare (see D15 #0).
 
 **M0 scope decision:** intake triggers on issue **`opened`** only — the one flow
 the flattened payload fully supports (actor == opener; initial labels + body are
@@ -306,35 +320,47 @@ packs; run-creation-on-intake is `forge-io` (group 5); live firing is proven in
 the group-11 journey. Four contracts fall out of that split and are pinned here
 so a later group cannot break them silently:
 
-0. **Re-authored changes must be re-validated before the gate reads
-   `openspec.validated`. — CLOSED (content-revision binding).** `create_change`
-   REPLACES `openspec.change.*` on a re-author, but G5 forbids it (or any tool but
-   the validate harness) from touching `openspec.validated`, and `validate_change`
-   is not invoked on re-author, so no writer clears the marker when the content
-   changes. A slug-valued marker cannot self-detect a re-author, so a stale pass
-   could gate a superseded version silently. **Resolution (once the validate
-   station wired the marker into the live approval path):** the marker binds to the
-   change's CONTENT, not the slug. `create_change` computes a deterministic content
-   revision over the authored facts and stamps it twice on the run — run-level
-   `openspec.change.revision` (slug-independent, so the slug-blind gate rule can
-   read it) and slug-scoped `openspec.change.<slug>.revision` — both in its own
-   `openspec.change.*` namespace (G5/G9 clean, no new vocabulary). `validate_change`
-   on PASS echoes the run-level revision into `openspec.validated` (single compute
-   site, so read/write cannot drift). The change-approval gate then requires
-   `openspec.validated eq $entity.triple.openspec.change.revision` (framework
-   field-to-field substitution), and `project_tasks` requires
-   `openspec.validated == openspec.change.<slug>.revision` (binding slug AND
-   content). A re-author bumps the revision, so the stale marker no longer matches
-   and neither consumer advances until `validate_change` re-runs against the new
-   content — which the edge-triggered validate rule (coordinator/03, fires on each
-   new authoring loop's marker) already does. Red-first pins:
-   `TestChangeApprovalGateRequiresContentRevisionMatch` (gate carries the guard),
-   `TestProjectRejectsReauthoredUnrevalidatedChange` (project_tasks refuses a
-   re-authored-since-validation change), `TestCreateChangeRevisionTracksContent`
-   (revision changes iff content changes), `TestValidateFailsWithoutRevision`
-   (validate fails closed without a revision). Surfaced by the 4.4 semstreams-review
-   and re-flagged live by Codex on PR #1; fixed here, not a 4.4 defect (4.4
-   correctly could not fix it under G5, before the gate was live).
+0. **Re-authored changes must be re-validated before a consumer reads
+   `openspec.validated`. — CLOSED at the reachable consumer (`project_tasks`); gate
+   DEFERRED (content-revision binding).** `create_change` REPLACES `openspec.change.*`
+   on a re-author, but G5 forbids it (or any tool but the validate harness) from
+   touching `openspec.validated`, and `validate_change` is not invoked on re-author,
+   so no writer clears the marker when the content changes. A slug-valued marker
+   cannot self-detect a re-author, so a stale pass could gate a superseded version
+   silently. **Resolution — bind the marker to CONTENT, not the slug:**
+   `create_change` computes a deterministic content revision over the authored facts
+   (sha256, length-prefixed sorted `(predicate,object)` pairs, `sha256:`-prefixed so
+   the rule engine never compares it numerically) and stamps it slug-scoped at
+   `openspec.change.<slug>.revision`, in its own `openspec.change.*` namespace
+   (G5/G9 clean, no new vocabulary), in the same atomic replace as the content.
+   `validate_change` on PASS echoes THIS slug's revision into `openspec.validated`
+   (single compute site — echo, never recompute — so read/write cannot drift; fails
+   closed without a revision). `project_tasks` then freezes `task.spec` only when
+   `openspec.validated == openspec.change.<slug>.revision` — so a re-authored,
+   unvalidated, or alternate change is refused. A re-author bumps the revision, so
+   the stale marker no longer matches and `project_tasks` refuses until
+   `validate_change` re-runs against the new content (the edge-triggered validate
+   rule, coordinator/03, fires on each new authoring loop's marker).
+
+   **Gate side deferred.** Ideally the change-approval GATE would carry the same
+   freshness (`openspec.validated` must equal the current content revision). But the
+   gate is slug-blind (it fires on the run and cannot wildcard a slug), so it needs a
+   slug-independent field-to-field compare, and the only engine form
+   (`$entity.triple.<pred>` in a condition `value`) floods a "likely silent-pass bug"
+   WARN on every entity that lacks the predicate — the gate is evaluated against all
+   changed entities, incl. agentic-loop steps (semstreams **#519**, filed). At M0 the
+   gate's stale-firing is UNREACHABLE (no live path re-authors a change while the run
+   is `executing` — there is no `awaiting_approval → executing` rework path yet), so
+   the gate stays presence-only and `project_tasks` carries the reachable guard. When
+   a rework path lands, the gate MUST adopt the freshness compare via a warn-free form
+   (the #519 fix, or the graceful `.triples` form). Tripwire:
+   `TestChangeApprovalGateFreshnessForwardContract` keeps the gate presence-guarded
+   and blocks re-introducing the warn-flooding `$entity.triple` value form until #519.
+   Red-first pins for the live guards: `TestProjectRejectsReauthoredUnrevalidatedChange`
+   (project_tasks refuses a re-authored-since-validation change),
+   `TestCreateChangeRevisionTracksContent` (revision changes iff content changes),
+   `TestValidateFailsWithoutRevision` (validate fails closed without a revision).
+   Surfaced by the 4.4 semstreams-review and re-flagged live by Codex on PR #1.
 
 1. **Run-scoped facts.** Rules fire against the *firing entity's* triples, and
    the lifecycle rules fire on the run (they match `agent.run.phase`). So the

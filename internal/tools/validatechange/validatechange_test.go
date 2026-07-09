@@ -68,17 +68,14 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) 
 }
 
 // stamped returns the triples create_change would have written for a change: its
-// content facts plus BOTH content-revision facts (run-level and the slug-scoped
-// one validate_change reads and echoes into openspec.validated).
+// content facts plus the slug-scoped content revision validate_change reads and
+// echoes into openspec.validated.
 func stamped(runEntityID string, c *openspec.Change) []message.Triple {
 	var out []message.Triple
 	for _, f := range c.Facts() {
 		out = append(out, message.Triple{Subject: runEntityID, Predicate: f.Predicate, Object: f.Object})
 	}
-	out = append(out,
-		message.Triple{Subject: runEntityID, Predicate: createchange.RevisionPredicate, Object: sampleRevision},
-		message.Triple{Subject: runEntityID, Predicate: createchange.SlugRevisionPredicate(c.Slug), Object: sampleRevision},
-	)
+	out = append(out, message.Triple{Subject: runEntityID, Predicate: createchange.SlugRevisionPredicate(c.Slug), Object: sampleRevision})
 	return out
 }
 

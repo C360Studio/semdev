@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -190,30 +191,33 @@ func TestChangeApprovalGateOrdering(t *testing.T) {
 	}
 }
 
-// D15 forward-contract #0 — the change-approval gate must require openspec.validated
-// to EQUAL the run's current content revision (openspec.change.revision), not merely
-// be present. Without this field-to-field guard, a rework re-author (which bumps the
-// revision) could reach the human gate on the PRIOR version's validation — the
-// stale-same-slug false-green. The value must be the $entity.triple substitution of
-// the run-level, slug-INDEPENDENT revision (the gate is slug-blind). Red-first:
-// dropping the condition, or pointing it at a slug-scoped/literal value, fails.
-func TestChangeApprovalGateRequiresContentRevisionMatch(t *testing.T) {
+// D15 forward-contract #0 — the change-approval gate's content-freshness is
+// DEFERRED, and this tripwire keeps the deferral honest. Ideally the gate would
+// require openspec.validated to equal the run's current content revision so a
+// rework re-author cannot reach the human gate on a stale validation. That needs a
+// slug-independent field-to-field compare, but the only engine form
+// ($entity.triple.<pred> in a condition value) floods a "likely silent-pass bug"
+// WARN on every entity lacking the predicate (semstreams #519). At M0 the hazard is
+// UNREACHABLE (no live path re-authors while the run is executing), so the gate is
+// presence-only and the REACHABLE guard lives in project_tasks (Go, warn-free:
+// TestProjectRejectsReauthoredUnrevalidatedChange). This pin asserts (a) the gate
+// keeps its presence guard, and (b) it does NOT carry the warn-flooding
+// $entity.triple value form — so re-introducing it (before #519 is fixed) fails
+// here, forcing the author to also update this contract. When a rework path lands,
+// the gate MUST adopt the freshness compare via a warn-free form (the #519 fix or
+// the .triples form) and this pin is updated in the same change.
+func TestChangeApprovalGateFreshnessForwardContract(t *testing.T) {
 	offer, ok := runLifecycleRules(t)["run_offer_change_approval"]
 	if !ok {
 		t.Fatal("missing run_offer_change_approval rule")
 	}
-	const wantValue = "$entity.triple.openspec.change.revision"
-	found := false
-	for _, c := range offer.Conditions {
-		if c.Field == "openspec.validated" && c.Operator == "eq" {
-			if c.Value != wantValue {
-				t.Errorf("content-revision guard value = %v, want %q (slug-independent, so the slug-blind gate can compare it)", c.Value, wantValue)
-			}
-			found = true
-		}
+	if c, ok := offer.condition("openspec.validated"); !ok || c.Operator != "ne" {
+		t.Error("offer-approval must still require openspec.validated present (ne \"\") — the validate-before-approval floor")
 	}
-	if !found {
-		t.Error("offer-approval must require openspec.validated eq $entity.triple.openspec.change.revision — else a re-authored change reaches the gate on a stale validation (D15 #0)")
+	for _, c := range offer.Conditions {
+		if s, ok := c.Value.(string); ok && strings.Contains(s, "$entity.triple.") {
+			t.Errorf("gate condition %q=%v uses the warn-flooding $entity.triple value form — deferred pending semstreams #519; freshness lives in project_tasks until a warn-free form + a rework path land (D15 #0)", c.Field, c.Value)
+		}
 	}
 }
 

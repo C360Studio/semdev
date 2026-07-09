@@ -58,17 +58,6 @@ const Source = "create-change-author-tool"
 // create-change-author-tool (G5) with no new vocabulary (G9).
 const AuthoredPredicate = "openspec.change.authored"
 
-// RevisionPredicate is the run-level, slug-INDEPENDENT content revision of the
-// run's current authored change. create_change stamps it on the RUN entity (in
-// its openspec.change.* namespace, so the writer stays create-change-author-tool
-// — G5 — with no new vocabulary — G9). It is the D15 forward-contract #0
-// hardening: the change-approval gate rule fires on the run and cannot wildcard a
-// slug, so it needs a slug-independent handle to require openspec.validated to
-// EQUAL the current content. A re-author bumps this revision, so a stale
-// openspec.validated (blessed the prior content) no longer matches and the gate
-// will not fire until validate_change runs again against the new content.
-const RevisionPredicate = "openspec.change.revision"
-
 // revisionSubkey is the slug-scoped content-revision sub-key
 // (openspec.change.<slug>.revision) — the same revision value, keyed under the
 // change's own package so project_tasks can bind BOTH the slug and the content:
@@ -172,18 +161,19 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: authored change %q produced no facts", p.Slug)
 	}
 
-	// Stamp the content revision (D15 #0) so a re-author self-invalidates a stale
-	// openspec.validated. Computed over the content facts above (NOT the revision
-	// facts) so it is deterministic and not self-referential. Two facts, same
-	// value: the run-level openspec.change.revision (the slug-blind gate rule
-	// compares openspec.validated against it) and the slug-scoped
-	// openspec.change.<slug>.revision (project_tasks binds slug + content). Both
-	// ride in the SAME atomic replace as the content, so they cannot skew from it.
+	// Stamp the slug-scoped content revision (D15 #0) so a re-author
+	// self-invalidates a stale openspec.validated: validate_change echoes this into
+	// openspec.validated on PASS, and project_tasks freezes task.spec only when the
+	// two match, so a re-authored-but-not-revalidated change is refused. Computed
+	// over the content facts above (NOT the revision fact) so it is deterministic
+	// and not self-referential, and rides the SAME atomic replace as the content so
+	// it cannot skew from it. (The change-approval GATE also needs to require this
+	// freshness, but the gate is slug-blind and the engine has no warn-free
+	// slug-independent field-to-field compare — see design D15 #0 / semstreams
+	// #519; deferred to a forward-contract, and project_tasks carries the reachable
+	// guard meanwhile.)
 	rev := Revision(triples)
-	triples = append(triples,
-		revisionTriple(runEntityID, RevisionPredicate, rev, now),
-		revisionTriple(runEntityID, SlugRevisionPredicate(p.Slug), rev, now),
-	)
+	triples = append(triples, revisionTriple(runEntityID, SlugRevisionPredicate(p.Slug), rev, now))
 
 	// Read the prior owned package so a re-author REPLACES it (clears stale
 	// index/rid-keyed facts) rather than appending a second copy.
