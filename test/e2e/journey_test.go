@@ -41,6 +41,7 @@ import (
 	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
+	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/service"
 	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 )
@@ -181,15 +182,29 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
 	t.Logf("station 5: change validated → run reached awaiting_approval (gate fired); mock RequestCount=%d", mock.RequestCount())
 
-	// Exactly four model turns drove the arc (C1 decide(issue_intake),
-	// C2 decide(create_change), A1 create_change, V1 validate_change). The
+	// Station 6 — the human approves the change. The journey stands in for the
+	// group-5 approval adapter (a forge-io path, deferred): it stamps
+	// run.change_approved=true on the RUN entity exactly as that adapter will
+	// (Source approval-adapter, on the run entity per D15). The EXISTING
+	// run-lifecycle/02-resume-after-change-approval rule then fires
+	// awaiting_approval→executing — the release side of the first human gate.
+	// Asserting the run returns to executing proves the resume rule fires live on a
+	// real approval fact; the transition is rule-owned (G2), no product Go advances
+	// it. (Station 5 asserted awaiting_approval immediately above, so this
+	// executing assertion cannot false-match the pre-gate executing state.)
+	approveChange(ctx, t, runEntityID)
+	requireRunPhase(ctx, t, runEntityID, "executing")
+	t.Logf("station 6: human approved → run resumed to executing (mock RequestCount=%d)", mock.RequestCount())
+
+	// Still exactly four model turns through the resume: C1 decide(issue_intake),
+	// C2 decide(create_change), A1 create_change, V1 validate_change. The resume is
+	// rule-owned (no model call), and executing-after-resume spawns nothing yet (the
+	// dev-loop re-wake is the next station), so no fifth turn is in flight. The
 	// authoring/validate tools REPLACE their facts idempotently, so a re-spawn/loop
-	// regression would re-stamp the same facts and slip past the fact/phase checks —
-	// RequestCount is the only signal of an extra turn, so pin it (the mockllm
-	// contract). By here every loop has terminated (StopLoop) and awaiting_approval
-	// spawns nothing (it waits for a human), so no fifth call is in flight.
+	// regression would slip past the fact/phase checks — RequestCount is the only
+	// signal of an extra turn (the mockllm contract), so pin it.
 	if got := mock.RequestCount(); got != 4 {
-		t.Fatalf("expected exactly 4 model turns (C1 decide, C2 decide, A1 create_change, V1 validate_change), got %d — extra turns indicate a re-spawn/loop or an unscripted turn", got)
+		t.Fatalf("expected exactly 4 model turns (C1 decide, C2 decide, A1 create_change, V1 validate_change) through the resume, got %d — extra turns indicate a re-spawn/loop or an unscripted turn", got)
 	}
 }
 
@@ -220,6 +235,32 @@ func publishCoordinatorWake(ctx context.Context, t *testing.T) string {
 		t.Fatalf("publish coordinator wake: %v", err)
 	}
 	return task.TaskID
+}
+
+// approveChange stands in for the group-5 approval adapter (a forge-io path,
+// deferred): it stamps run.change_approved=true on the run entity via the same
+// OwnedFactWriter transport the tools use, with the vocab writer Source
+// (approval-adapter). The predicate + Source mirror the run-lifecycle/02 resume
+// rule's condition and the vocab table; D15 puts the fact on the RUN entity so the
+// run-fired resume rule reads it. This is the human half of the first gate — the
+// arc is otherwise fully autonomous.
+func approveChange(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	writer := agentictools.NewNATSOwnedFactWriter(client)
+	tr := message.Triple{
+		Subject:    runEntityID,
+		Predicate:  "run.change_approved",
+		Object:     "true",
+		Source:     "approval-adapter",
+		Timestamp:  time.Now().UTC(),
+		Confidence: 1.0,
+	}
+	if err := writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil); err != nil {
+		t.Fatalf("stamp run.change_approved on %s: %v", runEntityID, err)
+	}
 }
 
 // requireCoordinatorDecision polls the ENTITY_STATES fact-store until THIS run's
