@@ -59,6 +59,16 @@ const journeyDecideAction = "issue_intake"
 // change facts land on the run entity under openspec.change.<slug>.*.
 const journeyChangeSlug = "journey-spine-change"
 
+// journeyDevAction is the action the re-woken coordinator decides after the human
+// approves the change — the entry to the dev-loop rail.
+const journeyDevAction = "dev_from_task"
+
+// journeyDevRewakeMarker is a distinctive substring of the dev re-wake prompt
+// (dev-from-task/02-rewake-coordinator-dev.json) that the mock's 5th turn guards
+// on — the re-wake prompt threads $entity.id (the run entity), not the issue ref
+// or slug, so the turn is keyed on this stable phrase instead.
+const journeyDevRewakeMarker = "Begin developing"
+
 // entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
 // lands in (graph-ingest's kv-write output). The journey scans it for the
 // coordinator's decision.
@@ -85,10 +95,13 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   2. C2 re-woken coordinator   → decide(create_change)   [routes to author]
 	//   3. A1 authoring coordinator  → create_change(<change>) [emits the change]
 	//   4. V1 validate coordinator   → validate_change(<slug>) [validates → gate]
+	//   5. C3 dev re-woken coord.    → decide(dev_from_task)   [post-approval kickoff]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turn 4's prompt threads openspec.change.authored, so it
-	// marks on the slug. The cursor — not the marker — distinguishes the turns. An
-	// unscripted turn returns mockllm.UnmatchedSentinel, failing loudly not green.
+	// marks on the slug; turn 5's prompt threads the run entity id, so it marks on a
+	// stable phrase of the dev re-wake prompt. The cursor — not the marker —
+	// distinguishes the turns. An unscripted turn returns mockllm.UnmatchedSentinel,
+	// failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -111,6 +124,13 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyChangeSlug,
 			Tool:   &mockllm.ToolCall{Name: "validate_change", Args: map[string]any{"slug": journeyChangeSlug}},
+		},
+		mockllm.Fixture{
+			Marker: journeyDevRewakeMarker,
+			Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
+				"action": journeyDevAction,
+				"reason": "the change is approved and the run resumed; develop the run's tasks",
+			}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -196,15 +216,27 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	t.Logf("station 6: human approved → run resumed to executing (mock RequestCount=%d)", mock.RequestCount())
 
-	// Still exactly four model turns through the resume: C1 decide(issue_intake),
-	// C2 decide(create_change), A1 create_change, V1 validate_change. The resume is
-	// rule-owned (no model call), and executing-after-resume spawns nothing yet (the
-	// dev-loop re-wake is the next station), so no fifth turn is in flight. The
-	// authoring/validate tools REPLACE their facts idempotently, so a re-spawn/loop
-	// regression would slip past the fact/phase checks — RequestCount is the only
-	// signal of an extra turn (the mockllm contract), so pin it.
-	if got := mock.RequestCount(); got != 4 {
-		t.Fatalf("expected exactly 4 model turns (C1 decide, C2 decide, A1 create_change, V1 validate_change) through the resume, got %d — extra turns indicate a re-spawn/loop or an unscripted turn", got)
+	// Station 7 — the resumed run kicks off the dev loop. Two rules fire on the run
+	// entity: dev-from-task/01 stamps the bare agent.run anchor (a chain entity
+	// carries none, so publish_agent inherit has nothing to bind), then
+	// dev-from-task/02 does the inherit publish — spawning a fresh coordinator loop
+	// bound to THIS run, which re-decides and picks dev_from_task. Assert that a
+	// coordinator loop BOUND TO THIS RUN (agent.run.entity_id == runEntityID) stamped
+	// next_action=dev_from_task — proof the anchor+inherit re-wake fired and the
+	// coordinator routed into development. Bind by the run anchor + the distinct
+	// action so an earlier decision (issue_intake / create_change) on the same run
+	// cannot false-green.
+	requireRunCoordinatorDecision(ctx, t, runEntityID, journeyDevAction)
+	t.Logf("station 7: dev loop kicked off — coordinator re-woke and decided %s (mock RequestCount=%d)", journeyDevAction, mock.RequestCount())
+
+	// Exactly five model turns drove the arc through the dev kickoff: C1
+	// decide(issue_intake), C2 decide(create_change), A1 create_change, V1
+	// validate_change, C3 decide(dev_from_task). The resume itself is rule-owned (no
+	// model call), and the anchor rule only stamps a triple — the single new turn is
+	// the dev re-wake's decide. A spurious resume-spawn, a double anchor/re-wake, or
+	// an unscripted turn would push this past 5, so pin it (the mockllm contract).
+	if got := mock.RequestCount(); got != 5 {
+		t.Fatalf("expected exactly 5 model turns (…, C3 decide(dev_from_task)), got %d — extra turns indicate a re-spawn/loop, a double dev re-wake, or an unscripted turn", got)
 	}
 }
 
@@ -286,6 +318,32 @@ func requireCoordinatorDecision(ctx context.Context, t *testing.T, wantTaskID, w
 	}, "coordinator loop (task "+wantTaskID+") never stamped decision.next_action="+wantAction+
 		" — check the front-door tool config (nil tools / tool_choice=required / allowlist), "+
 		"persona seeding, the decide registration, or the mock decide fixture marker")
+}
+
+// requireRunCoordinatorDecision polls until SOME coordinator loop BOUND TO
+// runEntityID (agent.run.entity_id == runEntityID) carries
+// coordinator.decision.next_action == wantAction. Unlike requireCoordinatorDecision
+// (which binds by the front-door wake's task id), the dev re-wake coordinator is
+// spawned by a rule with no journey-known task id, so it is bound by the run anchor
+// instead — plus the distinct action, so an earlier decision (issue_intake /
+// create_change) on the same run cannot false-green.
+func requireRunCoordinatorDecision(ctx context.Context, t *testing.T, runEntityID, wantAction string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	requireEventually(t, 45*time.Second, func() bool {
+		for _, e := range scanEntities(ctx, client) {
+			if tripleString(e, agvocab.LoopRole) == "coordinator" &&
+				tripleString(e, agvocab.LoopRunEntityID) == runEntityID &&
+				tripleString(e, agvocab.CoordinatorNextAction) == wantAction {
+				return true
+			}
+		}
+		return false
+	}, "no coordinator loop bound to run "+runEntityID+" ever stamped decision.next_action="+wantAction+
+		" — the dev re-wake did not fire; check dev-from-task/01 (agent.run stamped on the run so inherit can bind), "+
+		"dev-from-task/02 (run_scope=inherit publish), and the mock decide fixture marker \""+journeyDevRewakeMarker+"\"")
 }
 
 // requireRunAnchor polls until THIS wake's coordinator loop carries an

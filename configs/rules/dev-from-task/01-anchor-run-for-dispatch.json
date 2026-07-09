@@ -1,0 +1,31 @@
+{
+  "id": "dev_from_task_anchor_run_for_dispatch",
+  "type": "expression",
+  "name": "Resumed run → stamp agent.run anchor (enable dev-loop dispatch)",
+  "description": "Dev-loop kickoff, half 1 of 2. After the human-approval gate releases (run-lifecycle/02-resume-after-change-approval fires awaiting_approval→executing because run.change_approved is present), the dev loop must begin — but there is no live loop to fire a re-wake on (the authoring/validate loops terminated with StopLoop). A rule can only fire on the RUN entity here, and publish_agent binds a spawned loop's RunID from either run_scope=new+a firing LOOP (the run entity is a chain entity, not a loop, so 'new' degrades to inherit-with-no-anchor) or run_scope=inherit reading the firing entity's bare agent.run triple. A run entity carries agent.run.phase / agent.run.entity_id but NEVER a bare agent.run triple, so inherit finds nothing.\n\nThis rule stamps that missing anchor: agent.run = the bare run id ($entity.instance) on the run entity ($entity.id), so a follow-on inherit publish (rule 02) can bind a fresh coordinator loop to THIS run. The framework's ResolveRun reads agent.run only on LOOP entities (agentrun.go builds a loop entity id first), so this stamp on the chain entity is inert to the lifecycle manager — its sole reader is publish_agent's inherit path on this same run entity. The two steps are SEPARATE rules because inherit reads the in-memory entity SNAPSHOT captured at evaluation; an add_triple earlier in the same on_enter does not update that snapshot, so a single rule would inherit an empty RunID.\n\nEDGE-TRIGGERED ONE-SHOT: the agent.run length_eq 0 guard fires this only on the FIRST anchor-less executing+approved state (right after resume) and stops it re-firing once agent.run is present. The run reaches executing once before approval too (via the mint bridge), but change_approved is absent then, so this waits for approval. G2: this stamps a framework anchor fact, it fires no lifecycle transition.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.run.phase", "operator": "eq", "value": "executing", "required": true },
+    { "field": "run.change_approved", "operator": "eq", "value": "true", "required": true },
+    { "field": "agent.run", "operator": "length_eq", "value": 0, "required": true },
+    { "field": "run.awaiting_human", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "agent.run",
+      "object": "$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task / run-lifecycle",
+    "station": "dev-loop kickoff (1/2) — anchor the resumed run so a coordinator can be spawned into it",
+    "why_run_entity_stamp": "publish_agent inherit derives RunID from the firing entity's bare agent.run triple (actions.go run_scope switch); a chain/run entity has none, so the dev re-wake cannot bind without this. Confirmed safe: agentrun.ResolveRun reads agent.run only on loop entities, never chain entities.",
+    "two_rule_split": "inherit reads the entity snapshot; an add_triple in the same on_enter is invisible to a same-rule inherit. The inherit publish lives in 02-rewake-coordinator-dev.json, fired on the next KV revision once agent.run is present.",
+    "mirrors": "semteams autoresearch/05-iteration-dispatch fires on the run entity and publishes into it; this is the run-entity-anchor half that a chain entity needs before inherit works."
+  }
+}

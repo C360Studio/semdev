@@ -35,6 +35,7 @@ var Predicates = []Predicate{
 	{"run.change_approved", "approval-adapter", "forge-io", m0},
 	{"human.signal", "comment-adapter", "forge-io", m0},
 	{"run.awaiting_human", "park-rule", "run-lifecycle", m0},
+	{"run.dev_kickoff", "dev-rewake-rule", "dev-from-task", m0},
 	{"pr.ref", "pr-delivery-adapter", "forge-io", m0},
 	{"openspec.change.*", "create-change-author-tool", "openspec-io", m0},
 	{"openspec.spec.*", "brownfield-spec-projector", "openspec-io", m0},

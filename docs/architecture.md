@@ -20,6 +20,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `run.change_approved` | approval-adapter | forge-io |
 | `human.signal` | comment-adapter | forge-io |
 | `run.awaiting_human` | park-rule | run-lifecycle |
+| `run.dev_kickoff` | dev-rewake-rule | dev-from-task |
 | `pr.ref` | pr-delivery-adapter | forge-io |
 | `openspec.change.*` | create-change-author-tool | openspec-io |
 | `openspec.spec.*` | brownfield-spec-projector | openspec-io |

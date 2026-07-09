@@ -443,6 +443,28 @@ surfaced five decisions. Four confirm the design already written; one changes it
   M0 proves the thin Go slice end-to-end; the hard OSH profile is proven at M2.
 - **Multi-persona graph re-projection dropping facts** (the semspec-ui-bmad
   lesson) → minimal 3-persona roster; single-writer facts (G5).
+- **Rule re-fire on restart (persisted graph).** The rule engine persists its
+  per-(rule,entity) match state in a durable NATS KV bucket (`RULE_STATE`, TTL 0)
+  and, on boot, a stale-revision guard skips replayed entities — so a **normal
+  restart does NOT re-fire** an already-matching rule (`stateful_evaluator.go`
+  `wasMatching` read-back + the "defends across process restarts" guard;
+  re-fire-on-recovery is opt-in and none of our rules opt in). The residual is
+  **asymmetric bucket loss**: if `RULE_STATE` is wiped/absent while `ENTITY_STATES`
+  survives (manual deletion, targeted corruption, entity delete+recreate),
+  `wasMatching` resets false and every `publish_agent` **spawn** rule whose trigger
+  is *non-self-clearing* re-fires — `publish_agent` is not idempotent (each fire
+  mints a fresh loop; no dedup), so you get a duplicate coordinator/author/validate
+  loop. `add_triple`/`lifecycle_transition` rules are safe (deterministic-object
+  idempotent / transitions-table-guarded). The established fix (semteams
+  `agent-run/02`) is a **self-extinguishing top-level condition** whose own action
+  flips it false. **`dev-from-task/02` (the dev re-wake) is hardened** — a fired-once
+  `run.dev_kickoff` marker + absence guard (pinned by
+  `TestDevRewakeIsSelfExtinguishing`). **CARRY-FORWARD (pre-production):**
+  `coordinator/02` (create_change spawn), `coordinator/03` (validate spawn), and
+  `run-lifecycle/03` (park's `publish`) are the remaining non-self-clearing
+  `publish_agent` triggers; give each the same fired-once marker before a real
+  deployment (or before any op that could clear `RULE_STATE` independently). Every
+  new dev-loop-rail spawn rule MUST follow the self-extinguishing pattern.
 
 ## Migration Plan
 

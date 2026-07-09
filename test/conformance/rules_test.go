@@ -221,6 +221,44 @@ func TestChangeApprovalGateFreshnessForwardContract(t *testing.T) {
 	}
 }
 
+// RESTART-SAFETY — the dev re-wake must be SELF-EXTINGUISHING. It fires a
+// publish_agent (which the framework does NOT dedup — every fire mints a fresh
+// loop, actions.go), and its trigger (agent.run ∧ executing ∧ change_approved)
+// does NOT self-clear after firing. On a normal restart the durable RULE_STATE
+// bucket suppresses re-fire, but under asymmetric bucket loss (RULE_STATE wiped
+// while ENTITY_STATES survives) an unguarded rule would re-spawn a DUPLICATE
+// coordinator. The fix (semteams agent-run/02 pattern): stamp a fired-once marker
+// (run.dev_kickoff) and guard on its absence, so the trigger flips false the
+// moment it fires — independent of RULE_STATE. This pin fails if either half is
+// dropped. (The sibling spawn rules coordinator/02, coordinator/03, and the park
+// rule are NOT yet self-extinguishing — tracked in design.md as a pre-production
+// hardening carry-forward; when the dev-loop rail adds more publish_agent spawns
+// they must follow this pattern.)
+func TestDevRewakeIsSelfExtinguishing(t *testing.T) {
+	rewake, ok := runLifecycleRules(t)["dev_from_task_rewake_coordinator"]
+	if !ok {
+		t.Fatal("missing dev_from_task_rewake_coordinator rule")
+	}
+	const marker = "run.dev_kickoff"
+	if !rewake.hasAbsenceGuard(marker) {
+		t.Errorf("dev re-wake must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate coordinator (publish_agent is not idempotent)", marker)
+	}
+	if !rewake.hasTriple(marker) {
+		t.Errorf("dev re-wake must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	// The marker must be stamped by a publish_agent-bearing rule (the spawn is the
+	// non-idempotent effect the marker protects) — sanity that we pinned the right rule.
+	spawns := false
+	for _, a := range rewake.OnEnter {
+		if a.Type == "publish_agent" {
+			spawns = true
+		}
+	}
+	if !spawns {
+		t.Error("dev re-wake pin is on the wrong rule — expected a publish_agent spawn rule")
+	}
+}
+
 // 3.6 — the park rule stamps run.awaiting_human (its single writer, G5) on
 // ask_human and posts to the user bus. No Go reconciler advances a parked run.
 func TestParkRuleStampsAwaitingHuman(t *testing.T) {
