@@ -23,7 +23,10 @@ interactive-only and fails non-interactively ("Nothing to validate"), so it MUST
 NOT be the harness invocation. The CLI is the compatibility oracle; semdev SHALL
 NOT substitute a re-implementation of its rules, and the pass/fail SHALL be
 stamped by the harness that ran the validator (`openspec.validated`), never by a
-model.
+model. The `openspec.validated` marker SHALL bind to the exact change CONTENT the
+validator blessed — its value is the change's content revision — so a later
+re-author of the same change (which changes the content) does not satisfy any
+consumer of the marker until the validator runs again against the new content.
 
 #### Scenario: An invalid change cannot reach approval
 - **WHEN** a generated change fails `openspec validate <change> --strict --json --no-interactive`
@@ -31,7 +34,12 @@ model.
 
 #### Scenario: A valid change is blessed by the sponsor's own tool
 - **WHEN** a generated change passes `openspec validate <change> --strict --json --no-interactive`
-- **THEN** the harness that ran the validator records `openspec.validated` for the change
+- **THEN** the harness that ran the validator records `openspec.validated` for the change bound to the change's current content
+
+#### Scenario: A re-authored change must be re-validated before it can reach approval
+- **WHEN** a change that previously passed the validator is re-authored with changed content
+- **THEN** the prior `openspec.validated` marker no longer satisfies the change-approval gate or task projection
+- **AND** the change reaches those consumers only after the validator runs again against the new content
 
 ### Requirement: Archiving folds the merged change back into the specs via the CLI
 

@@ -190,6 +190,33 @@ func TestChangeApprovalGateOrdering(t *testing.T) {
 	}
 }
 
+// D15 forward-contract #0 — the change-approval gate must require openspec.validated
+// to EQUAL the run's current content revision (openspec.change.revision), not merely
+// be present. Without this field-to-field guard, a rework re-author (which bumps the
+// revision) could reach the human gate on the PRIOR version's validation — the
+// stale-same-slug false-green. The value must be the $entity.triple substitution of
+// the run-level, slug-INDEPENDENT revision (the gate is slug-blind). Red-first:
+// dropping the condition, or pointing it at a slug-scoped/literal value, fails.
+func TestChangeApprovalGateRequiresContentRevisionMatch(t *testing.T) {
+	offer, ok := runLifecycleRules(t)["run_offer_change_approval"]
+	if !ok {
+		t.Fatal("missing run_offer_change_approval rule")
+	}
+	const wantValue = "$entity.triple.openspec.change.revision"
+	found := false
+	for _, c := range offer.Conditions {
+		if c.Field == "openspec.validated" && c.Operator == "eq" {
+			if c.Value != wantValue {
+				t.Errorf("content-revision guard value = %v, want %q (slug-independent, so the slug-blind gate can compare it)", c.Value, wantValue)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("offer-approval must require openspec.validated eq $entity.triple.openspec.change.revision — else a re-authored change reaches the gate on a stale validation (D15 #0)")
+	}
+}
+
 // 3.6 — the park rule stamps run.awaiting_human (its single writer, G5) on
 // ask_human and posts to the user bus. No Go reconciler advances a parked run.
 func TestParkRuleStampsAwaitingHuman(t *testing.T) {

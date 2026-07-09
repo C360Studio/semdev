@@ -29,6 +29,7 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/openspec"
+	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -106,21 +107,30 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 			"project_tasks: task.spec already projected for this run (%d facts) — it is immutable; the dev loop converges on it, it does not redefine it", len(existing))
 	}
 
-	// Bind the projection to the run's VALIDATED change. project_tasks freezes the
-	// IMMUTABLE task.spec, so it must refuse any slug that is not the change the
-	// validate harness blessed on this run (openspec.validated). A stale or alternate
-	// authored package still present on the run would otherwise be frozen, and every
-	// downstream gate (measurement / review / verify) would then prove the WRONG work
-	// against an immutable spec. Fail closed: no validated marker, or a marker naming a
-	// different slug, is a refusal — the model chooses WHICH validated change to freeze,
-	// never an unvalidated one.
-	validated, err := e.readValidatedSlug(ctx, runEntityID)
+	// Bind the projection to the run's VALIDATED CONTENT (D15 #0). project_tasks
+	// freezes the IMMUTABLE task.spec, so it must refuse any change that is not the
+	// exact content the validate harness blessed on this run. openspec.validated
+	// carries the content REVISION the validator passed; create_change stamps this
+	// slug's current content revision at openspec.change.<slug>.revision. Freeze
+	// ONLY when they are equal — so a re-authored-but-not-revalidated change (its
+	// revision bumped, marker stale), an unvalidated change (no marker), or an
+	// alternate change on the run (its revision != the validated one) is refused.
+	// Otherwise a stale or alternate package would be frozen and every downstream
+	// gate (measurement / review / verify) would prove the WRONG work against an
+	// immutable spec. Fail closed: absent or mismatched revision is a refusal.
+	validatedRev, err := e.readPredicate(ctx, runEntityID, validatechange.ValidatedPredicate)
 	if err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "project_tasks: read %s on %s: %v", validatechange.ValidatedPredicate, runEntityID, err)
 	}
-	if validated != p.Slug {
+	slugRevPredicate := createchange.SlugRevisionPredicate(p.Slug)
+	slugRev, err := e.readPredicate(ctx, runEntityID, slugRevPredicate)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "project_tasks: read %s on %s: %v", slugRevPredicate, runEntityID, err)
+	}
+	if validatedRev == "" || slugRev == "" || validatedRev != slugRev {
 		return errResult(call, agentic.ToolErrorInvalidArgs,
-			"project_tasks: slug %q is not this run's validated change (%s=%q) — refusing to freeze task.spec from an unvalidated or alternate change", p.Slug, validatechange.ValidatedPredicate, validated)
+			"project_tasks: change %q is not validated at its current content (%s=%q, %s=%q) — refusing to freeze task.spec from an unvalidated, re-authored-since-validation, or alternate change",
+			p.Slug, validatechange.ValidatedPredicate, validatedRev, slugRevPredicate, slugRev)
 	}
 
 	prefix := openspec.ChangeEntityPrefix(p.Slug) + "task."
@@ -156,17 +166,17 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
 }
 
-// readValidatedSlug returns the slug the validate harness stamped as this run's
-// validated change (openspec.validated on the run entity), or "" if no marker is
-// present. It reads the producer's own predicate name (validatechange) so the
-// reader and writer of that fact cannot drift.
-func (e *Executor) readValidatedSlug(ctx context.Context, runEntityID string) (string, error) {
-	triples, err := e.reader.ReadFacts(ctx, runEntityID, validatechange.ValidatedPredicate)
+// readPredicate returns the object of the exact predicate on the run entity, or
+// "" if absent. Both facts it reads (openspec.validated, the slug-scoped content
+// revision) are named by their producer's own const, so the read/write sides of
+// each cannot drift.
+func (e *Executor) readPredicate(ctx context.Context, runEntityID, predicate string) (string, error) {
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, predicate)
 	if err != nil {
 		return "", err
 	}
 	for _, tr := range triples {
-		if tr.Predicate == validatechange.ValidatedPredicate {
+		if tr.Predicate == predicate {
 			s, _ := tr.Object.(string)
 			return s, nil
 		}

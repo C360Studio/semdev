@@ -8,12 +8,18 @@ import (
 
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/openspec"
+	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/vocab"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
+
+// sampleRevision is the content revision create_change would have stamped at
+// openspec.change.revision. validate_change echoes it into openspec.validated
+// (it does not recompute), so any sentinel serves — the value is opaque here.
+const sampleRevision = "sha256:0123456789abcdef"
 
 // fakeReader serves the triples create_change would have stamped, honoring the
 // scoping prefix.
@@ -61,11 +67,18 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) 
 	return nil, nil
 }
 
+// stamped returns the triples create_change would have written for a change: its
+// content facts plus BOTH content-revision facts (run-level and the slug-scoped
+// one validate_change reads and echoes into openspec.validated).
 func stamped(runEntityID string, c *openspec.Change) []message.Triple {
 	var out []message.Triple
 	for _, f := range c.Facts() {
 		out = append(out, message.Triple{Subject: runEntityID, Predicate: f.Predicate, Object: f.Object})
 	}
+	out = append(out,
+		message.Triple{Subject: runEntityID, Predicate: createchange.RevisionPredicate, Object: sampleRevision},
+		message.Triple{Subject: runEntityID, Predicate: createchange.SlugRevisionPredicate(c.Slug), Object: sampleRevision},
+	)
 	return out
 }
 
@@ -98,9 +111,11 @@ func newExec(reader *fakeReader, runner *fakeRunner, writer *fakeWriter) *Execut
 	return New(reader, runner, writer, nil)
 }
 
-// On a CLI pass (exit 0) the harness stamps openspec.validated=<slug> on the run
-// entity with the vocab writer Source, and it shells the exact non-interactive
-// invocation. The model supplied no verdict.
+// On a CLI pass (exit 0) the harness stamps openspec.validated=<content revision>
+// on the run entity with the vocab writer Source, and it shells the exact
+// non-interactive invocation. The model supplied no verdict. The marker's VALUE is
+// the revision create_change stamped (echoed, not recomputed) — not the slug —
+// so it binds to the exact content the CLI blessed (D15 #0).
 func TestValidatePassStampsMarker(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	runner := &fakeRunner{res: cliexec.Result{ExitCode: 0, Stdout: `{"valid":true}`}}
@@ -129,6 +144,10 @@ func TestValidatePassStampsMarker(t *testing.T) {
 	tr := w.replaces[0].add[0]
 	if tr.Subject != runEntity || tr.Predicate != ValidatedPredicate {
 		t.Errorf("stamped %s=%v on %s, want %s on the run", tr.Predicate, tr.Object, tr.Subject, ValidatedPredicate)
+	}
+	// The marker binds to the content revision, not the slug (D15 #0).
+	if tr.Object != sampleRevision {
+		t.Errorf("openspec.validated = %q, want the content revision %q (not the slug)", tr.Object, sampleRevision)
 	}
 	writer, _ := vocab.WriterOf(ValidatedPredicate)
 	if tr.Source != Source || Source != writer {
@@ -177,6 +196,32 @@ func TestValidateRunnerErrorRecordsNothing(t *testing.T) {
 	}
 	if len(w.replaces) != 0 {
 		t.Errorf("a run failure must record no verdict, got %+v", w.replaces)
+	}
+}
+
+// D15 #0 red-first: a change present on the run but carrying NO content revision
+// (openspec.change.revision absent) is refused before the CLI runs — the harness
+// will not stamp a content-unbound marker, since a bare-slug marker would reopen
+// the stale-same-slug false-green. create_change always stamps the revision, so an
+// absent one is an authoring/ordering gap.
+func TestValidateFailsWithoutRevision(t *testing.T) {
+	// Seed the change CONTENT facts but strip the slug-scoped revision fact
+	// validate_change reads (run-level may remain — validate binds to the slug's own).
+	slugRev := createchange.SlugRevisionPredicate(sampleChange().Slug)
+	var content []message.Triple
+	for _, tr := range stamped(runEntity, sampleChange()) {
+		if tr.Predicate != slugRev {
+			content = append(content, tr)
+		}
+	}
+	r := &fakeReader{triples: content}
+	runner := &fakeRunner{}
+	res, _ := newExec(r, runner, &fakeWriter{}).Execute(context.Background(), call("fix-null-deref"))
+	if res.Error == "" || !strings.Contains(res.Error, "revision") {
+		t.Fatalf("a change with no content revision must be refused, got %q", res.Error)
+	}
+	if runner.calls != 0 {
+		t.Error("the CLI must not run when the change carries no content revision")
 	}
 }
 

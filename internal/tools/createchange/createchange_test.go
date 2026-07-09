@@ -211,6 +211,77 @@ func contains(ss []string, s string) bool {
 	return false
 }
 
+// objectOf returns the object stamped for a predicate in a replace batch, or "".
+func objectOf(triples []message.Triple, predicate string) string {
+	for _, tr := range triples {
+		if tr.Predicate == predicate {
+			s, _ := tr.Object.(string)
+			return s
+		}
+	}
+	return ""
+}
+
+// D15 #0: create_change stamps the content revision on the run — both the
+// run-level, slug-independent openspec.change.revision (the slug-blind gate rule
+// reads it) and the slug-scoped openspec.change.<slug>.revision (project_tasks
+// binds it) — with the same value and the openspec.change.* writer Source.
+func TestCreateChangeStampsContentRevision(t *testing.T) {
+	w := &fakeWriter{}
+	if res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall()); err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	triples := w.replaces[0].add
+	runRev := objectOf(triples, RevisionPredicate)
+	slugRev := objectOf(triples, SlugRevisionPredicate("fix-null-deref"))
+	if runRev == "" {
+		t.Errorf("run-level %s not stamped — the slug-blind gate rule cannot compare openspec.validated", RevisionPredicate)
+	}
+	if slugRev == "" {
+		t.Errorf("slug-scoped %s not stamped — project_tasks cannot bind slug+content", SlugRevisionPredicate("fix-null-deref"))
+	}
+	if runRev != slugRev {
+		t.Errorf("run-level (%q) and slug-scoped (%q) revisions must be the same value", runRev, slugRev)
+	}
+	if !strings.HasPrefix(runRev, "sha256:") {
+		t.Errorf("revision %q must be sha256-prefixed so the rule engine never compares it numerically", runRev)
+	}
+	for _, tr := range triples {
+		if tr.Predicate == RevisionPredicate && tr.Source != Source {
+			t.Errorf("revision Source = %q, want the vocab writer %q (G5)", tr.Source, Source)
+		}
+	}
+}
+
+// D15 #0 red-first: the revision changes iff the content changes — the property
+// the whole freshness contract relies on. Re-authoring with a different intent
+// yields a different revision; identical content yields the same one.
+func TestCreateChangeRevisionTracksContent(t *testing.T) {
+	revFor := func(mutate func(agentic.ToolCall)) string {
+		w := &fakeWriter{}
+		c := sampleCall()
+		if mutate != nil {
+			mutate(c)
+		}
+		if res, err := New(w, testPlatform, nil).Execute(context.Background(), c); err != nil || res.Error != "" {
+			t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+		}
+		return objectOf(w.replaces[0].add, RevisionPredicate)
+	}
+
+	base := revFor(nil)
+	same := revFor(nil)
+	if base != same {
+		t.Errorf("identical content must yield the same revision, got %q and %q", base, same)
+	}
+	changed := revFor(func(c agentic.ToolCall) {
+		c.Arguments["proposal"] = map[string]any{"intent": "a DIFFERENT intent", "scope_in": []any{"the handler"}}
+	})
+	if changed == base {
+		t.Errorf("changed content must yield a different revision, but both were %q — a re-author would not self-invalidate a stale validation", base)
+	}
+}
+
 // The author tool must NOT honor a model-supplied task-completion field: a
 // freshly authored change's tasks are never pre-checked. Task status is DERIVED
 // from execution markers and gate facts (dev-from-task spec), not authored.

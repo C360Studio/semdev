@@ -18,6 +18,19 @@
 // gate. Validation runs against a fresh temp materialization of the hydrated
 // change, so the oracle judges exactly what is in the graph, independent of any
 // workspace the write_change tool may have left.
+//
+// The marker's VALUE is the change's content REVISION (D15 forward-contract #0),
+// not the slug: on PASS this harness reads openspec.change.<slug>.revision — the
+// revision create_change stamped over the content of the slug THIS validation
+// judged — and echoes it into openspec.validated. So the marker binds to the exact
+// content the CLI blessed. A re-author bumps that revision, so the stale
+// openspec.validated no longer equals it — the gate rule (openspec.validated eq the
+// run's current revision) and project_tasks both refuse until validate_change runs
+// again against the new content. Reading the SLUG-scoped revision (not the run-level
+// one) binds the marker to precisely what was validated, so a future multi-slug run
+// fails the gate closed rather than blessing whatever was last authored.
+// create_change is the SOLE computer of the revision; this harness only echoes it,
+// so the two cannot drift.
 package validatechange
 
 import (
@@ -32,6 +45,7 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/openspec"
+	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
@@ -110,6 +124,21 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: no openspec.change.%s.* facts on %s — nothing to validate (was the change authored?)", p.Slug, runEntityID)
 	}
 
+	// Read the content revision create_change stamped over THIS slug's authored
+	// change (D15 #0). openspec.validated is bound to this value, so it detects a
+	// later re-author. Fail closed if it is absent: without a revision this harness
+	// cannot stamp a content-bound marker, and a bare-slug marker would reopen the
+	// stale-pass hole. A missing revision means the change was not authored by
+	// create_change (or a partial write) — an ordering/authoring gap, not transport.
+	revPredicate := createchange.SlugRevisionPredicate(p.Slug)
+	rev, err := e.readRevision(ctx, runEntityID, revPredicate)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "validate_change: read %s on %s: %v", revPredicate, runEntityID, err)
+	}
+	if rev == "" {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: no %s on %s — the change carries no content revision (was it authored by create_change?)", revPredicate, runEntityID)
+	}
+
 	// Materialize to a throwaway workspace so the oracle judges exactly the
 	// hydrated change (openspec/changes/<slug>/ under a temp root), then remove it.
 	root, err := os.MkdirTemp("", "semdev-validate-")
@@ -132,10 +161,10 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 
 	if res.ExitCode == 0 {
-		if err := e.stampValidated(ctx, runEntityID, p.Slug); err != nil {
+		if err := e.stampValidated(ctx, runEntityID, rev); err != nil {
 			return errResult(call, writeErrKind(err), "validate_change: stamp %s on %s: %v", ValidatedPredicate, runEntityID, err)
 		}
-		summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": true, "run_entity": runEntityID})
+		summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": true, "revision": rev, "run_entity": runEntityID})
 		return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 	}
 
@@ -152,18 +181,38 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(content), StopLoop: true}, nil
 }
 
-// stampValidated upserts openspec.validated=<slug> on the run entity (replace-by-
-// predicate, so a re-validation replaces rather than appends a second marker).
-func (e *Executor) stampValidated(ctx context.Context, runEntityID, slug string) error {
+// stampValidated upserts openspec.validated=<content revision> on the run entity
+// (replace-by-predicate, so a re-validation replaces rather than appends a second
+// marker). The value is the revision — not the slug — so it binds to the exact
+// content the validator blessed (D15 #0).
+func (e *Executor) stampValidated(ctx context.Context, runEntityID, rev string) error {
 	triple := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  ValidatedPredicate,
-		Object:     slug,
+		Object:     rev,
 		Source:     Source,
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
 	return e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
+}
+
+// readRevision returns the object of the exact revision predicate on the run
+// entity (the slug-scoped openspec.change.<slug>.revision create_change stamped),
+// or "" if absent. It is named via createchange's own helper so the read/write
+// sides cannot drift.
+func (e *Executor) readRevision(ctx context.Context, runEntityID, predicate string) (string, error) {
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, predicate)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate == predicate {
+			s, _ := tr.Object.(string)
+			return s, nil
+		}
+	}
+	return "", nil
 }
 
 // clearValidated removes the openspec.validated marker this harness owns, so a

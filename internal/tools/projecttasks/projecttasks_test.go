@@ -6,15 +6,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
 
-// validatedFor is the run's openspec.validated marker naming its validated change —
-// project_tasks binds to it before freezing task.spec (Codex P1).
-func validatedFor(slug string) message.Triple {
-	return message.Triple{Predicate: validatechange.ValidatedPredicate, Object: slug, Source: validatechange.Source}
+// demoRevision is the content revision create_change would stamp for "demo".
+const demoRevision = "sha256:demo-content-v1"
+
+// validatedAt is the run's openspec.validated marker — its value is the content
+// REVISION the validator blessed (D15 #0), not the slug. project_tasks freezes
+// task.spec only when this equals the slug's current content revision.
+func validatedAt(rev string) message.Triple {
+	return message.Triple{Predicate: validatechange.ValidatedPredicate, Object: rev, Source: validatechange.Source}
+}
+
+// slugRevisionAt is the change's current content revision (openspec.change.<slug>.
+// revision) create_change stamps; project_tasks binds openspec.validated to it.
+func slugRevisionAt(slug, rev string) message.Triple {
+	return message.Triple{Predicate: createchange.SlugRevisionPredicate(slug), Object: rev, Source: createchange.Source}
 }
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -103,9 +114,10 @@ func withField(facts []message.Triple, i int, field, obj string) []message.Tripl
 // map (empty when nothing was stamped) plus the tool result.
 func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string, agentic.ToolResult) {
 	t.Helper()
-	// Seed the run's validated-change marker so the fixtures reach the projection
-	// logic; the alternate/absent cases are pinned separately below.
-	facts = append(facts, validatedFor("demo"))
+	// Seed the run's validated marker AND demo's current content revision as an
+	// EQUAL pair, so the fixtures reach the projection logic; the mismatch cases
+	// (unvalidated / re-authored / alternate) are pinned separately below.
+	facts = append(facts, validatedAt(demoRevision), slugRevisionAt("demo", demoRevision))
 	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -217,10 +229,12 @@ func TestProjectRejectsReProjection(t *testing.T) {
 
 // Codex P1 red-first: a run with NO openspec.validated marker cannot have its
 // task.spec frozen — project_tasks fails closed rather than freeze an unvalidated
-// change (nothing stamped).
+// change (nothing stamped). demo's content revision is present but no validation
+// blessed it.
 func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
+	facts := append(validTaskFacts(0), slugRevisionAt("demo", demoRevision))
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: validTaskFacts(0)}, w, nil).Execute(context.Background(), callFor("demo"))
+	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -232,12 +246,12 @@ func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
 	}
 }
 
-// Codex P1 red-first: the run's validated change is "other", but demo's task facts
-// are also present (a stale/alternate authored package). A call for "demo" must be
-// refused — project_tasks freezes ONLY the run's validated change, never an
-// alternate slug, so a later gate cannot prove the wrong work.
+// Codex P1 red-first: the run's validated content is "other"'s revision, but demo's
+// task facts + a DIFFERENT demo revision are present (a stale/alternate authored
+// package). A call for "demo" must be refused — the validated revision does not
+// equal demo's current revision — so a later gate cannot prove the wrong work.
 func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
-	facts := append(validTaskFacts(0), validatedFor("other-change"))
+	facts := append(validTaskFacts(0), validatedAt("sha256:other-content"), slugRevisionAt("demo", demoRevision))
 	w := &fakeWriter{}
 	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
 	if err != nil {
@@ -245,6 +259,29 @@ func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
 	}
 	if res.Error == "" || !strings.Contains(res.Error, "validated") {
 		t.Fatalf("an alternate validated slug must be refused, got %q", res.Error)
+	}
+	if len(w.replaces) != 0 {
+		t.Error("a refused projection must stamp nothing")
+	}
+}
+
+// Codex P1 red-first (D15 #0): demo was validated at revision v1, then RE-AUTHORED
+// with changed content (revision now v2) but NOT re-validated. openspec.validated
+// still holds v1 while demo's current revision is v2 — project_tasks must refuse to
+// freeze task.spec from the superseded validation, even though the slug "matches".
+// This is the stale-same-slug false-green the content-revision binding closes.
+func TestProjectRejectsReauthoredUnrevalidatedChange(t *testing.T) {
+	facts := append(validTaskFacts(0),
+		validatedAt("sha256:demo-content-v1"),            // validation blessed v1
+		slugRevisionAt("demo", "sha256:demo-content-v2"), // re-author bumped to v2
+	)
+	w := &fakeWriter{}
+	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error == "" || !strings.Contains(res.Error, "current content") {
+		t.Fatalf("a re-authored-since-validation change must be refused, got %q", res.Error)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a refused projection must stamp nothing")
