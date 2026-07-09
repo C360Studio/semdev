@@ -42,8 +42,8 @@ var regressionManifest = []struct {
 		"the coordinator persona declares exactly the closed taxonomy; no rule routes an out-of-taxonomy action"},
 	{"run-lifecycle", "test/conformance/rules_test.go", []string{"TestLifecycleTransitionsTargetValidAgentRunEdges", "TestChangeApprovalGateOrdering", "TestChangeApprovalGateFreshnessForwardContract", "TestParkRuleStampsAwaitingHuman", "TestLifecycleTransitionRulesExcludeParkedRuns"},
 		"lifecycle transitions target valid agent-run edges; gate ordering, deferred content-freshness tripwire (D15 #0), park, and park-exclusion (D15) hold"},
-	{"dev-from-task", "test/conformance/rules_test.go", []string{"TestDevRewakeIsSelfExtinguishing"},
-		"the dev re-wake publish_agent is fired-once via a self-extinguishing marker (run.dev_kickoff) — no duplicate coordinator on graph replay (restart-safety)"},
+	{"dev-from-task", "test/conformance/rules_test.go", []string{"TestDevRewakeIsSelfExtinguishing", "TestProjectionSpawnIsSelfExtinguishing", "TestDevRewakeGatedOnProjection"},
+		"the dev re-wake + projection publish_agent spawns are fired-once via self-extinguishing markers (run.dev_kickoff / run.projection_kickoff); the dev re-wake is gated behind task.spec projection so approval freezes the immutable task surface before the loop routes into development (Codex P1, restart-safety)"},
 	{"T7", "test/conformance/host_neutrality_test.go", []string{"TestNoArcRuleReferencesHostSpecificField"},
 		"no arc rule names a code host in a predicate position (forge-io host-neutrality — swap-the-adapter contract)"},
 }

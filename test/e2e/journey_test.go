@@ -95,12 +95,16 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   2. C2 re-woken coordinator   → decide(create_change)   [routes to author]
 	//   3. A1 authoring coordinator  → create_change(<change>) [emits the change]
 	//   4. V1 validate coordinator   → validate_change(<slug>) [validates → gate]
-	//   5. C3 dev re-woken coord.    → decide(dev_from_task)   [post-approval kickoff]
+	//   5. P1 projection coordinator  → project_tasks(<slug>)  [approval → task.spec]
+	//   6. C3 dev re-woken coord.    → decide(dev_from_task)   [post-approval kickoff]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
-	// which carries it); turn 4's prompt threads openspec.change.authored, so it
-	// marks on the slug; turn 5's prompt threads the run entity id, so it marks on a
+	// which carries it); turns 4 and 5 thread the slug (validate via the authored
+	// marker, projection via the run-level openspec.change.slug pointer), so they
+	// mark on the slug; turn 6's prompt threads the run entity id, so it marks on a
 	// stable phrase of the dev re-wake prompt. The cursor — not the marker —
-	// distinguishes the turns. An unscripted turn returns mockllm.UnmatchedSentinel,
+	// distinguishes the turns (projection is sequenced BEFORE the dev re-wake because
+	// dev-from-task/02 gates on task.spec presence, so the two same-slug/positional
+	// turns cannot race). An unscripted turn returns mockllm.UnmatchedSentinel,
 	// failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
@@ -124,6 +128,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyChangeSlug,
 			Tool:   &mockllm.ToolCall{Name: "validate_change", Args: map[string]any{"slug": journeyChangeSlug}},
+		},
+		mockllm.Fixture{
+			Marker: journeyChangeSlug,
+			Tool:   &mockllm.ToolCall{Name: "project_tasks", Args: map[string]any{"slug": journeyChangeSlug}},
 		},
 		mockllm.Fixture{
 			Marker: journeyDevRewakeMarker,
@@ -216,27 +224,42 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	t.Logf("station 6: human approved → run resumed to executing (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 7 — the resumed run kicks off the dev loop. Two rules fire on the run
-	// entity: dev-from-task/01 stamps the bare agent.run anchor (a chain entity
+	// Station 7 — approval PROJECTS the immutable task surface BEFORE the dev loop
+	// routes into development (dev-from-task spec: WHEN run.change_approved present
+	// THEN tasks projected as task.spec; Codex P1 on f1eed5c). Two rules fire on the
+	// run entity: dev-from-task/01 stamps the bare agent.run anchor (a chain entity
 	// carries none, so publish_agent inherit has nothing to bind), then
-	// dev-from-task/02 does the inherit publish — spawning a fresh coordinator loop
-	// bound to THIS run, which re-decides and picks dev_from_task. Assert that a
-	// coordinator loop BOUND TO THIS RUN (agent.run.entity_id == runEntityID) stamped
-	// next_action=dev_from_task — proof the anchor+inherit re-wake fired and the
-	// coordinator routed into development. Bind by the run anchor + the distinct
-	// action so an earlier decision (issue_intake / create_change) on the same run
-	// cannot false-green.
-	requireRunCoordinatorDecision(ctx, t, runEntityID, journeyDevAction)
-	t.Logf("station 7: dev loop kicked off — coordinator re-woke and decided %s (mock RequestCount=%d)", journeyDevAction, mock.RequestCount())
+	// dev-from-task/03 does the inherit publish — a forced project_tasks loop that
+	// reads the change's task facts, binds to the validated content (D15 #0), and
+	// stamps task.spec.<i>.* on the run. The projection rule threads the slug via the
+	// run-level openspec.change.slug pointer create_change stamped. Assert task.spec.0
+	// is present — proof projection ran against the real change (this exercises the
+	// revision guard project_tasks carries) and the dev loop has an immutable spec to
+	// converge on before it kicks off.
+	requireTaskSpecProjected(ctx, t, runEntityID)
+	t.Logf("station 7: task.spec projected on approval (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly five model turns drove the arc through the dev kickoff: C1
+	// Station 8 — with task.spec frozen, the resumed run kicks off the dev loop.
+	// dev-from-task/02 (gated on task.spec.0.test_command ne "", so it fires only
+	// AFTER projection completes) does the inherit publish — spawning a fresh
+	// coordinator loop bound to THIS run, which re-decides and picks dev_from_task.
+	// Assert that a coordinator loop BOUND TO THIS RUN (agent.run.entity_id ==
+	// runEntityID) stamped next_action=dev_from_task — proof the projection-gated
+	// re-wake fired and the coordinator routed into development. Bind by the run
+	// anchor + the distinct action so an earlier decision (issue_intake /
+	// create_change) on the same run cannot false-green.
+	requireRunCoordinatorDecision(ctx, t, runEntityID, journeyDevAction)
+	t.Logf("station 8: dev loop kicked off — coordinator re-woke and decided %s (mock RequestCount=%d)", journeyDevAction, mock.RequestCount())
+
+	// Exactly six model turns drove the arc through the dev kickoff: C1
 	// decide(issue_intake), C2 decide(create_change), A1 create_change, V1
-	// validate_change, C3 decide(dev_from_task). The resume itself is rule-owned (no
-	// model call), and the anchor rule only stamps a triple — the single new turn is
-	// the dev re-wake's decide. A spurious resume-spawn, a double anchor/re-wake, or
-	// an unscripted turn would push this past 5, so pin it (the mockllm contract).
-	if got := mock.RequestCount(); got != 5 {
-		t.Fatalf("expected exactly 5 model turns (…, C3 decide(dev_from_task)), got %d — extra turns indicate a re-spawn/loop, a double dev re-wake, or an unscripted turn", got)
+	// validate_change, P1 project_tasks, C3 decide(dev_from_task). The resume itself
+	// is rule-owned (no model call), and the anchor rule only stamps a triple. The
+	// two new turns since station 5 are the projection (P1) and the dev re-wake's
+	// decide (C3). A spurious resume-spawn, a double projection/anchor/re-wake, or an
+	// unscripted turn would push this past 6, so pin it (the mockllm contract).
+	if got := mock.RequestCount(); got != 6 {
+		t.Fatalf("expected exactly 6 model turns (…, P1 project_tasks, C3 decide(dev_from_task)), got %d — extra turns indicate a re-spawn/loop, a double projection/dev re-wake, or an unscripted turn", got)
 	}
 }
 
@@ -420,10 +443,41 @@ func requireChangeAuthored(ctx context.Context, t *testing.T, runEntityID, slug 
 		"create_change tool call was not scripted/advertised")
 }
 
+// requireTaskSpecProjected polls the run entity until task.spec.0.test_command is
+// present and non-empty — the proof the approval-triggered projection rule
+// (dev-from-task/03) spawned a project_tasks loop that froze the change's tasks
+// into the immutable task.spec on the run. It is also the exact fact the dev
+// re-wake (dev-from-task/02) gates on, so asserting it here proves the
+// projection-before-kickoff ordering. Fails naming the likely cause.
+func requireTaskSpecProjected(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const projected = "task.spec.0.test_command"
+	requireEventually(t, 45*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		return tripleString(e, projected) != ""
+	}, "run entity "+runEntityID+" never gained "+projected+" — the projection rule (dev-from-task/03) "+
+		"did not fire or project_tasks refused: check the run-level openspec.change.slug pointer (threaded into the "+
+		"projection prompt), the D15 #0 revision bind (openspec.validated == openspec.change.<slug>.revision), and "+
+		"that project_tasks was advertised/scripted")
+}
+
 // journeyChangeArgs is a minimal VALID create_change payload the mock's authoring
 // turn emits: a slug, a proposal with intent, one spec delta with an ADDED
 // RFC-2119 requirement carrying a Given/When/Then scenario, and one task section.
 // Mirrors the create_change tool's own test fixture so it passes the schema.
+//
+// The task item carries the full Karpathy schema (target_files / test_command /
+// assumptions / non_goals / budget) — "mock the intelligence, not the plumbing":
+// the model supplies these rich fields as create_change args, create_change stamps
+// them, and the (real) project_tasks tool freezes them into task.spec at the
+// projection station. A thin task (no rich fields) would make devtask.Project fail
+// toward the human, so projection would refuse and never stamp task.spec.
 func journeyChangeArgs() map[string]any {
 	return map[string]any{
 		"slug":     journeyChangeSlug,
@@ -444,7 +498,15 @@ func journeyChangeArgs() map[string]any {
 		}},
 		"tasks": []any{map[string]any{
 			"section": "1. Spine",
-			"items":   []any{map[string]any{"number": "1.1", "text": "emit the change onto the run"}},
+			"items": []any{map[string]any{
+				"number":       "1.1",
+				"text":         "emit the change onto the run",
+				"target_files": []any{"internal/spine/spine.go"},
+				"test_command": "go test ./internal/spine/...",
+				"assumptions":  []any{"the spine package exists"},
+				"non_goals":    []any{"no production hardening at M0"},
+				"budget":       3,
+			}},
 		}},
 	}
 }

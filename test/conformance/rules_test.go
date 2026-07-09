@@ -259,6 +259,76 @@ func TestDevRewakeIsSelfExtinguishing(t *testing.T) {
 	}
 }
 
+// forcesFunction reports whether the rule's on_enter has a publish_agent that
+// forces a specific tool call (tool_choice mode=function, function_name=name).
+func (r ruleFile) forcesFunction(name string) bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "publish_agent" && a.ToolChoice.Mode == "function" && a.ToolChoice.FunctionName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// The projection station (dev-from-task/03) is the approval-triggered spawn that
+// freezes the change's tasks into task.spec. Like every publish_agent spawn rule
+// it MUST be self-extinguishing (house restart-safety pattern): a fired-once
+// run.projection_kickoff marker stamped in on_enter, guarded by length_eq 0 — else
+// an asymmetric RULE_STATE loss re-spawns a duplicate projection loop (publish_agent
+// is not idempotent). It must also actually force the project_tasks call.
+func TestProjectionSpawnIsSelfExtinguishing(t *testing.T) {
+	proj, ok := runLifecycleRules(t)["dev_from_task_project_tasks"]
+	if !ok {
+		t.Fatal("missing dev_from_task_project_tasks rule")
+	}
+	const marker = "run.projection_kickoff"
+	if !proj.hasAbsenceGuard(marker) {
+		t.Errorf("projection spawn must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate projection loop (publish_agent is not idempotent)", marker)
+	}
+	if !proj.hasTriple(marker) {
+		t.Errorf("projection spawn must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !proj.forcesFunction("project_tasks") {
+		t.Error("projection spawn must force the project_tasks call (tool_choice mode=function, function_name=project_tasks)")
+	}
+	// It fires on approval and needs the run anchor (dev-from-task/01) for
+	// run_scope=inherit — assert both so the trigger is grounded.
+	if c, ok := proj.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Error("projection spawn must fire on run.change_approved == true (the spec trigger: approval projects task.spec)")
+	}
+	if c, ok := proj.condition("agent.run"); !ok || c.Operator != "ne" {
+		t.Error("projection spawn must require the agent.run anchor (ne \"\") so run_scope=inherit binds the loop to this run")
+	}
+}
+
+// Codex P1 (9dba14e..f1eed5c): the dev re-wake must NOT fire before task.spec is
+// projected — the spec requires approval to project the immutable task surface
+// BEFORE the dev loop converges on it, and the coordinator's re-wake prompt reads
+// projected task.spec. dev-from-task/02 is therefore gated on projection
+// completion (task.spec.0.test_command ne ""), so run.change_approved WITHOUT
+// task.spec cannot produce a dev_from_task decision. This also serializes the two
+// forced-tool turns so the journey's positional cursor is not raced. Red-first:
+// drop the gate and this fails.
+func TestDevRewakeGatedOnProjection(t *testing.T) {
+	rewake, ok := runLifecycleRules(t)["dev_from_task_rewake_coordinator"]
+	if !ok {
+		t.Fatal("missing dev_from_task_rewake_coordinator rule")
+	}
+	c, ok := rewake.condition("task.spec.0.test_command")
+	if !ok {
+		t.Fatal("dev re-wake must gate on projected task.spec (task.spec.0.test_command) — else it can decide dev_from_task before the immutable task surface exists (Codex P1)")
+	}
+	if c.Operator != "ne" || c.Value != "" {
+		t.Errorf("dev re-wake projection gate must be task.spec.0.test_command ne \"\" (a present, non-empty projected field), got operator=%q value=%v", c.Operator, c.Value)
+	}
+	// The gate is only honest if a projection station actually stamps task.spec on
+	// approval — assert the producer exists and forces project_tasks.
+	proj, ok := runLifecycleRules(t)["dev_from_task_project_tasks"]
+	if !ok || !proj.forcesFunction("project_tasks") {
+		t.Error("the projection gate has no producer: dev_from_task_project_tasks must exist and force project_tasks, or task.spec.0.test_command never becomes present and the dev loop deadlocks")
+	}
+}
+
 // 3.6 — the park rule stamps run.awaiting_human (its single writer, G5) on
 // ask_human and posts to the user bus. No Go reconciler advances a parked run.
 func TestParkRuleStampsAwaitingHuman(t *testing.T) {

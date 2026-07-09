@@ -79,14 +79,18 @@ type ruleCondition struct {
 // ruleAction is one action in a rule's on_enter/on_exit (union of the fields the
 // pins inspect).
 type ruleAction struct {
-	Type      string   `json:"type"`
-	Workflow  string   `json:"workflow"`
-	Phase     string   `json:"phase"`
-	Subject   string   `json:"subject"`
-	Predicate string   `json:"predicate"`
-	Object    string   `json:"object"`
-	Tools     []string `json:"tools"`
-	RunScope  string   `json:"run_scope"`
+	Type       string   `json:"type"`
+	Workflow   string   `json:"workflow"`
+	Phase      string   `json:"phase"`
+	Subject    string   `json:"subject"`
+	Predicate  string   `json:"predicate"`
+	Object     string   `json:"object"`
+	Tools      []string `json:"tools"`
+	RunScope   string   `json:"run_scope"`
+	ToolChoice struct {
+		Mode         string `json:"mode"`
+		FunctionName string `json:"function_name"`
+	} `json:"tool_choice"`
 }
 
 // ruleFile is a single expression rule.

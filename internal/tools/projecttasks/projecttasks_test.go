@@ -139,6 +139,9 @@ func TestProjectStampsTaskSpec(t *testing.T) {
 	if res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
+	if !res.StopLoop {
+		t.Error("projection result must set StopLoop — projection is single-shot; without it the forced-function loop takes another turn and re-refuses the now-immutable spec")
+	}
 	if len(w.replaces) != 1 {
 		t.Fatalf("expected one replace, got %d", len(w.replaces))
 	}

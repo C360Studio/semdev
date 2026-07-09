@@ -163,7 +163,12 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.String("slug", p.Slug),
 		slog.Int("task_count", len(specs)))
 	summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "tasks": len(specs), "run_entity": runEntityID})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
+	// StopLoop: projection is single-shot (task.spec is immutable, projected once).
+	// The forced-function projection loop must end after this call — without it the
+	// loop would take another turn (tool_choice re-forces the call, project_tasks then
+	// refuses the now-immutable spec), burning a model turn and cursor slot. Mirrors
+	// create_change / validate_change, the other single-shot authoring/harness tools.
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
 // readPredicate returns the object of the exact predicate on the run entity, or

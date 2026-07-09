@@ -202,6 +202,26 @@ func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 	}
 }
 
+// The run-level slug pointer (openspec.change.slug = slug) is stamped in the same
+// atomic run-facts replace so the approval-triggered projection rule can thread
+// this run's slug into project_tasks (the other change facts are slug-scoped, so a
+// rule cannot wildcard the slug out of the key). It is added to removePredicates so
+// a re-author overwrites it (it sits outside the slug-scoped owned prefix).
+func TestCreateChangeStampsRunSlugPointer(t *testing.T) {
+	w := &fakeWriter{}
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	run := w.replaces[0]
+	if got := objectOf(run.add, SlugPredicate); got != "fix-null-deref" {
+		t.Errorf("run slug pointer %s = %q, want the slug %q", SlugPredicate, got, "fix-null-deref")
+	}
+	if !contains(run.remove, SlugPredicate) {
+		t.Errorf("slug pointer %s must be in removePredicates so a re-author overwrites it (it is outside the slug-scoped owned prefix)", SlugPredicate)
+	}
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {

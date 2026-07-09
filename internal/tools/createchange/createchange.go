@@ -58,6 +58,19 @@ const Source = "create-change-author-tool"
 // create-change-author-tool (G5) with no new vocabulary (G9).
 const AuthoredPredicate = "openspec.change.authored"
 
+// SlugPredicate is the run-level pointer to this run's change slug
+// (openspec.change.slug = <slug>). Every other change fact is slug-SCOPED
+// (openspec.change.<slug>.*), so its slug lives in the predicate KEY, which no
+// rule condition can wildcard-read. The approval-triggered projection rule
+// (dev-from-task/03) fires on the RUN entity and needs the slug as a VALUE to
+// thread into the forced project_tasks call, so create_change — which knows the
+// slug and owns the namespace — stamps this slug-independent pointer alongside the
+// package. It rides the openspec.change.* vocab namespace (single writer stays
+// create-change-author-tool, G5; no new vocabulary, G9). It sits OUTSIDE the
+// slug-scoped package prefix, so it is added to the replace's removePredicates
+// explicitly (below) to stay a clean upsert across a re-author.
+const SlugPredicate = "openspec.change.slug"
+
 // revisionSubkey is the slug-scoped content-revision sub-key
 // (openspec.change.<slug>.revision) — the same revision value, keyed under the
 // change's own package so project_tasks can bind BOTH the slug and the content:
@@ -173,7 +186,14 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	// #519; deferred to a forward-contract, and project_tasks carries the reachable
 	// guard meanwhile.)
 	rev := Revision(triples)
-	triples = append(triples, revisionTriple(runEntityID, SlugRevisionPredicate(p.Slug), rev, now))
+	triples = append(triples, runFactTriple(runEntityID, SlugRevisionPredicate(p.Slug), rev, now))
+
+	// Stamp the run-level slug pointer (openspec.change.slug = slug) so the
+	// approval-triggered projection rule can thread this run's slug into project_tasks
+	// (the run's other change facts are slug-scoped, so a rule cannot wildcard the slug
+	// out of the key). Computed AFTER the revision so it does not skew it (the revision
+	// hashes the content facts only, not this pointer).
+	triples = append(triples, runFactTriple(runEntityID, SlugPredicate, p.Slug, now))
 
 	// Read the prior owned package so a re-author REPLACES it (clears stale
 	// index/rid-keyed facts) rather than appending a second copy.
@@ -182,6 +202,10 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	if err != nil {
 		return errResult(call, writeErrKind(err), "create_change: read owned change facts under %q on %s: %v", prefix, runEntityID, err)
 	}
+	// The slug pointer sits OUTSIDE the slug-scoped prefix, so ReadOwnedPredicates
+	// never returns it — add it to the replace's removePredicates explicitly so a
+	// re-author overwrites the prior pointer instead of leaving a stale one.
+	prior = append(prior, SlugPredicate)
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, triples, prior); err != nil {
 		return errResult(call, writeErrKind(err), "create_change: replace %d change facts on %s: %v", len(triples), runEntityID, err)
 	}
@@ -299,9 +323,9 @@ func jsonArray(xs []string) string {
 	return string(b)
 }
 
-// revisionTriple builds one content-revision fact on the run entity (Source ==
+// runFactTriple builds one content-revision fact on the run entity (Source ==
 // the openspec.change.* writer, G5), replace-by-predicate on re-author.
-func revisionTriple(runEntityID, predicate, rev string, now time.Time) message.Triple {
+func runFactTriple(runEntityID, predicate, rev string, now time.Time) message.Triple {
 	return message.Triple{
 		Subject:    runEntityID,
 		Predicate:  predicate,
