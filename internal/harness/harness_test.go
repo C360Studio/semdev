@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -19,6 +20,9 @@ func TestGoProfile(t *testing.T) {
 	if !slices.Equal(p.ResolveCmd, []string{"go", "mod", "download"}) {
 		t.Errorf("resolve cmd = %v", p.ResolveCmd)
 	}
+	if !slices.Equal(p.BuildCmd, []string{"go", "build", "./..."}) {
+		t.Errorf("build cmd = %v (the cold baseline proof is resolve+build)", p.BuildCmd)
+	}
 	if !slices.Equal(p.TestCmd, []string{"go", "test", "./..."}) {
 		t.Errorf("test cmd = %v", p.TestCmd)
 	}
@@ -27,23 +31,24 @@ func TestGoProfile(t *testing.T) {
 	}
 }
 
-// The manifest round-trips through JSON — it is the checked-in .semdev/harness
-// contract, so its schema must serialize cleanly (empty hard fields omitted).
+// The manifest round-trips through JSON with FULL fidelity — it is the checked-in
+// .semdev/harness contract, so every field (incl. the SB2-added Image, BuildCmd,
+// SecretRefs) must survive serialization. A populated Image + SecretRefs is used so a
+// wrong/dropped json tag on a new field cannot round-trip green off a zero value.
 func TestManifestJSONRoundTrip(t *testing.T) {
 	in := GoProfile()
+	in.Image = ImageDecl{Dockerfile: "Dockerfile", Context: "."}
+	in.SecretRefs = []string{"GITHUB_PACKAGES_TOKEN"}
 	buf, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
-	}
-	if got := string(buf); got == "" {
-		t.Fatal("empty marshal")
 	}
 	var out Manifest
 	if err := json.Unmarshal(buf, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.Profile != in.Profile || !slices.Equal(out.CacheHomeEnvs, in.CacheHomeEnvs) {
-		t.Errorf("round-trip mismatch: %+v vs %+v", out, in)
+	if !reflect.DeepEqual(in, out) {
+		t.Errorf("round-trip mismatch:\n in = %+v\nout = %+v", in, out)
 	}
 }
 

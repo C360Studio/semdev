@@ -1,18 +1,28 @@
-// Package harness is the reproducibility-contract core (design D6/D7): the
-// language-agnostic manifest schema that tells the clean-room harness how to prove
-// an artifact cold, plus the deterministic readiness gate (T5/D8) that decides
-// whether a claim can be proven in-sandbox before dev builds toward it.
+// Package harness is the reproducibility-contract core (design D6/D7, reshaped by the
+// containerized-sandbox-dev-loop change, SB2): the manifest that tells the clean-room
+// harness how to prove an artifact cold, plus the deterministic readiness gate
+// (T5/D8) that decides whether a claim can be proven in-sandbox before dev builds
+// toward it.
 //
-// The SCHEMA and the readiness logic are common; per-ecosystem specifics are
-// declarative PROFILES (data, not a component per language — anti-B6). M0 ships the
-// Go profile; the others are detected but implemented later. The one field every
-// profile carries and the clean-room harness acts on is CacheHomeEnvs — the
-// universal G4 control (a fresh cache home per proof, orthogonal to the container
-// choice), because every ecosystem has a package cache that can mask a broken build.
+// SB2 reshaped the manifest: the toolchain/environment is NOT modeled here — it is an
+// OPERATOR-DECLARED Dockerfile / devcontainer committed to the target repo (ImageDecl
+// references it; internal/cleanroom builds it and proves it cold). So this package no
+// longer carries toolchain pins, submodule SHAs, source-substitution, or native-asset
+// fields (the last two modeled semspec's fatal harness-injected resolution — banned).
+// What remains is the RUN contract: the declared image, the resolve/build/test
+// commands, the sandbox/operator-ci tier split, and the governed secret refs. Those
+// few run fields ride a convention default per profile, overlaid by a
+// customizations.semdev block (customizations.go) — never a bespoke environment DSL.
 //
-// This package is pure: it declares the contract and detects the profile; it does
-// not run commands or touch the filesystem. `semdev init` (the live harvest →
-// propose → prove-cold → commit) and the clean-room Runner consume it.
+// The one field every profile carries and the clean-room harness acts on is
+// CacheHomeEnvs — the universal G4 control (a fresh cache home per proof, orthogonal
+// to the container choice), because every ecosystem has a package cache that can mask
+// a broken build.
+//
+// This package is pure: it declares the contract, detects the profile, and reads the
+// operator's run fields; it does not run commands or touch the filesystem. `semdev
+// init` (the live harvest → propose → prove-cold → commit) and the clean-room Runner
+// consume it.
 package harness
 
 import (
@@ -49,45 +59,85 @@ type Tier struct {
 	Proves []string `json:"proves"`
 }
 
-// Manifest is the reproducibility contract: how the clean-room harness resolves,
-// builds, and tests an artifact cold. It holds refs and pins, never re-derived
-// coordinates (D6). The hard fields (credential refs, submodule SHAs, source
-// substitution, native assets) are language-agnostic and empty for simple
-// ecosystems like Go; they carry the OSH/JVM profile's weight at M2.
+// ImageDecl locates the OPERATOR-DECLARED image source (SB2): a committed Dockerfile
+// and/or devcontainer.json semdev builds and proves cold. semdev never harvests,
+// infers, or synthesizes the toolchain — the declaration is the operator's, in a
+// portable standard format. The image is BUILT by internal/cleanroom (which returns
+// the digest-pinned ref); this declaration carries only where the source lives, not
+// the build output.
+type ImageDecl struct {
+	// Dockerfile is the repo-relative path to a committed Dockerfile (M0's form).
+	Dockerfile string `json:"dockerfile,omitempty"`
+	// Devcontainer is the repo-relative path to a committed devcontainer.json, when the
+	// image is declared that way instead of a bare Dockerfile.
+	Devcontainer string `json:"devcontainer,omitempty"`
+	// Context is the docker build context dir relative to the repo root; empty means the
+	// repo root.
+	Context string `json:"context,omitempty"`
+}
+
+// Declared reports whether the operator declared any image source. A manifest with no
+// declared image fails closed toward the operator (SB2) — semdev never guesses one.
+func (d ImageDecl) Declared() bool {
+	return strings.TrimSpace(d.Dockerfile) != "" || strings.TrimSpace(d.Devcontainer) != ""
+}
+
+// Manifest is the RUN contract (SB2 reshape): the operator-declared image plus how
+// the clean-room harness resolves, builds, and tests the artifact cold. It models no
+// toolchain — the declared image owns the environment. It holds refs, never re-derived
+// coordinates (D6); task-introduced weight (submodules, native blobs) is committed to
+// the artifact and proven by the cold --recursive verify, not carried here.
 type Manifest struct {
-	// Profile is the ecosystem identifier (ProfileGo, …).
+	// Profile is the ecosystem identifier (ProfileGo, …); it drives the convention
+	// defaults for the run commands and cache-home control.
 	Profile string `json:"profile"`
-	// Toolchain pins the toolchain versions, e.g. {"go": "1.26"}.
-	Toolchain map[string]string `json:"toolchain"`
+	// Image declares the operator's committed image source (SB2). Empty ImageDecl means
+	// no image declared — the run fails closed toward the operator.
+	Image ImageDecl `json:"image"`
 	// CacheHomeEnvs are the package-cache env vars the harness freshens per proof —
 	// the universal G4 control. For Go: GOMODCACHE, GOCACHE.
 	CacheHomeEnvs []string `json:"cache_home_envs"`
-	// ResolveCmd resolves dependencies from the artifact's own declarations, e.g.
+	// ResolveCmd resolves base dependencies from the artifact's own declarations, e.g.
 	// ["go", "mod", "download"].
 	ResolveCmd []string `json:"resolve_cmd"`
+	// BuildCmd builds the artifact cold — the second half of the resolve+build baseline
+	// proof (SB4.1), distinct from the tests (the task's own test may not exist yet),
+	// e.g. ["go", "build", "./..."].
+	BuildCmd []string `json:"build_cmd"`
 	// TestCmd runs the artifact's own tests, e.g. ["go", "test", "./..."].
 	TestCmd []string `json:"test_cmd"`
 	// Tiers is the sandbox/operator-ci split the readiness gate reads.
 	Tiers []Tier `json:"tiers"`
-
-	// Hard fields (D6) — refs and pins, empty for simple ecosystems.
-	CredentialRefs     []string          `json:"credential_refs,omitempty"`
-	SubmoduleSHAs      map[string]string `json:"submodule_shas,omitempty"`
-	SourceSubstitution map[string]string `json:"source_substitution,omitempty"`
-	NativeAssets       []string          `json:"native_assets,omitempty"`
+	// SecretRefs names the governed creds-refs base-dep resolution needs (SB2c) — NAMES
+	// only, never values; a value never rides a manifest, log, or fact (G7).
+	SecretRefs []string `json:"secret_refs,omitempty"`
 }
 
-// GoProfile returns the M0 Go reproducibility-contract profile (design D7). The
-// cache-home envs are GOMODCACHE/GOCACHE — the two homes a fresh proof must isolate
-// so a warm module cache cannot mask a fabricated dependency.
+// GoProfile returns the M0 Go run convention (design D7, SB2 reshape). The cache-home
+// envs are GOMODCACHE/GOCACHE — the two homes a fresh proof must isolate so a warm
+// module cache cannot mask a fabricated dependency. The image is declared per repo
+// (ImageDecl), so this convention leaves it empty; a resolver fills it in.
 func GoProfile() Manifest {
 	return Manifest{
 		Profile:       ProfileGo,
-		Toolchain:     map[string]string{"go": "1.26"},
 		CacheHomeEnvs: []string{"GOMODCACHE", "GOCACHE"},
 		ResolveCmd:    []string{"go", "mod", "download"},
+		BuildCmd:      []string{"go", "build", "./..."},
 		TestCmd:       []string{"go", "test", "./..."},
 		Tiers:         []Tier{{Name: "unit", Scope: TierSandbox, Proves: []string{ClaimUnit}}},
+	}
+}
+
+// Convention returns the run-field defaults for a detected profile and whether one is
+// known. Only the Go convention ships at M0; the JVM/Node/Rust/Python defaults land
+// with those profiles. An unknown profile returns ok=false, so ResolveManifest fails
+// closed unless a customizations.semdev block supplies the commands explicitly.
+func Convention(profile string) (Manifest, bool) {
+	switch profile {
+	case ProfileGo:
+		return GoProfile(), true
+	default:
+		return Manifest{}, false
 	}
 }
 
