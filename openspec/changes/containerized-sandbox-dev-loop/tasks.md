@@ -7,7 +7,7 @@
 
 ## 2. Operator-declared image + cold proof (the readiness contract)
 
-- [ ] 2.1 Image resolution: locate the repo's committed `Dockerfile` / `.devcontainer` and build it (digest-pin the result); no harvest/inference; missing image → typed "declare an image" error (SB2)
+- [x] 2.1 Image resolution: locate the repo's committed `Dockerfile` / `.devcontainer` and build it (digest-pin the result); no harvest/inference; missing image → typed "declare an image" error (SB2)
 - [x] 2.2 `customizations.semdev` / convention reader for the few run fields (test command, tier split, secret refs) — not an environment DSL (SB2)
 - [x] 2.3 `internal/harness` reshaped: `Manifest` references the declared image + run fields (drop the toolchain-modeling fields it no longer owns); keep `AssessReadiness` tier logic
 - [ ] 2.4 Cold-prove path: build image → fresh cache → resolve base deps + build cold → derive a readiness verdict (reuse `verify_artifact`'s cold-build core); red-first: a warm-only-resolvable dep fails cold (SB2/SB4)
