@@ -1,0 +1,98 @@
+package coldproof
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/harness"
+	"github.com/c360studio/semdev/internal/verify"
+)
+
+// Baseline is the provision-time cold-proof result (SB2/SB4.1): built the operator's
+// declared image, then proved the repo resolves its base dependencies and BUILDS cold in
+// a fresh per-run container, BEFORE the dev loop relies on it. The Outcome reuses the
+// clean-room taxonomy so both proofs share one fail-closed decision:
+//
+//   - Pass  (Ready) — the image resolved + built the repo cold; the dev loop may proceed.
+//   - Fail  — a GENUINE failure: the declared image cannot resolve the repo's base deps
+//     or build it cold → park toward the OPERATOR (fix/declare the image), never a guess.
+//   - Retry — an infra/transport fault (daemon, provisioning, network) → re-run; a
+//     persistent retry parks toward the human.
+type Baseline struct {
+	// Image is the built, digest-pinned image the baseline proved (and the dev loop runs).
+	Image cleanroom.BuiltImage
+	// Outcome is the cold-proof classification (pass/fail/retry).
+	Outcome verify.Outcome
+	// Verdict carries the per-check detail (completion/isolation/resolution/build) for the
+	// operator when the baseline blocks the run. Its fourth check reuses verify.Decide's
+	// "tests" slot, which here carries the cold BUILD result (ProveDetail).
+	Verdict verify.Verdict
+}
+
+// Ready reports whether the baseline proved the image builds the repo cold — the gate
+// the dev loop proceeds on (SB5: only a proven sandbox advances; anything else parks).
+func (b Baseline) Ready() bool { return b.Outcome == verify.OutcomePass }
+
+// ProveBaseline builds the operator-declared image (m.Image) and proves the repo at
+// repoRoot resolves its base dependencies and builds COLD inside a fresh per-run
+// container (SB4.1). It fails closed two ways, distinctly:
+//
+//   - a returned ERROR is an infra/declaration fault the caller PARKS on before any
+//     verdict exists: an undeclared/unbuildable image, an absent docker daemon. There is
+//     no Baseline to stamp.
+//   - a returned Baseline with a non-Pass Outcome is a definitive proof result: the image
+//     BUILT but the repo did not prove cold (Fail → park toward the operator) or an infra
+//     fault interrupted the proof itself (Retry). The caller stamps it and routes.
+//
+// The image is built once + digest-pinned; the proof runs the manifest's own
+// ResolveCmd then BuildCmd (never a model-supplied command — G3) in a fresh cache home.
+func ProveBaseline(ctx context.Context, docker, repoRoot string, m harness.Manifest) (Baseline, error) {
+	// An incomplete manifest is a DECLARATION fault (the operator's to fix), not infra —
+	// error up front so it parks toward the operator immediately, rather than degrading
+	// into an infra-class Retry inside Gather (an empty resolve/cache reads as transport).
+	if len(m.ResolveCmd) == 0 || len(m.BuildCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
+		return Baseline{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, build, and cache-home fields) — declare the run fields (SB2)", m.Profile)
+	}
+	img, err := cleanroom.BuildImage(ctx, docker, repoRoot, m.Image)
+	if err != nil {
+		return Baseline{}, fmt.Errorf("coldproof: build declared image: %w", err)
+	}
+
+	runner := cleanroom.NewContainerRunner(img.Ref)
+	ev := Gather(ctx, runner, repoRoot, m.CacheHomeEnvs, m.ResolveCmd, m.BuildCmd)
+	return baselineFromEvidence(img, ev), nil
+}
+
+// verifyTestsCheckName is verify.Decide's terminal check name (its unexported
+// checkTests). The baseline reuses Decide's ordered fail-closed logic but relabels this
+// terminal check, because for the baseline the prove step is a cold BUILD, not tests.
+const verifyTestsCheckName = "tests"
+
+// baselineProveCheckName is what the baseline calls that terminal check, so a parked
+// baseline's evidence reads "build" (SB4.1), not a misleading "tests" (G10).
+const baselineProveCheckName = "build"
+
+// baselineFromEvidence maps neutral cold-proof evidence to a Baseline verdict via the
+// shared verify.Decide (pure — the classification is offline-testable without docker),
+// relabelling the terminal check to "build" so the operator-facing evidence matches
+// what the baseline actually proved (resolve + cold build).
+func baselineFromEvidence(img cleanroom.BuiltImage, ev Evidence) Baseline {
+	verdict := verify.Decide(ev.ToVerifyInput())
+	verdict.Checks = relabelProveCheck(verdict.Checks)
+	return Baseline{Image: img, Outcome: verdict.Outcome, Verdict: verdict}
+}
+
+// relabelProveCheck returns a copy of the verify checks with the terminal "tests" check
+// renamed to "build" — the baseline's prove step. A pinned test guards this against a
+// rename of verify's check (if the match no-ops, the pin fails).
+func relabelProveCheck(checks []verify.CheckResult) []verify.CheckResult {
+	out := make([]verify.CheckResult, len(checks))
+	copy(out, checks)
+	for i := range out {
+		if out[i].Name == verifyTestsCheckName {
+			out[i].Name = baselineProveCheckName
+		}
+	}
+	return out
+}

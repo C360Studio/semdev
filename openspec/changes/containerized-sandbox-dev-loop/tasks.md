@@ -10,7 +10,7 @@
 - [x] 2.1 Image resolution: locate the repo's committed `Dockerfile` / `.devcontainer` and build it (digest-pin the result); no harvest/inference; missing image → typed "declare an image" error (SB2)
 - [x] 2.2 `customizations.semdev` / convention reader for the few run fields (test command, tier split, secret refs) — not an environment DSL (SB2)
 - [x] 2.3 `internal/harness` reshaped: `Manifest` references the declared image + run fields (drop the toolchain-modeling fields it no longer owns); keep `AssessReadiness` tier logic
-- [ ] 2.4 Cold-prove path: build image → fresh cache → resolve base deps + build cold → derive a readiness verdict (reuse `verify_artifact`'s cold-build core); red-first: a warm-only-resolvable dep fails cold (SB2/SB4)
+- [x] 2.4 Cold-prove path: build image → fresh cache → resolve base deps + build cold → derive a readiness verdict (reuse `verify_artifact`'s cold-build core); red-first: a warm-only-resolvable dep fails cold (SB2/SB4)
 - [ ] 2.5 Secrets: governed named-creds-ref store (git-ignored `.env` at M0) + injection via docker build-secret/env only; scrub from logs/results/facts; red-first: secret value in no stamped fact; missing required ref → park (SB2c/G7)
 
 ## 3. Go fixture (real code, real bug, real container)

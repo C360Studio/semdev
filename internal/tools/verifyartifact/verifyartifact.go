@@ -28,11 +28,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/coldproof"
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/verify"
 	"github.com/c360studio/semstreams/agentic"
@@ -50,9 +50,6 @@ const Source = "verify-harness"
 // ResultPredicate is the terminal clean-room fact this harness owns on the run
 // entity. Exact predicate → latest-wins (a retry re-run upserts).
 const ResultPredicate = "verify.result"
-
-// verifyTimeout bounds one clean-room proof step (resolve or test).
-const verifyTimeout = 15 * time.Minute
 
 // Workspace resolves the on-disk checkout ROOT of a run's target-repo workspace —
 // the artifact the clean-room proof resolves/builds/tests. Narrow seam over the
@@ -130,71 +127,13 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
-// gatherEvidence runs the clean-room proof and folds it into an evidence-only
-// verify.Input. It is where the harness draws the transport-vs-genuine line: a
-// provisioning fault, a step that could not run, or a resolve failure the classifier
-// reads as transport all set Completed=false (→ Retry); a genuine resolve failure is
-// Resolved=false (→ Fail). Completed becomes true only once the proof reaches a
-// definitive artifact conclusion (a genuine resolve failure, or the tests ran).
+// gatherEvidence runs the clean-room proof (resolve + the artifact's own TESTS) in one
+// fresh-isolation sandbox via the shared cold-build core (coldproof), and folds the
+// neutral evidence into verify.Input. coldproof is where the harness draws the
+// transport-vs-genuine line — shared with the provision-time baseline so a fabrication
+// reads identically in both proofs.
 func (e *Executor) gatherEvidence(ctx context.Context, root string, m harness.Manifest) verify.Input {
-	sb, err := e.runner.Up(ctx, root, m.CacheHomeEnvs)
-	if err != nil {
-		return verify.Input{Completed: false, TransportError: "could not provision clean-room isolation: " + err.Error()}
-	}
-	defer func() { _ = e.runner.Down(ctx, sb) }()
-
-	in := verify.Input{
-		FreshCacheHome:  len(sb.CacheHomes) > 0,
-		CacheHomeDetail: fmt.Sprintf("%d fresh cache home(s): %s", len(sb.CacheHomes), strings.Join(sb.CacheHomes, ", ")),
-	}
-
-	// Resolve step. A run error is transport; a non-zero exit is classified.
-	resolveRes, err := e.exec(ctx, sb, m.ResolveCmd)
-	if err != nil {
-		in.Completed = false
-		in.TransportError = "resolve step could not run: " + err.Error()
-		return in
-	}
-	switch class, detail := cleanroom.ClassifyResolve(resolveRes); class {
-	case cleanroom.ResolveTransport:
-		in.Completed = false
-		in.TransportError = detail
-		return in
-	case cleanroom.ResolveFailed:
-		// The proof completed with a definitive answer: the artifact's declarations
-		// do not resolve cold (a missing/fabricated coordinate). No point running
-		// tests — Decide fails on resolution.
-		in.Completed = true
-		in.Resolved = false
-		in.ResolveDetail = detail + excerpt(resolveRes)
-		return in
-	default: // ResolveOK
-		in.Resolved = true
-		in.ResolveDetail = detail
-	}
-
-	// Test step, in the same fresh isolation.
-	testRes, err := e.exec(ctx, sb, m.TestCmd)
-	if err != nil {
-		in.Completed = false
-		in.TransportError = "test step could not run: " + err.Error()
-		return in
-	}
-	in.Completed = true
-	in.TestsPassed = testRes.ExitCode == 0
-	in.TestsDetail = excerptOr(testRes, "the artifact's own tests ran in fresh isolation")
-	return in
-}
-
-// exec runs one manifest step under a per-step timeout. An empty command is a
-// harness misconfiguration (transport-class: the step could not run).
-func (e *Executor) exec(ctx context.Context, sb cleanroom.Sandbox, argv []string) (cleanroom.Result, error) {
-	if len(argv) == 0 {
-		return cleanroom.Result{}, fmt.Errorf("manifest declares an empty command")
-	}
-	stepCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
-	defer cancel()
-	return e.runner.Exec(stepCtx, sb, argv)
+	return coldproof.Gather(ctx, e.runner, root, m.CacheHomeEnvs, m.ResolveCmd, m.TestCmd).ToVerifyInput()
 }
 
 // stampResult upserts verify.result on the run entity (replace-by-predicate, so a
@@ -209,31 +148,6 @@ func (e *Executor) stampResult(ctx context.Context, runEntityID string, outcome 
 		Confidence: 1.0,
 	}
 	return e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
-}
-
-// excerpt returns a short trailing excerpt of a failed step's output for the detail.
-func excerpt(r cleanroom.Result) string {
-	out := strings.TrimSpace(r.Stderr)
-	if out == "" {
-		out = strings.TrimSpace(r.Stdout)
-	}
-	if out == "" {
-		return ""
-	}
-	const maxLen = 400
-	if len(out) > maxLen {
-		// Cut to the trailing maxLen bytes, then drop a partial leading rune the byte
-		// cut may have split, so the detail is always valid UTF-8.
-		out = strings.ToValidUTF8(out[len(out)-maxLen:], "")
-	}
-	return ": " + out
-}
-
-func excerptOr(r cleanroom.Result, fallback string) string {
-	if e := excerpt(r); e != "" {
-		return strings.TrimPrefix(e, ": ")
-	}
-	return fallback
 }
 
 // writeErrKind mirrors the sibling tools: a handler-classified graph error is
