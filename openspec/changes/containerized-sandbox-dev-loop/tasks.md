@@ -1,9 +1,9 @@
 ## 1. Container Runner (the isolation substrate)
 
-- [ ] 1.1 Container `Runner` in `internal/cleanroom` (docker `build`/`run`/`exec`/`rm` via `os/exec`), implementing the existing `Runner` seam; per-run fresh container + fresh cache-home mount; checkout bind-mounted at `/work` (SB1)
-- [ ] 1.2 Fail-closed when docker is absent/unhealthy (probe once; return a typed unavailable error the caller parks on, never a silent skip); red-first pin (SB5)
-- [ ] 1.3 `MockRunner`/`LocalRunner` parity for the container `Runner` interface (unit tests need no docker); integration test tagged, gated on docker present
-- [ ] 1.4 G1: registry entry + framework-alignment note for the container `Runner`
+- [x] 1.1 Container `Runner` in `internal/cleanroom` (docker `run`/`exec`/`rm` via `os/exec`), implementing the existing `Runner` seam; per-run fresh container + fresh anonymous cache volume per cache-home; checkout `--mount`-bound at `/work` (SB1)
+- [x] 1.2 Fail-closed when docker is absent/unhealthy (`DockerAvailable` probe; `ErrDockerUnavailable`/`ErrNoImage` sentinels the caller parks on, never a silent skip); red-first pins (SB5). Exec transport-vs-verdict classified by docker stderr signatures + a container-liveness check (NOT exit code — a dead container returns 1/137, indistinguishable from a real command exit)
+- [x] 1.3 `MockRunner`/`LocalRunner` parity (ContainerRunner implements the `Runner` seam; unit tests need no docker via pure `buildRunArgs`/`execArgs`/sentinels; docker-gated integration tests runtime-skip when absent)
+- [x] 1.4 G1: `cleanroom.Runner` is a seam under the `verify_artifact` tool (no separate registry entry, like Local/Mock); alignment note updated (container Runner is the M0 run path, revising D5)
 
 ## 2. Operator-declared image + cold proof (the readiness contract)
 

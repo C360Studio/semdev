@@ -13,22 +13,28 @@
 //
 // The one universal G4 control is cache-home freshness (D5): every ecosystem has a
 // package cache that can mask a broken build, so Up MINTS a fresh cache home per
-// proof (orthogonal to the container choice). M0's LocalRunner realizes isolation
-// as cache-home freshness on the host; container/network isolation is an M2 Runner
-// implementation swapped in behind this same seam.
+// proof (orthogonal to the container choice). Two implementations realize the seam:
+// ContainerRunner (M0 run path — a per-run docker container from the operator-declared
+// image, fresh cache per run, revising D5 per the containerized-sandbox-dev-loop
+// change) and LocalRunner (a host cache-home shim for unit tests / no-docker CI).
 package cleanroom
 
 import "context"
 
 // Sandbox is a provisioned clean-room environment. WorkDir is the artifact
-// workspace the resolve/build/test commands run in; Env is the environment they run
-// under (the host environment plus the fresh cache-home overrides); CacheHomes are
-// the fresh per-proof cache-home directories Up minted (the universal G4 control),
-// exposed so the harness can assert isolation and Down can tear them down.
+// workspace the resolve/build/test commands run in (a host path for LocalRunner, the
+// in-container mount point for ContainerRunner); Env is the environment overrides
+// commands run under (the fresh cache-home bindings, plus the host environment for
+// LocalRunner); CacheHomes are the fresh per-proof cache homes Up minted (host temp
+// dirs for LocalRunner, docker volume ids for ContainerRunner — the universal G4
+// control), exposed so the harness can assert isolation and Down can tear them down.
+// Handle is an opaque per-implementation resource id (the container id for
+// ContainerRunner; empty otherwise).
 type Sandbox struct {
 	WorkDir    string
 	Env        map[string]string
 	CacheHomes []string
+	Handle     string
 }
 
 // Result is one command invocation's captured outcome inside the sandbox. ExitCode

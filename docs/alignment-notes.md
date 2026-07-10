@@ -247,9 +247,12 @@ Template:
   a sandbox, run a subprocess, or read an exit code. The framework ships only an HTTP
   client to an external sandbox and a git-diff tripwire (detection, not containment);
   `pkg/sandbox` is proposal-only — so semdev owns a thin `cleanroom.Runner` seam
-  (Up/Exec/Down, mirroring semteams' sandboxmanager) with a MockRunner and an M0
-  LocalRunner (cache-home isolation on the host; a container Runner swaps in at M2
-  behind the same seam). The tool wires that Runner + the reproducibility manifest
+  (Up/Exec/Down, mirroring semteams' sandboxmanager). The M0 run path is a
+  `ContainerRunner` (per-run docker container from the operator-declared image,
+  fresh cache volume per run — the `containerized-sandbox-dev-loop` change, revising
+  D5); `LocalRunner` (host cache-home isolation) and `MockRunner` are the
+  unit-test / no-docker shims behind the same seam. The tool wires that Runner + the
+  reproducibility manifest
   (`internal/harness`) + the pure `verify.Decide` (`internal/verify`) and stamps
   `verify.result`. It stamps no caller outcome (G3 — the schema takes NO arguments;
   the model may only trigger the proof) and fires no transition (G2 — the open_pr
