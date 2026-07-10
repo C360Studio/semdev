@@ -1,0 +1,15 @@
+{
+  "name": "go-health-class",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "customizations": {
+    "semdev": {
+      "testCommand": ["go", "test", "./..."],
+      "tiers": [
+        { "name": "unit", "scope": "sandbox", "proves": ["unit"] }
+      ]
+    }
+  }
+}

@@ -15,10 +15,10 @@
 
 ## 3. Go fixture (real code, real bug, real container)
 
-- [ ] 3.1 `test/fixtures/go-health-class`: a minimal real Go module with a **real bug** (a failing `go test`) the dev loop fixes; stripped of orchestration-vocabulary coaching (G8)
-- [ ] 3.2 Committed `Dockerfile` (`FROM golang:<pin>`) (+ optional `.devcontainer` referencing it) + `customizations.semdev` test command / single tier
-- [ ] 3.3 Cache-masked-fabrication fixture variant for the G4 red-first pin (a dep that only resolves warm)
-- [ ] 3.4 G8 lint over `test/fixtures/**` for the orchestration-vocabulary list
+- [x] 3.1 `test/fixtures/go-health-class`: a minimal real Go module with a **real bug** (a failing `go test`) the dev loop fixes; stripped of orchestration-vocabulary coaching (G8)
+- [x] 3.2 Committed `Dockerfile` (`FROM golang:<pin>`) (+ optional `.devcontainer` referencing it) + `customizations.semdev` test command / single tier
+- [x] 3.3 Cache-masked-fabrication fixture variant for the G4 red-first pin (a dep that only resolves warm)
+- [x] 3.4 G8 lint over `test/fixtures/**` for the orchestration-vocabulary list
 
 ## 4. Wire the nil seams to the container
 

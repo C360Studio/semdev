@@ -46,6 +46,12 @@ var regressionManifest = []struct {
 		"the dev re-wake + projection publish_agent spawns are fired-once via self-extinguishing markers (run.dev_kickoff / run.projection_kickoff); the dev re-wake is gated behind task.spec projection so approval freezes the immutable task surface before the loop routes into development (Codex P1, restart-safety)"},
 	{"T7", "test/conformance/host_neutrality_test.go", []string{"TestNoArcRuleReferencesHostSpecificField"},
 		"no arc rule names a code host in a predicate position (forge-io host-neutrality — swap-the-adapter contract)"},
+	{"G8", "test/conformance/g8_fixtures_test.go", []string{"TestBannedFixtureTermsScan", "TestFixturesFreeOfOrchestrationVocabulary"},
+		"dev-loop fixtures read like a real repo — no coaching markers or harness/orchestration vocabulary (realistic fixtures; the theater that let both predecessors succeed against a scaffold)"},
+	{"G4", "internal/coldproof/baseline_test.go", []string{"TestProveBaselineRealReady", "TestProveBaselineRealFabricationNotReady"},
+		"the operator-declared image proves the repo resolves+builds COLD before the dev loop relies on it; a fabricated dependency fails cold and parks — never a pass over an unproven sandbox (the make-or-break both donors died on)"},
+	{"G4", "test/fixtures/fixtures_test.go", []string{"TestGoHealthClassCompilesButTestsFail", "TestFabricatedVariantNotReady"},
+		"the committed fixture is a real module with a real failing test (builds but tests red); its cache-masked-fabrication variant is rejected cold on the committed artifact"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if
