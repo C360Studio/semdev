@@ -48,8 +48,20 @@ func TestBaselineFromEvidence(t *testing.T) {
 // no image — offline-provable.
 func TestProveBaselineNoImageFailsClosed(t *testing.T) {
 	m := harness.GoProfile() // complete run fields, but Image is empty (undeclared)
-	if _, err := ProveBaseline(context.Background(), "docker", "/repo", m); err == nil {
+	if _, err := ProveBaseline(context.Background(), "docker", "/repo", m, nil); err == nil {
 		t.Fatal("expected an error proving a baseline with no declared image")
+	}
+}
+
+// A manifest requiring a creds-ref the store cannot provide fails CLOSED before building
+// anything (SB2c) — no baseline, no warm fallback. Offline-provable.
+func TestProveBaselineMissingSecretFailsClosed(t *testing.T) {
+	m := harness.GoProfile()
+	m.Image = harness.ImageDecl{Dockerfile: "Dockerfile"}
+	m.SecretRefs = []string{"GITHUB_PACKAGES_TOKEN"}
+	// nil store → the required ref cannot resolve → park toward the operator.
+	if _, err := ProveBaseline(context.Background(), "docker", "/repo", m, nil); err == nil {
+		t.Fatal("expected an error: a required creds-ref with no store must park, not proceed")
 	}
 }
 
@@ -69,7 +81,7 @@ func TestProveBaselineIncompleteManifestFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := base
 			tc.mut(&m)
-			if _, err := ProveBaseline(context.Background(), "docker", "/repo", m); err == nil {
+			if _, err := ProveBaseline(context.Background(), "docker", "/repo", m, nil); err == nil {
 				t.Fatalf("expected an error for an incomplete manifest (%s)", tc.name)
 			}
 		})
@@ -116,7 +128,7 @@ func TestProveBaselineRealReady(t *testing.T) {
 	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM golang:1.26\nWORKDIR /work\n")
 
 	m := goManifest(t, root)
-	b, err := ProveBaseline(ctx, "docker", root, m)
+	b, err := ProveBaseline(ctx, "docker", root, m, nil)
 	if err != nil {
 		t.Fatalf("ProveBaseline: %v", err)
 	}
@@ -142,7 +154,7 @@ func TestProveBaselineRealFabricationNotReady(t *testing.T) {
 	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM golang:1.26\nWORKDIR /work\n")
 
 	m := goManifest(t, root)
-	b, err := ProveBaseline(ctx, "docker", root, m)
+	b, err := ProveBaseline(ctx, "docker", root, m, nil)
 	if err != nil {
 		t.Fatalf("ProveBaseline: %v", err)
 	}

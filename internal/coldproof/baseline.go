@@ -6,6 +6,7 @@ import (
 
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/harness"
+	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
 )
 
@@ -45,22 +46,33 @@ func (b Baseline) Ready() bool { return b.Outcome == verify.OutcomePass }
 //     BUILT but the repo did not prove cold (Fail → park toward the operator) or an infra
 //     fault interrupted the proof itself (Retry). The caller stamps it and routes.
 //
-// The image is built once + digest-pinned; the proof runs the manifest's own
-// ResolveCmd then BuildCmd (never a model-supplied command — G3) in a fresh cache home.
-func ProveBaseline(ctx context.Context, docker, repoRoot string, m harness.Manifest) (Baseline, error) {
+// Governed creds-refs (m.SecretRefs, SB2c) are resolved from store and injected into the
+// proof's container at run time; a missing required ref fails CLOSED toward the operator
+// (a returned error — register the secret, no warm fallback). The image is built once +
+// digest-pinned; the proof runs the manifest's own ResolveCmd then BuildCmd (never a
+// model-supplied command — G3) in a fresh cache home; the returned Baseline's evidence
+// is SCRUBBED of any injected secret value (G7).
+func ProveBaseline(ctx context.Context, docker, repoRoot string, m harness.Manifest, store secrets.Store) (Baseline, error) {
 	// An incomplete manifest is a DECLARATION fault (the operator's to fix), not infra —
 	// error up front so it parks toward the operator immediately, rather than degrading
 	// into an infra-class Retry inside Gather (an empty resolve/cache reads as transport).
 	if len(m.ResolveCmd) == 0 || len(m.BuildCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
 		return Baseline{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, build, and cache-home fields) — declare the run fields (SB2)", m.Profile)
 	}
+	// Fail closed on a missing required creds-ref BEFORE building anything (SB2c).
+	secretEnv, err := secrets.ResolveAll(store, m.SecretRefs)
+	if err != nil {
+		return Baseline{}, fmt.Errorf("coldproof: resolve governed secrets: %w", err)
+	}
+
 	img, err := cleanroom.BuildImage(ctx, docker, repoRoot, m.Image)
 	if err != nil {
 		return Baseline{}, fmt.Errorf("coldproof: build declared image: %w", err)
 	}
 
-	runner := cleanroom.NewContainerRunner(img.Ref)
-	ev := Gather(ctx, runner, repoRoot, m.CacheHomeEnvs, m.ResolveCmd, m.BuildCmd)
+	runner := cleanroom.NewContainerRunnerWithSecrets(img.Ref, secretEnv)
+	// Gather scrubs any echoed secret from the evidence at the boundary (G7).
+	ev := Gather(ctx, runner, repoRoot, m.CacheHomeEnvs, m.ResolveCmd, m.BuildCmd, secrets.NewScrubber(secretEnv))
 	return baselineFromEvidence(img, ev), nil
 }
 
@@ -76,7 +88,9 @@ const baselineProveCheckName = "build"
 // baselineFromEvidence maps neutral cold-proof evidence to a Baseline verdict via the
 // shared verify.Decide (pure — the classification is offline-testable without docker),
 // relabelling the terminal check to "build" so the operator-facing evidence matches
-// what the baseline actually proved (resolve + cold build).
+// what the baseline actually proved (resolve + cold build). The evidence details are
+// already scrubbed of any injected secret at the Gather boundary (G7), so no scrub is
+// needed here.
 func baselineFromEvidence(img cleanroom.BuiltImage, ev Evidence) Baseline {
 	verdict := verify.Decide(ev.ToVerifyInput())
 	verdict.Checks = relabelProveCheck(verdict.Checks)

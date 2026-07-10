@@ -183,7 +183,9 @@ func resolveBuildPaths(repoRoot string, decl harness.ImageDecl) (dockerfileAbs, 
 
 // buildImageArgs assembles the `docker build` args: the iidfile that captures the
 // digest-pinned image id, the Dockerfile, and the context dir. Pure — unit-testable
-// without docker. (Secret injection via `--secret` is added by the secrets increment.)
+// without docker. NOTE: no BUILD-time secret channel yet (M0 injects secrets at RUN
+// time, internal/secrets); when a build-secret channel lands (BuildKit `--secret`), the
+// buildTail this surfaces on failure must be scrubbed — it is not today.
 func buildImageArgs(iidfile, dockerfileAbs, contextAbs string) []string {
 	return []string{"build", "--iidfile", iidfile, "-f", dockerfileAbs, contextAbs}
 }

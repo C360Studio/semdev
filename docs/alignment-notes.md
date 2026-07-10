@@ -334,3 +334,38 @@ Template:
   lane and stamps the facts on their spec entities) and the matching
   `registry.Entries` entry land with the runtime boot path (group 11).
 - **Change:** m0-walking-skeleton-spine
+
+## sandbox-substrate (operator-declared image · cold-prove · secrets)
+
+- **Primitive considered:** a rule/persona that "sets up the environment" — an LLM
+  or reconciler that harvests/infers a toolchain and stamps a readiness fact, plus
+  a fact carrying a resolved secret for a rule to inject.
+- **Why it cannot express this:** provisioning a real, isolated, cold-reproducible
+  sandbox is the make-or-break infra both predecessors died on, and none of it is
+  rule-expressible. `internal/cleanroom.BuildImage` builds the OPERATOR-declared
+  image (`harness.LocateImage` finds the committed `Dockerfile`/devcontainer;
+  `--iidfile` captures the digest pin) — semdev never harvests/infers/synthesizes a
+  toolchain (SB2). `internal/coldproof` provisions a fresh per-run container and
+  proves the repo resolves its base deps and BUILDS cold BEFORE the dev loop relies
+  on it (SB4.1) — the shared cold-build core (`Gather`) that both the provision-time
+  baseline and the final `verify_artifact` route through `verify.Decide`, so a
+  fabrication reads identically in both. `internal/harness` is the reshaped RUN
+  contract (the declared image + resolve/build/test commands + tier split + secret
+  refs — no toolchain modeling; the dropped source-substitution/native-asset fields
+  were semspec's harness-injected-resolution grave, now structurally inexpressible).
+- **Secrets (SB2c/G7):** `internal/secrets` is the governed named-creds-ref store
+  (git-ignored `.env` at M0), the leak-guard Scrubber (a secret VALUE is redacted
+  from every surfaced detail — no value in a log, tool result, or fact), and the
+  run-time injection channel (a `-e NAME` pass-through with the value in the docker
+  process's own environment, off its argv). A missing/empty required ref fails
+  CLOSED toward the operator (no warm fallback). It writes no facts and injects only
+  values it resolved at run time — never a value round-tripped through a manifest or
+  fact (`SecretRefs` is names-only).
+- **G2/G3:** these are synchronous compute cores returning values for a future
+  provisioning RULE (group 5) to route on — they stamp no fact and fire no
+  transition here; the harness derives every outcome (a cold build's real exit
+  status), never a model claim.
+- **Registry entry:** none — libraries behind the `verify_artifact`/cleanroom seam
+  (like `LocalRunner`/`MockRunner`); the provisioning station that stamps readiness
+  facts + its vocab land in a later group of the change.
+- **Change:** containerized-sandbox-dev-loop

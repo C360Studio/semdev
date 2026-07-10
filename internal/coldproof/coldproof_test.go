@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
 )
 
@@ -15,10 +17,10 @@ var (
 	proveCmd   = []string{"go", "build", "./..."}
 )
 
-// gather runs Gather against a scripted MockRunner in a temp-free way and returns the
-// evidence + the runner (for call assertions).
+// gather runs Gather (no scrubber) against a scripted MockRunner in a temp-free way and
+// returns the evidence.
 func gather(runner *cleanroom.MockRunner) Evidence {
-	return Gather(context.Background(), runner, "/checkout", []string{"GOMODCACHE", "GOCACHE"}, resolveCmd, proveCmd)
+	return Gather(context.Background(), runner, "/checkout", []string{"GOMODCACHE", "GOCACHE"}, resolveCmd, proveCmd, nil)
 }
 
 // Happy path: resolve cold + prove pass in one fresh sandbox → completed, resolved,
@@ -126,8 +128,27 @@ func TestGatherProveRunErrorRetries(t *testing.T) {
 // An empty command is a harness misconfiguration → transport-class (the step could not
 // run), never a silent green.
 func TestGatherEmptyCommandIsTransport(t *testing.T) {
-	ev := Gather(context.Background(), &cleanroom.MockRunner{}, "/checkout", []string{"GOMODCACHE"}, nil, proveCmd)
+	ev := Gather(context.Background(), &cleanroom.MockRunner{}, "/checkout", []string{"GOMODCACHE"}, nil, proveCmd, nil)
 	if ev.Completed || ev.Transport == "" {
 		t.Errorf("evidence = %+v, want a transport fault for an empty resolve command", ev)
+	}
+}
+
+// G7: Gather scrubs any injected secret VALUE the resolve/prove output echoed into the
+// evidence details — applied at the boundary so both consumers inherit the guard.
+func TestGatherScrubsSecretFromDetail(t *testing.T) {
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
+		{Result: cleanroom.Result{ExitCode: 1, Stderr: "go: authentication failed for ghp_supersecret at registry"}},
+	}}
+	sc := secrets.NewScrubber(map[string]string{"GITHUB_PACKAGES_TOKEN": "ghp_supersecret"})
+	ev := Gather(context.Background(), runner, "/checkout", []string{"GOMODCACHE"}, resolveCmd, proveCmd, sc)
+	if strings.Contains(ev.ResolveDetail, "ghp_supersecret") {
+		t.Errorf("Gather left a secret value in the resolve detail: %q", ev.ResolveDetail)
+	}
+	// The verdict built from the scrubbed evidence is likewise clean.
+	for _, c := range verify.Decide(ev.ToVerifyInput()).Checks {
+		if strings.Contains(c.Detail, "ghp_supersecret") {
+			t.Errorf("verdict check %q leaked a secret: %q", c.Name, c.Detail)
+		}
 	}
 }

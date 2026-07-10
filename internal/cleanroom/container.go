@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/c360studio/semdev/internal/secrets"
 )
 
 // ErrDockerUnavailable is the sentinel a caller reads as "the sandbox substrate is
@@ -76,11 +79,24 @@ type ContainerRunner struct {
 	Image string
 	// docker is the CLI binary; "docker" unless overridden (tests).
 	docker string
+	// secretEnv are resolved governed creds-refs (name→value) injected at EXEC time only
+	// (SB2c): present for cold resolution, but NEVER in the container's persistent config
+	// (no `docker run -e`), image layer, or the artifact — so `docker inspect` of the
+	// running container never carries a secret. nil for the common no-secret run.
+	secretEnv map[string]string
 }
 
 // NewContainerRunner builds a ContainerRunner for a declared, already-built image.
 func NewContainerRunner(image string) *ContainerRunner {
 	return &ContainerRunner{Image: image, docker: "docker"}
+}
+
+// NewContainerRunnerWithSecrets builds a ContainerRunner that injects resolved governed
+// creds-refs (SB2c) into every exec's environment — the run-time secret channel. The
+// caller resolves the refs (fail-closed) and scrubs any surfaced evidence; this runner
+// only injects the values at exec time. A nil/empty map is equivalent to NewContainerRunner.
+func NewContainerRunnerWithSecrets(image string, secretEnv map[string]string) *ContainerRunner {
+	return &ContainerRunner{Image: image, docker: "docker", secretEnv: secretEnv}
 }
 
 var _ Runner = (*ContainerRunner)(nil)
@@ -196,6 +212,12 @@ func (c *ContainerRunner) Exec(ctx context.Context, sb Sandbox, argv []string) (
 	}
 	full := append(c.execArgs(sb), argv...)
 	cmd := exec.CommandContext(ctx, c.dockerBin(), full...)
+	// Governed secret VALUES ride the docker process's own environment (paired with the
+	// `-e NAME` pass-through flags in execArgs), never its argv — so the value lives only
+	// in owner-only /proc/<pid>/environ, not world-readable /proc/<pid>/cmdline (SB2c).
+	if len(c.secretEnv) > 0 {
+		cmd.Env = append(os.Environ(), secrets.ExecEnvKV(c.secretEnv)...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -284,13 +306,17 @@ func (c *ContainerRunner) Down(ctx context.Context, sb Sandbox) error {
 }
 
 // execArgs builds the `docker exec` prefix (before the user argv): the container
-// handle, workdir, and the fresh cache-home env injections. Pure — unit-testable
-// without docker.
+// handle, workdir, the fresh cache-home env injections, and any governed secret env
+// (SB2c — injected here at exec, never at `docker run`, so a secret is never in the
+// container's persistent/inspectable config). Pure — unit-testable without docker.
 func (c *ContainerRunner) execArgs(sb Sandbox) []string {
 	args := []string{"exec", "-w", firstNonEmpty(sb.WorkDir, containerWorkDir)}
 	for _, k := range sortedKeys(sb.Env) {
 		args = append(args, "-e", k+"="+sb.Env[k])
 	}
+	// Secret env rides the PASS-THROUGH `-e NAME` form (value in the process env, not the
+	// argv) — see Exec (SB2c).
+	args = append(args, secrets.ExecEnvFlags(c.secretEnv)...)
 	args = append(args, sb.Handle)
 	return args
 }

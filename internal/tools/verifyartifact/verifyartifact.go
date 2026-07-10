@@ -133,7 +133,10 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 // transport-vs-genuine line — shared with the provision-time baseline so a fabrication
 // reads identically in both proofs.
 func (e *Executor) gatherEvidence(ctx context.Context, root string, m harness.Manifest) verify.Input {
-	return coldproof.Gather(ctx, e.runner, root, m.CacheHomeEnvs, m.ResolveCmd, m.TestCmd).ToVerifyInput()
+	// nil scrubber: at M0 the verify runner is wired with no governed secrets. When a
+	// secret-aware runner lands here, thread the matching secrets.NewScrubber(secretEnv)
+	// so any echoed secret is redacted from this tool's surfaced result (G7).
+	return coldproof.Gather(ctx, e.runner, root, m.CacheHomeEnvs, m.ResolveCmd, m.TestCmd, nil).ToVerifyInput()
 }
 
 // stampResult upserts verify.result on the run entity (replace-by-predicate, so a

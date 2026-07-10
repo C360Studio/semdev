@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
 )
 
@@ -60,7 +61,23 @@ type Evidence struct {
 // (the G4 control). A provisioning fault, a step that could not run, or a
 // transport-class resolve failure all set Completed=false; a genuine resolve failure is
 // Resolved=false and short-circuits before the prove step (running it would be moot).
-func Gather(ctx context.Context, runner cleanroom.Runner, root string, cacheEnvs, resolveCmd, proveCmd []string) Evidence {
+//
+// scrubber redacts any injected secret VALUE the resolve/prove OUTPUT echoed into the
+// evidence details (G7) — applied HERE, at the evidence boundary, so BOTH consumers (the
+// baseline and verify_artifact) inherit the guard rather than re-deriving it. Pass nil
+// when the runner injects no secrets.
+func Gather(ctx context.Context, runner cleanroom.Runner, root string, cacheEnvs, resolveCmd, proveCmd []string, scrubber *secrets.Scrubber) Evidence {
+	ev := gatherRaw(ctx, runner, root, cacheEnvs, resolveCmd, proveCmd)
+	// Scrub every free-text detail that could carry an echoed secret. verify.Decide builds
+	// its check details from these fields, so scrubbing here covers the downstream verdict.
+	ev.Transport = scrubber.Scrub(ev.Transport)
+	ev.ResolveDetail = scrubber.Scrub(ev.ResolveDetail)
+	ev.ProveDetail = scrubber.Scrub(ev.ProveDetail)
+	return ev
+}
+
+// gatherRaw is Gather without the secret scrub — the unguarded evidence gathering.
+func gatherRaw(ctx context.Context, runner cleanroom.Runner, root string, cacheEnvs, resolveCmd, proveCmd []string) Evidence {
 	sb, err := runner.Up(ctx, root, cacheEnvs)
 	if err != nil {
 		return Evidence{Completed: false, Transport: "could not provision cold isolation: " + err.Error()}
