@@ -25,7 +25,7 @@
 - [x] 4.1 `Manifests` seam → resolve the declared image + run fields for a run
 - [x] 4.2 `Workspace` seam → resolve the run's container checkout root (for `measure_task`)
 - [x] 4.3 `Attempts` seam → resolve the developer's authored diff/files in the checkout (for `check_floors`)
-- [ ] 4.4 `measure_task` / `check_floors` / `verify_artifact` execute against the container checkout via these seams (SB4/SB6)
+- [x] 4.4 `measure_task` / `check_floors` / `verify_artifact` execute against the container checkout via these seams (SB4/SB6) — all three now resolve+run against the run's checkout via the wired Workspace/Manifests/Attempts seams. The container-RUNNER swap (measure/floors in-container, verify on the container runner) is the migration plan's steps 6/7 = groups 7/8, built with the live loop/verify.
 
 ## 5. Provision-and-prove-cold station (rule-owned, G2)
 
