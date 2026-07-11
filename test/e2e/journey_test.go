@@ -63,10 +63,16 @@ const journeyChangeSlug = "journey-spine-change"
 // approves the change — the entry to the dev-loop rail.
 const journeyDevAction = "dev_from_task"
 
+// journeyProvisionMarker is a distinctive, unique substring of the provision
+// prompt (sandbox/01-provision.json) the mock's provision turn guards on. That
+// prompt is static (the tool reads the run from call.Metadata via run_scope=inherit,
+// not the prompt), so this phrase is the stable key for the positional cursor.
+const journeyProvisionMarker = "Provision the sandbox"
+
 // journeyDevRewakeMarker is a distinctive substring of the dev re-wake prompt
-// (dev-from-task/02-rewake-coordinator-dev.json) that the mock's 5th turn guards
-// on — the re-wake prompt threads $entity.id (the run entity), not the issue ref
-// or slug, so the turn is keyed on this stable phrase instead.
+// (dev-from-task/02-rewake-coordinator-dev.json) that the mock's dev-decide turn
+// guards on — the re-wake prompt threads $entity.id (the run entity), not the issue
+// ref or slug, so the turn is keyed on this stable phrase instead.
 const journeyDevRewakeMarker = "Begin developing"
 
 // entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
@@ -87,25 +93,26 @@ var wantAgenticHealthy = []string{
 // coordinator loop calls decide and stamps its routing decision. Later slices
 // grow the arc off that decision (mint the run → create_change → dev loop → …).
 func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
-	// The mock scripts the arc's three sequential turns as a POSITIONAL sequence
+	// The mock scripts the arc's sequential turns as a POSITIONAL sequence
 	// (cursor advances per matched tool call). The turns are causally ordered —
 	// each loop is spawned by a rule that fired on the prior loop's terminal — so
 	// the cursor lands each fixture on its turn:
-	//   1. C1 front-door coordinator → decide(issue_intake)    [mints the run]
-	//   2. C2 re-woken coordinator   → decide(create_change)   [routes to author]
-	//   3. A1 authoring coordinator  → create_change(<change>) [emits the change]
-	//   4. V1 validate coordinator   → validate_change(<slug>) [validates → gate]
-	//   5. P1 projection coordinator  → project_tasks(<slug>)  [approval → task.spec]
-	//   6. C3 dev re-woken coord.    → decide(dev_from_task)   [post-approval kickoff]
+	//   1. C1 front-door coordinator → decide(issue_intake)     [mints the run]
+	//   2. C2 re-woken coordinator   → decide(create_change)    [routes to author]
+	//   3. A1 authoring coordinator  → create_change(<change>)  [emits the change]
+	//   4. V1 validate coordinator   → validate_change(<slug>)  [validates → gate]
+	//   5. P1 projection coordinator  → project_tasks(<slug>)   [approval → task.spec]
+	//   6. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
+	//   7. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turn 6's prompt threads the run entity id, so it marks on a
-	// stable phrase of the dev re-wake prompt. The cursor — not the marker —
-	// distinguishes the turns (projection is sequenced BEFORE the dev re-wake because
-	// dev-from-task/02 gates on task.spec presence, so the two same-slug/positional
-	// turns cannot race). An unscripted turn returns mockllm.UnmatchedSentinel,
-	// failing loudly not green.
+	// mark on the slug; turns 6 and 7 thread the run entity id, so they mark on a
+	// stable phrase of their prompts (provision, then dev re-wake). The cursor — not
+	// the marker — distinguishes the turns: projection → provision → dev re-wake is
+	// serialized by the rule gates (sandbox/01 gates on task.spec presence, the dev
+	// re-wake gates on sandbox.ready), so no two forced turns race. An unscripted
+	// turn returns mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -134,6 +141,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 			Tool:   &mockllm.ToolCall{Name: "project_tasks", Args: map[string]any{"slug": journeyChangeSlug}},
 		},
 		mockllm.Fixture{
+			Marker: journeyProvisionMarker,
+			Tool:   &mockllm.ToolCall{Name: "provision_sandbox", Args: map[string]any{}},
+		},
+		mockllm.Fixture{
 			Marker: journeyDevRewakeMarker,
 			Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
 				"action": journeyDevAction,
@@ -146,7 +157,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	}
 	defer func() { _ = mock.Stop() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// The provision station builds the fixture's declared golang image and proves it
+	// cold inside the run's container (real docker, real go build) — so this journey
+	// needs a wider budget than the pure-routing stations before it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
@@ -155,6 +169,9 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		// repo's real fragment tree — otherwise the coordinator would route on the
 		// framework default persona instead of Sarah's decision contract.
 		PersonasDir: journeyPersonasDir(t),
+		// The run's target SOURCE at M0 is the committed Go fixture — provision_sandbox
+		// materializes the run's checkout from it and cold-proves the declared image.
+		SandboxSourceDir: journeySandboxSourceDir(t),
 	})
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
@@ -239,27 +256,41 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireTaskSpecProjected(ctx, t, runEntityID)
 	t.Logf("station 7: task.spec projected on approval (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 8 — with task.spec frozen, the resumed run kicks off the dev loop.
-	// dev-from-task/02 (gated on task.spec.0.test_command ne "", so it fires only
-	// AFTER projection completes) does the inherit publish — spawning a fresh
-	// coordinator loop bound to THIS run, which re-decides and picks dev_from_task.
-	// Assert that a coordinator loop BOUND TO THIS RUN (agent.run.entity_id ==
-	// runEntityID) stamped next_action=dev_from_task — proof the projection-gated
-	// re-wake fired and the coordinator routed into development. Bind by the run
-	// anchor + the distinct action so an earlier decision (issue_intake /
-	// create_change) on the same run cannot false-green.
-	requireRunCoordinatorDecision(ctx, t, runEntityID, journeyDevAction)
-	t.Logf("station 8: dev loop kicked off — coordinator re-woke and decided %s (mock RequestCount=%d)", journeyDevAction, mock.RequestCount())
+	// Station 8 — the make-or-break: the run's sandbox is PROVISIONED AND PROVED COLD
+	// before development. sandbox/01-provision (gated on task.spec presence, so it
+	// runs AFTER projection) does the inherit publish — a forced provision_sandbox
+	// loop that materializes the run's checkout, builds the fixture's DECLARED golang
+	// image, and proves the Go module resolves + builds cold in a fresh container,
+	// then stamps sandbox.ready + the digest-pinned attestation. This runs the REAL
+	// cold proof (docker build + go build), the exact class both predecessors faked.
+	// Assert sandbox.ready == true AND the image attestation is present — proof the
+	// provision station ran the real proof on the committed artifact and the readiness
+	// gate can release. Red-first: disable sandbox/01 and this station times out.
+	requireSandboxReady(ctx, t, runEntityID)
+	t.Logf("station 8: sandbox provisioned + proved cold — sandbox.ready stamped (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly six model turns drove the arc through the dev kickoff: C1
+	// Station 9 — with task.spec frozen AND the sandbox proven ready, the resumed run
+	// kicks off the dev loop. dev-from-task/02 (gated on task.spec.0.test_command ne ""
+	// AND sandbox.ready eq true, so it fires only AFTER projection and provisioning)
+	// does the inherit publish — spawning a fresh coordinator loop bound to THIS run,
+	// which re-decides and picks dev_from_task. Assert that a coordinator loop BOUND
+	// TO THIS RUN (agent.run.entity_id == runEntityID) stamped next_action=dev_from_task
+	// — proof the projection+readiness-gated re-wake fired and routed into development.
+	// Bind by the run anchor + the distinct action so an earlier decision (issue_intake
+	// / create_change) on the same run cannot false-green.
+	requireRunCoordinatorDecision(ctx, t, runEntityID, journeyDevAction)
+	t.Logf("station 9: dev loop kicked off — coordinator re-woke and decided %s (mock RequestCount=%d)", journeyDevAction, mock.RequestCount())
+
+	// Exactly seven model turns drove the arc through the dev kickoff: C1
 	// decide(issue_intake), C2 decide(create_change), A1 create_change, V1
-	// validate_change, P1 project_tasks, C3 decide(dev_from_task). The resume itself
-	// is rule-owned (no model call), and the anchor rule only stamps a triple. The
-	// two new turns since station 5 are the projection (P1) and the dev re-wake's
-	// decide (C3). A spurious resume-spawn, a double projection/anchor/re-wake, or an
-	// unscripted turn would push this past 6, so pin it (the mockllm contract).
-	if got := mock.RequestCount(); got != 6 {
-		t.Fatalf("expected exactly 6 model turns (…, P1 project_tasks, C3 decide(dev_from_task)), got %d — extra turns indicate a re-spawn/loop, a double projection/dev re-wake, or an unscripted turn", got)
+	// validate_change, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task).
+	// The resume itself is rule-owned (no model call), and the anchor rule only stamps
+	// a triple. The one new turn since station 5's arc is the provision (PS) between
+	// projection and the dev re-wake. A spurious resume-spawn, a double projection/
+	// provision/re-wake, or an unscripted turn would push this past 7, so pin it (the
+	// mockllm contract).
+	if got := mock.RequestCount(); got != 7 {
+		t.Fatalf("expected exactly 7 model turns (…, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task)), got %d — extra turns indicate a re-spawn/loop, a double projection/provision/dev re-wake, or an unscripted turn", got)
 	}
 }
 
@@ -465,6 +496,43 @@ func requireTaskSpecProjected(ctx context.Context, t *testing.T, runEntityID str
 		"did not fire or project_tasks refused: check the run-level openspec.change.slug pointer (threaded into the "+
 		"projection prompt), the D15 #0 revision bind (openspec.validated == openspec.change.<slug>.revision), and "+
 		"that project_tasks was advertised/scripted")
+}
+
+// requireSandboxReady polls the run entity until sandbox.ready == "true" and the
+// image attestation is present — the proof the provision station (sandbox/01)
+// spawned a provision_sandbox loop that BUILT the declared image and proved the
+// repo builds cold, stamping the harness-derived readiness/attestation. It also
+// gates the dev re-wake (dev-from-task/02 requires sandbox.ready eq true), so
+// asserting it here proves the provision-before-kickoff ordering. The timeout is
+// wide: this station runs the real docker build + cold go build. Fails naming the
+// likely cause — including a sandbox.blocked reason if provisioning parked instead.
+func requireSandboxReady(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	requireEventually(t, 4*time.Minute, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if blocked := tripleString(e, "sandbox.blocked"); blocked != "" {
+			t.Fatalf("provision_sandbox blocked the run instead of proving it ready: %s", blocked)
+		}
+		return tripleString(e, "sandbox.ready") == "true" && tripleString(e, "sandbox.attestation.image") != ""
+	}, "run entity "+runEntityID+" never gained sandbox.ready=true + attestation — the provision rule (sandbox/01) "+
+		"did not fire or provision_sandbox could not prove the fixture cold: check the sandbox.provisioned marker/guard, "+
+		"that provision_sandbox was advertised/scripted, that SandboxSourceDir points at the fixture, and that docker can "+
+		"build the declared golang image")
+}
+
+// journeySandboxSourceDir is the committed Go fixture the run develops at M0 —
+// provision_sandbox materializes each run's checkout from it and cold-proves the
+// declared image. Passed explicitly (like PersonasDir) because the journey's
+// patched config lives in a temp dir.
+func journeySandboxSourceDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "test", "fixtures", "go-health-class")
 }
 
 // journeyChangeArgs is a minimal VALID create_change payload the mock's authoring

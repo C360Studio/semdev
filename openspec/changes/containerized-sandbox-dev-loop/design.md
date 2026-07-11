@@ -341,6 +341,76 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   driven/short-lived). Wire a `Close`/reap when the runtime lifecycle owns the checkouts
   (group 5).
 
+### Group-5 provision-station decisions (as built; architect-validated)
+
+- **Readiness gate = a condition, not a standalone rule.** SB5's "the dev loop
+  proceeds only on a proven sandbox-scope tier" is realized as a `sandbox.ready eq true`
+  condition on the dev-loop-proceed rule (`dev-from-task/02`, the current head of the dev
+  rail), pinned by `TestDevRewakeGatedOnSandboxReadiness`. A separate no-op "gate rule"
+  would be redundant — a gate is a precondition, and the rule that advances is the one
+  that must carry it. When the dedicated developer dispatch lands (g7 dispatch-developer),
+  the same `sandbox.ready` gate moves onto it.
+- **Ordering is data-enforced, not timing-lucky.** approval → `project_tasks`
+  (dev-from-task/03) → `provision_sandbox` (sandbox/01, gated on `task.spec.0.test_command
+  ne ""`) → `decide(dev_from_task)` (dev-from-task/02, gated on task.spec AND
+  `sandbox.ready`). Each forced-tool turn is gated on the prior's output fact, so the
+  mock's positional cursor cannot be raced and the sequence holds under any scheduling.
+- **Source resolution = an injected `Sources` seam** (`runspace.StaticSource`), NOT a
+  graph fact. The run's portable coordinate already lives in the graph as `run.issue_ref`;
+  the seam resolves that (M2 forge-io) or a boot-configured constant (M0 fixture) into a
+  HOST PATH that stays out of the graph (same class as the checkout dir). M2 carry-forward:
+  the seam's return contract may flip from a host dir to a clone coordinate when the real
+  `--recursive` clone lands (the clone likely moves INTO `Materialize` to avoid a
+  clone-then-`copyTree` that mangles submodules/`.git`/symlinks — colliding with the
+  symlink-containment carry-forward above).
+- **Restart-safety: fired-once marker at M0; recoverable checkout at M2.** `sandbox/01`
+  uses the house self-extinguishing pattern (`sandbox.provisioned` marker stamped before
+  the publish + `length_eq 0` guard), correct for the single-process e2e. The split
+  durability (marker + `sandbox.ready` survive a restart; the in-memory `Checkouts` map
+  does not) is UNREACHABLE at M0 and, if it occurred, is a fail-closed park (the dev
+  tools' `Workspace.Root` errors → no false verify), never a silent proceed. The M2 fix
+  (architect-preferred over a durable checkout-provenance fact or a B3 reconciler): make
+  `Checkouts` recoverable — a deterministically run-keyed dir under a STABLE configured
+  base, so `Root` re-adopts the surviving on-disk checkout after a restart (stat-and-adopt,
+  never re-`Materialize` — which is destructive and would wipe apply_patch work). That one
+  change dissolves the split-durability wedge AND retires the temp-dir-leak carry-forward
+  (`Remove` becomes `rm base/run-<id>`, a reaper can GC terminal runs). The rule guard
+  stays the fired-once marker — NOT a `sandbox.ready`-absence re-fire, which would spawn
+  duplicate provision loops during the 30–60s cold-proof window.
+- **Fail-closed park writes `run.awaiting_human`** (`sandbox/02-park-unprovable`), the one
+  park marker the D15 park-exclusion contract reads — the park-rule subsystem is one
+  logical G5 writer realized by two rule files (this + run-lifecycle/03), differing only in
+  trigger (an unprovable sandbox vs a coordinator `ask_human`). Confirmed acceptable by the
+  reviewer against the framework: rule `add_triple` stamps a constant `Source="rule_engine"`
+  (`processor/rule/actions.go`), so the two writes are byte-indistinguishable at the write
+  layer — the exact "sole-writer-was-a-false-comment" disease G5 targets cannot occur, and
+  the vocab's single `run.awaiting_human` entry is not drifted.
+
+### Group-5 carry-forwards (from the increment reviews — settle before the forge-io respond handler)
+
+- **[Resume of a sandbox-blocked run must un-provision, not just un-park] (MEDIUM)** → the
+  fired-once `sandbox.provisioned` marker that correctly prevents duplicate provisioning
+  ALSO prevents *re*-provisioning after an operator fixes the declared image. So a resume
+  path that clears ONLY `run.awaiting_human` leaves the run un-parked but wedged: `sandbox/01`
+  won't re-fire (marker present), `sandbox.ready` never appears, `dev-from-task/02` never
+  fires. The group-5 forge-io respond handler MUST, on resume of a sandbox-blocked run,
+  clear `sandbox.blocked` + `sandbox.provisioned` + the readiness package so a re-provision
+  can fire — capture this as an explicit resume-path contract alongside the D15 "respond
+  removes `run.awaiting_human`" contract. Unreachable now (resume path unbuilt).
+- **[Park PATH is offline-pinned only, not e2e-exercised]** → the green journey takes the
+  READY path; `sandbox/02`'s `run.awaiting_human`=`$entity.triple.sandbox.blocked` on the run
+  entity and the `user.response.$entity.instance` bus post are structurally identical to the
+  proven `run-lifecycle/03` shapes (so they resolve), and each half is unit/structurally
+  pinned (the tool's six `block()` tests + `TestSandboxParkOnUnprovable`), but the
+  tool-blocks→rule-parks INTEGRATION has no end-to-end proof. Add a blocked-fixture park
+  journey (docker-absent or a non-buildable declared image) when the resume handler lands.
+- **[The "one logical park writer, N realizations" invariant lives only in prose]** → nothing
+  offline stops a future THIRD writer of `run.awaiting_human` that omits the `length_eq 0`
+  fire-once guard (which would re-post to the user bus every re-scan). A naive "every writer
+  must guard" pin false-positives on the intentionally-unguarded decision-driven
+  `run-lifecycle/03`, so this needs a targeted pin (guard required unless the trigger is a
+  coordinator decision), not a blanket one. Known soft spot.
+
 ## Migration Plan
 
 Infra-first sequence (each rung proven before the next):

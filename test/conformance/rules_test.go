@@ -43,6 +43,23 @@ func (r ruleFile) hasTriple(predicate string) bool {
 	return false
 }
 
+// markerBeforePublish reports whether the fired-once marker add_triple precedes the
+// FIRST publish_agent in on_enter — the SB7 restart-safety ordering: the marker must
+// be stamped BEFORE the (non-idempotent) spawn so a publish failure leaves the run
+// stuck-toward-human rather than duplicated. False if either action is absent.
+func (r ruleFile) markerBeforePublish(marker string) bool {
+	markerIdx, publishIdx := -1, -1
+	for i, a := range r.OnEnter {
+		if markerIdx == -1 && a.Type == "add_triple" && a.Predicate == marker {
+			markerIdx = i
+		}
+		if publishIdx == -1 && a.Type == "publish_agent" {
+			publishIdx = i
+		}
+	}
+	return markerIdx != -1 && publishIdx != -1 && markerIdx < publishIdx
+}
+
 func (r ruleFile) firesTransition() bool {
 	for _, a := range r.OnEnter {
 		if a.Type == "lifecycle_transition" {
@@ -326,6 +343,86 @@ func TestDevRewakeGatedOnProjection(t *testing.T) {
 	proj, ok := runLifecycleRules(t)["dev_from_task_project_tasks"]
 	if !ok || !proj.forcesFunction("project_tasks") {
 		t.Error("the projection gate has no producer: dev_from_task_project_tasks must exist and force project_tasks, or task.spec.0.test_command never becomes present and the dev loop deadlocks")
+	}
+}
+
+// The provision-and-prove-cold station (sandbox/01-provision) is the approval-
+// triggered spawn that stands up the sandbox and cold-proves it. Like every
+// publish_agent spawn rule it MUST be self-extinguishing (house restart-safety
+// pattern): a fired-once sandbox.provisioned marker stamped in on_enter, guarded by
+// length_eq 0 — else an asymmetric RULE_STATE loss re-spawns a duplicate provision
+// loop (publish_agent is not idempotent). It must force the provision_sandbox call,
+// fire on approval, and require the run anchor for run_scope=inherit.
+func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
+	prov, ok := runLifecycleRules(t)["sandbox_provision"]
+	if !ok {
+		t.Fatal("missing sandbox_provision rule")
+	}
+	const marker = "sandbox.provisioned"
+	if !prov.hasAbsenceGuard(marker) {
+		t.Errorf("provision spawn must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate provision loop (publish_agent is not idempotent)", marker)
+	}
+	if !prov.hasTriple(marker) {
+		t.Errorf("provision spawn must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !prov.markerBeforePublish(marker) {
+		t.Errorf("provision spawn must stamp %s BEFORE its publish_agent (SB7) — else a publish failure leaves the run duplicable rather than stuck-toward-human", marker)
+	}
+	if !prov.forcesFunction("provision_sandbox") {
+		t.Error("provision spawn must force the provision_sandbox call (tool_choice mode=function, function_name=provision_sandbox)")
+	}
+	if c, ok := prov.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Error("provision spawn must fire on run.change_approved == true (provision the approved run's sandbox)")
+	}
+	if c, ok := prov.condition("agent.run"); !ok || c.Operator != "ne" {
+		t.Error("provision spawn must require the agent.run anchor (ne \"\") so run_scope=inherit binds the loop to this run")
+	}
+}
+
+// The readiness gate (SB5): the dev loop must NOT proceed onto development without a
+// PROVEN sandbox. dev-from-task/02 is gated on sandbox.ready eq true, so an approved,
+// projected run whose sandbox was not cold-proved (sandbox.ready never stamped)
+// cannot re-wake into dev_from_task — it parks instead (sandbox/02-park-unprovable).
+// Red-first: drop the gate and this fails. The gate is honest only if a producer
+// actually stamps sandbox.ready, so assert the provision station forces the tool.
+func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
+	rewake, ok := runLifecycleRules(t)["dev_from_task_rewake_coordinator"]
+	if !ok {
+		t.Fatal("missing dev_from_task_rewake_coordinator rule")
+	}
+	c, ok := rewake.condition("sandbox.ready")
+	if !ok {
+		t.Fatal("dev re-wake must gate on a proven sandbox (sandbox.ready) — else the dev loop can proceed over an absent/unproven sandbox (SB5, the semspec disease)")
+	}
+	if c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("dev re-wake readiness gate must be sandbox.ready eq \"true\", got operator=%q value=%v", c.Operator, c.Value)
+	}
+	prov, ok := runLifecycleRules(t)["sandbox_provision"]
+	if !ok || !prov.forcesFunction("provision_sandbox") {
+		t.Error("the readiness gate has no producer: sandbox_provision must exist and force provision_sandbox, or sandbox.ready never becomes present and the dev loop deadlocks")
+	}
+}
+
+// The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
+// sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
+// posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once
+// via the run.awaiting_human absence guard so it does not re-post on every re-scan.
+func TestSandboxParkOnUnprovable(t *testing.T) {
+	park, ok := runLifecycleRules(t)["sandbox_park_unprovable"]
+	if !ok {
+		t.Fatal("missing sandbox_park_unprovable rule")
+	}
+	if c, ok := park.condition("sandbox.blocked"); !ok || c.Operator != "ne" {
+		t.Error("sandbox park must fire on sandbox.blocked ne \"\" (an unprovable sandbox)")
+	}
+	if !park.hasTriple("run.awaiting_human") {
+		t.Error("sandbox park must stamp run.awaiting_human (the park marker the whole system reads)")
+	}
+	if !park.hasAbsenceGuard("run.awaiting_human") {
+		t.Error("sandbox park must guard on run.awaiting_human length_eq 0 (fire once, don't re-post to the user bus each re-scan)")
+	}
+	if park.firesTransition() {
+		t.Error("sandbox park must fire NO lifecycle transition (G2) — it records a fact and posts to the user bus")
 	}
 }
 
