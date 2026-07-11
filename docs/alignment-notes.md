@@ -369,3 +369,40 @@ Template:
   (like `LocalRunner`/`MockRunner`); the provisioning station that stamps readiness
   facts + its vocab land in a later group of the change.
 - **Change:** containerized-sandbox-dev-loop
+
+## provision-sandbox-tool
+
+- **Primitive considered:** a rule that "provisions the sandbox" and stamps a
+  readiness fact, or reusing the framework sandbox HTTP client / a `bash` tool to
+  "set up and check the environment."
+- **Why it cannot express this:** the provision-and-prove-cold station (SB2/SB4/SB7)
+  must MATERIALIZE the run's checkout, BUILD the operator-declared image, and PROVE
+  the repo resolves its base deps and builds cold in a fresh per-run container —
+  then derive readiness from what actually happened. No rule can copy a working
+  tree, build an image, run a subprocess, or read a cold-build exit code; and the
+  whole make-or-break lesson is that readiness must be PROVEN, never asserted
+  (semspec stamped "execution verified" over zero executions; semteams only checked
+  `--version` over a warm cache). So a thin tool wires the group-2/3/4 substrate it
+  cannot itself replace: the `runspace` Sources+Checkouts seams (materialize the
+  fresh per-run copy), `runspace.Manifests` (the committed declared image + run
+  fields — no harvest, SB2), and `coldproof.ProveBaseline` (build + cold-prove
+  through the shared `verify.Decide`). It stamps the DERIVED readiness/attestation
+  (G3 — the schema takes NO arguments; the model may only trigger the proof) and
+  fires no transition (G2 — the provision rule forces it, a readiness-gate rule
+  reads `sandbox.ready`, a park rule reads `sandbox.blocked`).
+- **Fail-closed (SB5):** every non-proof path is a BLOCK, never a silent skip —
+  absent docker parks the human; an undeclared/unbuildable image or a repo that will
+  not build cold parks the operator; a claim only an operator-ci/lab tier can prove
+  is deferred toward the operator (never gated in-sandbox). It writes `sandbox.ready`
+  only when the environment built the repo cold AND a sandbox-scope tier proves the
+  claim; otherwise `sandbox.blocked` carries the reason. The idempotency guard (read
+  `sandbox.ready` before materializing) protects a replay from a destructive
+  re-materialize that would wipe in-progress `apply_patch` work.
+- **Fact shape:** the readiness package the rule owns (`sandbox.provisioned`, the
+  fired-once kickoff marker) is SPLIT from the package the harness owns
+  (`sandbox.ready`, `sandbox.blocked`, `sandbox.attestation.image/.tier`) so no
+  predicate has two writers (G5). The image digest + proven tier are harness-derived
+  (from the baseline / the committed manifest), never model-supplied. Single G5
+  writer of the `sandbox.ready/.blocked/.attestation.*` package (`sandbox-provisioner`).
+- **Registry entry:** `provision_sandbox` (`tool`)
+- **Change:** containerized-sandbox-dev-loop

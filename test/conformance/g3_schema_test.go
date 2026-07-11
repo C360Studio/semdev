@@ -19,7 +19,7 @@ func semdevToolRegistry(t *testing.T) *agentictools.ExecutorRegistry {
 	reg := agentictools.NewExecutorRegistry()
 	// Empty githubToken → each host tool deterministically takes its schema-only
 	// nil path regardless of the ambient GITHUB_TOKEN, so the census is hermetic.
-	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, ""); err != nil {
+	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", ""); err != nil {
 		t.Fatalf("boot.RegisterTools: %v", err)
 	}
 	return reg

@@ -7,6 +7,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
+	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/verifyartifact"
@@ -50,6 +51,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"submit_review", submitreview.Source, "review.verdict.0"},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
+		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 	}
 	for _, c := range cases {
 		writer, ok := vocab.WriterOf(c.predicate)

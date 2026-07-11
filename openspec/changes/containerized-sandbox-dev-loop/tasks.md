@@ -29,7 +29,7 @@
 
 ## 5. Provision-and-prove-cold station (rule-owned, G2)
 
-- [ ] 5.1 Vocab (G9): sandbox readiness / attestation / attempt predicates, named in the `sandbox` spec delta; docs row (G10)
+- [x] 5.1 Vocab (G9): sandbox readiness / attestation predicates (`sandbox.provisioned` rule-owned marker; `sandbox.ready`/`.blocked`/`.attestation.*` harness-owned — split so no predicate has two writers), capability `sandbox`, docs row (G10), G5 writer pin. The in-sandbox `task.attempt` is the existing dev-loop predicate (lands live in g7)
 - [ ] 5.2 Provisioning rule: on an approved run, stand up the sandbox + cold-prove → stamp readiness/attestation; self-extinguishing (fired-once marker + absence guard); red-first replay pin (SB7)
 - [ ] 5.3 Readiness gate rule: the dev loop proceeds only on a proven sandbox-scope tier; an operator-CI/lab claim is deferred-and-noted, never gated in-sandbox, never a pass (SB5); red-first
 - [ ] 5.4 Fail-closed park rules: absent docker / failed provision / missing secret → park toward human; red-first: no `verify.result` or "verified" fact over an absent sandbox (SB5)

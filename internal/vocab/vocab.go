@@ -25,6 +25,10 @@ type Predicate struct {
 // m0 is the change slug that introduces semdev's founding vocabulary.
 const m0 = "m0-walking-skeleton-spine"
 
+// sandbox is the change slug that introduces the containerized sandbox / provision-
+// and-prove-cold vocabulary (the sandbox capability).
+const sandbox = "containerized-sandbox-dev-loop"
+
 // Predicates is the complete fact vocabulary. See design.md D12 — this table is
 // that decision made executable. Order is presentational only; the pins treat it
 // as a set keyed by Name.
@@ -49,6 +53,16 @@ var Predicates = []Predicate{
 	{"review.verdict.*", "reviewer-quinn", "harness-measurement", m0},
 	{"verify.result", "verify-harness", "clean-room-verify", m0},
 	{"evidence.run", "evidence-ledger", "evidence-ledger", m0},
+
+	// sandbox (the provision-and-prove-cold station, group 5). The provisioning
+	// rule owns the fired-once kickoff marker; the provision_sandbox harness owns
+	// the readiness/attestation package it DERIVES from the cold proof (G3) — split
+	// so no predicate has two writers (G5). readiness/attestation are proven, not
+	// claimed; blocked routes an unprovable sandbox to the human (SB5).
+	{"sandbox.provisioned", "sandbox-provision-rule", "sandbox", sandbox},
+	{"sandbox.ready", "sandbox-provisioner", "sandbox", sandbox},
+	{"sandbox.blocked", "sandbox-provisioner", "sandbox", sandbox},
+	{"sandbox.attestation.*", "sandbox-provisioner", "sandbox", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

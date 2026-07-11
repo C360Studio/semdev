@@ -34,6 +34,10 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `review.verdict.*` | reviewer-quinn | harness-measurement |
 | `verify.result` | verify-harness | clean-room-verify |
 | `evidence.run` | evidence-ledger | evidence-ledger |
+| `sandbox.provisioned` | sandbox-provision-rule | sandbox |
+| `sandbox.ready` | sandbox-provisioner | sandbox |
+| `sandbox.blocked` | sandbox-provisioner | sandbox |
+| `sandbox.attestation.*` | sandbox-provisioner | sandbox |
 
 ## Components
 
@@ -54,6 +58,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `submit_review` | tool | harness-measurement | `submit-review-tool` |
 | `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
 | `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
+| `provision_sandbox` | tool | sandbox | `provision-sandbox-tool` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

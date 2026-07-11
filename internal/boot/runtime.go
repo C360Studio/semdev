@@ -109,6 +109,13 @@ type RunOptions struct {
 	// from the environment at the composition edge (cmd/*'s main), never
 	// here — keeps this package hermetic to its caller's choice.
 	GitHubToken string
+	// SandboxSourceDir is the run's target SOURCE at M0 — the operator-configured
+	// directory provision_sandbox materializes each run's checkout from and
+	// cold-proves (the in-repo Go fixture the journey drives). Empty makes the
+	// provision tool's source resolve fail closed, so a run parks toward the operator
+	// rather than provisioning a guessed target (SB5). forge-io resolves this per-run
+	// from the run's issue_ref at M2, behind the same seam.
+	SandboxSourceDir string
 	// PersonasDir is the root of the role-fragment tree (<root>/<role>/*.md)
 	// seeded into the PERSONAS KV bucket at boot. Empty derives it from the
 	// config file's own directory (<configDir>/personas/fragments), which is
@@ -370,7 +377,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		Platform:   platform,
 		Logger:     logger,
 	}
-	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken); err != nil {
+	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, opts.SandboxSourceDir); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 

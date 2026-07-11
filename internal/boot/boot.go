@@ -28,6 +28,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/listcomments"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
+	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/verifyartifact"
@@ -65,7 +66,7 @@ func RegisterAll(reg *component.Registry) error {
 // (cmd/*) reads os.Getenv("GITHUB_TOKEN") at the composition edge and passes it in.
 // (The framework's own RegisterBuiltins still reads GITHUB_TOKEN internally for its
 // github_read/write tools — that is framework behavior, outside this seam.)
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string) error {
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, sandboxSourceDir string) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -150,6 +151,14 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		checkout2 verifyartifact.Workspace // verify_artifact's checkout root
 		manifests verifyartifact.Manifests // verify_artifact's reproducibility manifest
 		attempts  checkfloors.Attempts     // check_floors' authored-attempt files
+		// provision_sandbox (group 5) stands the checkout UP: it materializes the
+		// run's fresh copy from its source and cold-proves the declared image. It
+		// shares the SAME *runspace.Checkouts instance the Workspace seams above use,
+		// so the checkout it materializes is exactly the one measure_task/verify later
+		// resolve — one run, one on-disk working copy.
+		provSources   provisionsandbox.Sources
+		provCheckouts provisionsandbox.Checkouts
+		provManifests provisionsandbox.Manifests
 	)
 	if deps.NATSClient != nil {
 		checkouts, cerr := runspace.NewCheckouts("")
@@ -160,6 +169,13 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		checkout2 = checkouts
 		manifests = runspace.Manifests{}
 		attempts = runspace.NewAttempts(factReader, checkouts)
+		// The run's SOURCE (what to materialize the checkout from) is a StaticSource at
+		// M0 — the operator-configured target dir (the in-repo fixture the journey
+		// drives); forge-io's per-run `--recursive` PR clone lands behind this seam at
+		// M2. An empty sandboxSourceDir makes Resolve fail closed → the run parks (SB5).
+		provSources = runspace.StaticSource{Dir: sandboxSourceDir}
+		provCheckouts = checkouts
+		provManifests = runspace.Manifests{}
 	}
 
 	// measure_task (harness-measurement) runs a projected task's IMMUTABLE
@@ -205,6 +221,19 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// either seam is missing.
 	if err := reg.RegisterExecutor(checkfloors.New(attempts, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", checkfloors.ToolName, err)
+	}
+
+	// provision_sandbox (sandbox) is the provision-and-prove-cold station: on an
+	// approved run a rule forces it to materialize the run's checkout (provCheckouts,
+	// from provSources), build the operator-declared image (provManifests), and prove
+	// the repo builds COLD (DefaultProver → coldproof.ProveBaseline), then stamp the
+	// derived sandbox.ready/attestation or a sandbox.blocked reason (G3). It shares
+	// the run's changefacts.Reader (idempotency guard) and the OwnedFactWriter (its
+	// own Source, sandbox-provisioner — G5-safe). store is nil at M0 (no governed
+	// secrets, SB2c). Each nil seam makes Execute fail loudly — a sandbox it cannot
+	// prove is a park, never a silent skip (SB5).
+	if err := reg.RegisterExecutor(provisionsandbox.New(provSources, provCheckouts, provManifests, provisionsandbox.DefaultProver(), nil, factReader, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", provisionsandbox.ToolName, err)
 	}
 
 	return nil
