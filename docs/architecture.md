@@ -38,6 +38,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `sandbox.ready` | sandbox-provisioner | sandbox |
 | `sandbox.blocked` | sandbox-provisioner | sandbox |
 | `sandbox.attestation.*` | sandbox-provisioner | sandbox |
+| `dev.dispatched` | dev-dispatch-rule | dev-from-task |
 
 ## Components
 

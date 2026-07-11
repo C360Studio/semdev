@@ -63,6 +63,12 @@ var Predicates = []Predicate{
 	{"sandbox.ready", "sandbox-provisioner", "sandbox", sandbox},
 	{"sandbox.blocked", "sandbox-provisioner", "sandbox", sandbox},
 	{"sandbox.attestation.*", "sandbox-provisioner", "sandbox", sandbox},
+
+	// dev loop in the sandbox (group 7). dev.dispatched is the fired-once marker the
+	// dispatch-developer rule stamps on the coordinator loop whose dev_from_task
+	// decision it consumed, so a graph replay cannot re-spawn Amelia (self-extinguishing,
+	// loop-scoped like the run.*_kickoff markers are run-scoped).
+	{"dev.dispatched", "dev-dispatch-rule", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

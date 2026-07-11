@@ -75,6 +75,26 @@ const journeyProvisionMarker = "Provision the sandbox"
 // ref or slug, so the turn is keyed on this stable phrase instead.
 const journeyDevRewakeMarker = "Begin developing"
 
+// journeyDeveloperMarker is a distinctive substring of Amelia's dispatch prompt
+// (dev-from-task/04-dispatch-developer.json) the mock's apply_patch turn guards on.
+const journeyDeveloperMarker = "SEMDEV DEVELOPER"
+
+// journeyFixtureFixDiff is the developer's authored fix for the go-health-class
+// fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
+// unified diff apply_patch lands on the run's checkout. It mirrors the fixture
+// health.go so `git apply` matches; the subsequent measure proves it was real.
+const journeyFixtureFixDiff = "--- a/health.go\n" +
+	"+++ b/health.go\n" +
+	"@@ -28,7 +28,7 @@ func Classify(cpu, mem float64) Status {\n" +
+	" \tswitch {\n" +
+	" \tcase pressure >= criticalThreshold:\n" +
+	" \t\treturn Unhealthy\n" +
+	"-\tcase pressure > warningThreshold:\n" +
+	"+\tcase pressure >= warningThreshold:\n" +
+	" \t\treturn Degraded\n" +
+	" \tdefault:\n" +
+	" \t\treturn Healthy\n"
+
 // entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
 // lands in (graph-ingest's kv-write output). The journey scans it for the
 // coordinator's decision.
@@ -104,15 +124,17 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   5. P1 projection coordinator  → project_tasks(<slug>)   [approval → task.spec]
 	//   6. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
 	//   7. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
+	//   8. D1 developer (Amelia)     → apply_patch(fix diff)    [authors the fix in-checkout]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6 and 7 thread the run entity id, so they mark on a
-	// stable phrase of their prompts (provision, then dev re-wake). The cursor — not
-	// the marker — distinguishes the turns: projection → provision → dev re-wake is
-	// serialized by the rule gates (sandbox/01 gates on task.spec presence, the dev
-	// re-wake gates on sandbox.ready), so no two forced turns race. An unscripted
-	// turn returns mockllm.UnmatchedSentinel, failing loudly not green.
+	// mark on the slug; turns 6–8 thread the run entity id, so they mark on a stable
+	// phrase of their prompts (provision, dev re-wake, developer). The cursor — not
+	// the marker — distinguishes the turns: projection → provision → dev re-wake →
+	// dispatch is serialized by the rule gates (sandbox/01 gates on task.spec presence,
+	// the dev re-wake gates on sandbox.ready, dispatch fires on the dev_from_task
+	// decision), so no two forced turns race. An unscripted turn returns
+	// mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -150,6 +172,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 				"action": journeyDevAction,
 				"reason": "the change is approved and the run resumed; develop the run's tasks",
 			}},
+		},
+		mockllm.Fixture{
+			Marker: journeyDeveloperMarker,
+			Tool:   &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -281,16 +307,25 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireRunCoordinatorDecision(ctx, t, runEntityID, journeyDevAction)
 	t.Logf("station 9: dev loop kicked off — coordinator re-woke and decided %s (mock RequestCount=%d)", journeyDevAction, mock.RequestCount())
 
-	// Exactly seven model turns drove the arc through the dev kickoff: C1
+	// Station 10 — the dev loop does REAL WORK: dispatch-developer (dev-from-task/04)
+	// fires on the coordinator's dev_from_task decision and spawns AMELIA (a developer
+	// loop bound to this run), forced to apply_patch. Amelia authors the fixture's real
+	// fix diff; the harness applies it to the run's checkout for real (git apply).
+	// Assert a DEVELOPER loop bound to THIS run (agent.run.entity_id == runEntityID)
+	// reached agent.loop.outcome=success — proof the dispatch fired, Amelia inherited
+	// the run, apply_patch ran and applied cleanly. The fix actually working is proven
+	// by the in-container measure (group 7B); here we prove the author station chained.
+	requireDeveloperLoopCompleted(ctx, t, runEntityID)
+	t.Logf("station 10: developer dispatched — Amelia authored the fix via apply_patch (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly eight model turns drove the arc through the author station: C1
 	// decide(issue_intake), C2 decide(create_change), A1 create_change, V1
-	// validate_change, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task).
-	// The resume itself is rule-owned (no model call), and the anchor rule only stamps
-	// a triple. The one new turn since station 5's arc is the provision (PS) between
-	// projection and the dev re-wake. A spurious resume-spawn, a double projection/
-	// provision/re-wake, or an unscripted turn would push this past 7, so pin it (the
-	// mockllm contract).
-	if got := mock.RequestCount(); got != 7 {
-		t.Fatalf("expected exactly 7 model turns (…, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task)), got %d — extra turns indicate a re-spawn/loop, a double projection/provision/dev re-wake, or an unscripted turn", got)
+	// validate_change, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task),
+	// D1 apply_patch. The resume + anchor are rule-owned (no model call). The one new
+	// turn since station 8's arc is Amelia's apply_patch (D1). A spurious re-spawn, a
+	// double dispatch, or an unscripted turn would push this past 8, so pin it.
+	if got := mock.RequestCount(); got != 8 {
+		t.Fatalf("expected exactly 8 model turns (…, C3 decide(dev_from_task), D1 apply_patch), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
 	}
 }
 
@@ -398,6 +433,35 @@ func requireRunCoordinatorDecision(ctx context.Context, t *testing.T, runEntityI
 	}, "no coordinator loop bound to run "+runEntityID+" ever stamped decision.next_action="+wantAction+
 		" — the dev re-wake did not fire; check dev-from-task/01 (agent.run stamped on the run so inherit can bind), "+
 		"dev-from-task/02 (run_scope=inherit publish), and the mock decide fixture marker \""+journeyDevRewakeMarker+"\"")
+}
+
+// requireDeveloperLoopCompleted polls until SOME developer loop bound to runEntityID
+// (agent.loop.role == "developer" ∧ agent.run.entity_id == runEntityID) reaches
+// agent.loop.outcome == "success" — the framework's atomic loop-terminal stamp
+// (WriteLoopCompletion). Its presence is the proof dispatch-developer fired, Amelia
+// inherited the run, and her forced apply_patch ran and applied cleanly (a failed
+// apply would not reach success). This is also the exact fact the group-7B measure
+// chain keys on. Bound by the run anchor + the developer role so no coordinator loop
+// on the same run can false-match.
+func requireDeveloperLoopCompleted(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	// The loop-success outcome value (agentic.OutcomeSuccess).
+	const loopSuccess = "success"
+	requireEventually(t, 45*time.Second, func() bool {
+		for _, e := range scanEntities(ctx, client) {
+			if tripleString(e, agvocab.LoopRole) == "developer" &&
+				tripleString(e, agvocab.LoopRunEntityID) == runEntityID &&
+				tripleString(e, agvocab.LoopOutcome) == loopSuccess {
+				return true
+			}
+		}
+		return false
+	}, "no developer loop bound to run "+runEntityID+" reached agent.loop.outcome=success — dispatch-developer "+
+		"(dev-from-task/04) did not fire or apply_patch failed: check the rule fires on the dev_from_task decision, "+
+		"run_scope=inherit binds Amelia, apply_patch is advertised/scripted, and the fixture fix diff applies cleanly")
 }
 
 // requireRunAnchor polls until THIS wake's coordinator loop carries an

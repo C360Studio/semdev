@@ -403,6 +403,39 @@ func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
 	}
 }
 
+// The dispatch station (dev-from-task/04): on a coordinator's dev_from_task decision,
+// spawn Amelia to author the fix via apply_patch. Like every publish_agent spawn rule
+// it MUST be self-extinguishing — but LOOP-scoped: it fires on the coordinator loop
+// carrying the decision (conditions can't read run facts), so the fired-once marker
+// dev.dispatched is stamped on that loop, guarded by length_eq 0. Unlike coordinator/02
+// (create_change, idempotent-replace, intentionally re-fires), re-dispatching Amelia
+// double-authors, so this MUST self-extinguish. It must force the apply_patch call.
+func TestDispatchDeveloperIsSelfExtinguishing(t *testing.T) {
+	disp, ok := runLifecycleRules(t)["dev_from_task_dispatch_developer"]
+	if !ok {
+		t.Fatal("missing dev_from_task_dispatch_developer rule")
+	}
+	const marker = "dev.dispatched"
+	if !disp.hasAbsenceGuard(marker) {
+		t.Errorf("dispatch-developer must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate developer (publish_agent is not idempotent)", marker)
+	}
+	if !disp.hasTriple(marker) {
+		t.Errorf("dispatch-developer must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !disp.markerBeforePublish(marker) {
+		t.Errorf("dispatch-developer must stamp %s BEFORE its publish_agent (SB7) — else a publish failure leaves the run duplicable", marker)
+	}
+	if !disp.forcesFunction("apply_patch") {
+		t.Error("dispatch-developer must force the apply_patch call (tool_choice mode=function, function_name=apply_patch)")
+	}
+	if c, ok := disp.condition("coordinator.decision.next_action"); !ok || c.Value != "dev_from_task" {
+		t.Error("dispatch-developer must fire on the coordinator's dev_from_task decision")
+	}
+	if c, ok := disp.condition("agent.run.entity_id"); !ok || c.Operator != "ne" {
+		t.Error("dispatch-developer must require the run anchor (agent.run.entity_id ne \"\") so run_scope=inherit binds Amelia to the run")
+	}
+}
+
 // The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
 // sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
 // posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once

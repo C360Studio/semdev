@@ -41,7 +41,14 @@
 
 ## 7. Dev loop in the sandbox
 
-- [ ] 7.1 dispatch-developer rule: on the `dev_from_task` decision, spawn Amelia for the task; self-extinguishing; record `task.attempt.*` (append)
+<!-- Increment plan (architect-consulted): 7A dispatch-developer + apply_patch author
+     station (journey st.10) · 7B measure in-container warm run-container (st.11) ·
+     7C check_floors live + H1 presence gate (st.12) · 7D floors-gate + budget/retry/
+     escalate (st.13). task.attempt is an APPENDED multi-valued predicate so the gate
+     counts it with length_gt/length_lt vs task.spec.<i>.budget (ReplaceTriples upserts,
+     so appending needs the add-triple lane). -->
+
+- [~] 7.1 dispatch-developer rule (`dev-from-task/04`, 7A DONE): on the coordinator's `dev_from_task` decision, spawns Amelia (role=developer, `agent.task.developer` matches the `agent.task.*` loop wildcard) forced to `apply_patch`; SELF-EXTINGUISHING via a LOOP-scoped `dev.dispatched` marker (the rule fires on the coordinator loop carrying the decision — conditions can't read run facts) + `length_eq 0` guard, pinned `TestDispatchDeveloperIsSelfExtinguishing`. `apply_patch` stays fact-free (G3); the chain to measure + the `task.attempt.*` counter APPEND ride the developer-LOOP-terminal (`agent.loop.role=developer ∧ outcome=success`) in 7B — distinct-object per attempt = the loop instance, correct for retries too (architect-refined from "record at dispatch": a run-fired retry can't mint a distinct object, the loop instance can). Journey station 10 (RequestCount 8) asserts a developer loop bound to the run reached success (dispatch→Amelia→apply_patch applied cleanly). **[remaining 7.1: the counter append lands with 7B's measure-trigger rule]**
 - [ ] 7.2 The bounded loop runs in-sandbox: apply_patch → `measure_task` (real, in-container) → floors on the real diff → harness-stamped outcome (G3)
 - [ ] 7.3 Floors-gate + budget/retry (reuse the existing floor tools + `task.attempt` counting); escalate/park on exhaustion
 

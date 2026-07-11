@@ -1,0 +1,49 @@
+{
+  "id": "dev_from_task_dispatch_developer",
+  "type": "expression",
+  "name": "Coordinator decide(dev_from_task) → dispatch Amelia to author the fix (apply_patch)",
+  "description": "The dispatch station (design SB6, group 7). When a coordinator loop terminates with decide(action=dev_from_task) — the taxonomy token for 'develop the run's current task' — spawn the DEVELOPER loop (Amelia) that authors the fix by calling apply_patch. This is the first station that does REAL work in the sandbox: Amelia reads the immutable task.spec, implements the change, and emits a unified diff to apply_patch, which the harness applies to the run's isolated checkout (path-guarded). The MEASURED outcome (does the task's test pass) is a SEPARATE harness step that fires on this developer loop's terminal (group 7B measure_task) — Amelia never declares an outcome (G3).\n\nRUN BINDING: this rule fires on the COORDINATOR LOOP that carries the dev_from_task decision (coordinator.decision.next_action is stamped on the loop entity by the decide tool, not on the run). run_scope=inherit reads that loop's agent.run anchor and binds the spawned developer loop's RunID to the same run, so apply_patch resolves THIS run's checkout from its tool-call metadata. related_loops threads run-loop-entity-id=$entity.triple.agent.run.entity_id so Amelia can query_entity the run to read the projected task.spec.\n\nROLE = developer (Amelia — the design roster's developer; the model_registry advertises a developer capability). tool_choice=function forces the apply_patch call and tools stays nil (global discovery advertises apply_patch), so the loop authors and terminates (StopLoop) rather than measuring or claiming — it is an authoring turn, not a routing or measuring turn. apply_patch stamps NO fact (G3-pure); the chain to measure keys on this developer loop's terminal (agent.loop.role=developer, agent.loop.outcome=success), which is fresh per attempt so retries re-fire for free (group 7B/7D).\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps the fired-once marker dev.dispatched=$entity.instance on the coordinator LOOP (the firing entity — conditions see only the firing entity, no $related, and the dev_from_task decision lives on the loop), and the dev.dispatched length_eq 0 guard makes the trigger flip false the moment it fires. This is the house restart-safety pattern (semteams agent-run/02, dev-from-task/02 and /03): publish_agent is NOT idempotent (each fire mints a fresh Amelia loop; the framework does not dedup), and the decision fact stays on the loop, so WITHOUT this marker a graph replay with RULE_STATE lost would re-spawn a DUPLICATE developer. The marker (a durable ENTITY_STATES triple on the loop) closes that independent of RULE_STATE. Marker stamped BEFORE the publish so a publish failure leaves the run stuck-toward-human rather than duplicated. The marker is LOOP-scoped (unlike run.dev_kickoff/run.projection_kickoff which the dev re-wake/projection stamp on the run they fire on) because THIS rule fires on the coordinator loop.\n\nUNLIKE coordinator/02 (create_change spawn, intentionally NOT self-extinguishing because create_change REPLACES idempotently and a rework SHOULD re-author): re-dispatching Amelia is NOT idempotent (a second developer double-authors and races the measure/floors chain), so this rule MUST self-extinguish. The RETRY re-dispatch (group 7D) is a DISTINCT trigger (the floors-gate on the run, on a failed attempt with budget remaining), not this rule re-firing.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "coordinator.decision.next_action", "operator": "eq", "value": "dev_from_task", "required": true },
+    { "field": "agent.run.entity_id", "operator": "ne", "value": "", "required": true },
+    { "field": "dev.dispatched", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.developer",
+      "role": "developer",
+      "model": "developer",
+      "tool_choice": { "mode": "function", "function_name": "apply_patch" },
+      "related_loops": {
+        "run-loop-entity-id": "$entity.triple.agent.run.entity_id"
+      },
+      "properties": {
+        "phase": "develop"
+      },
+      "prompt": "SEMDEV DEVELOPER (Amelia) — develop this run's current task and author the fix.\n\nYour run entity ID is $entity.triple.agent.run.entity_id. Read its state with query_entity(entity_id=\"$entity.triple.agent.run.entity_id\") — the immutable task specs (task.spec.<i>.*: goal, target files, test command, assumptions, non-goals). Implement the change the task requires, then author it as a unified diff (git format, a/ and b/ prefixes) and record it with apply_patch. The harness applies your diff to the run's checkout and measures the real result — you run nothing and claim no outcome. Calling apply_patch completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "dispatch-developer — spawn Amelia to author the fix via apply_patch (SB6)",
+    "trigger_rationale": "fires on the coordinator loop that decided dev_from_task (the decision lives on the loop). run_scope=inherit binds Amelia to the run so apply_patch targets its checkout.",
+    "role_rationale": "developer (Amelia; model_registry has a developer capability). tool_choice=function:apply_patch + nil tools (global discovery) forces the authoring call — an authoring turn, not routing or measuring. apply_patch stamps no fact (G3); the measure chain keys on this loop's terminal.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.dispatched marker + length_eq 0 guard (house pattern). publish_agent is not idempotent, so the one-shot is intrinsic (not reliant on RULE_STATE). Loop-scoped (not run-scoped) because this rule fires on the coordinator loop, where the decision is. Distinct from coordinator/02 (create_change, idempotent-replace, intentionally re-fires); re-dispatching Amelia would double-author.",
+    "retry_note": "the retry re-dispatch (group 7D) is the floors-gate on the run (failed attempt + budget remaining), a DISTINCT trigger — not this rule re-firing. The attempt counter task.attempt.<i> is appended at the developer-loop terminal (group 7B), distinct-object per attempt = the loop instance, so it counts every attempt including retries.",
+    "deferred_authoring_persona": "the developer loop inherits Amelia's full-loop persona (which speaks of running the task's test command and reading the harness), but 7A forces a single author-only apply_patch turn that StopLoops before any measure. Inert under the mock and mitigated by the per-turn prompt (author only, claim no outcome) + tool_choice=function; the persona is correct for the full 7B author→measure loop. Give authoring its own sub-role/prompt fragment before the first real-LLM token so the prose does not fight the forced turn (mirrors coordinator/02's deferral).",
+    "deferred_tool_scoping": "tools omitted = global discovery. Here tool_choice=function:apply_patch structurally constrains the call to apply_patch, so this is largely closed (unlike the mode=required re-wakes this note was adapted from); the residual is populating bootstrap allowed_tools + a scoped tools list, the coordinated MEDIUM-3 change before the first real-LLM token. Inert under the mock."
+  }
+}
