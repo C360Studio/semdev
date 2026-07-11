@@ -21,6 +21,7 @@ import (
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
+	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
@@ -135,16 +136,41 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", projecttasks.ToolName, err)
 	}
 
+	// The run's CHECKOUT + everything the dev-loop/verify tools read from it are the
+	// runspace seams (group 4): Checkouts (the per-run materialized working copy —
+	// measure_task/verify_artifact's Workspace), Manifests (the declared image + run
+	// fields — verify_artifact's semdev-init seam), and Attempts (the authored files for
+	// the floors). They are the concrete forge-io-checkout / semdev-init implementations
+	// the tools declared nil at M0. Wired only with a live client so the schema-scanning
+	// censuses keep a LITERAL-nil interface (a typed-nil would slip past the tools'
+	// nil-checks); Execute fails loudly if a seam is missing, and each seam fails closed
+	// when a run has no checkout (park toward the human, never a silent host-path guess).
+	var (
+		checkout  measuretask.Workspace    // measure_task's checkout root
+		checkout2 verifyartifact.Workspace // verify_artifact's checkout root
+		manifests verifyartifact.Manifests // verify_artifact's reproducibility manifest
+		attempts  checkfloors.Attempts     // check_floors' authored-attempt files
+	)
+	if deps.NATSClient != nil {
+		checkouts, cerr := runspace.NewCheckouts("")
+		if cerr != nil {
+			return fmt.Errorf("create run checkouts: %w", cerr)
+		}
+		checkout = checkouts
+		checkout2 = checkouts
+		manifests = runspace.Manifests{}
+		attempts = runspace.NewAttempts(factReader, checkouts)
+	}
+
 	// measure_task (harness-measurement) runs a projected task's IMMUTABLE
 	// task.spec.<i>.test_command and stamps the OS-level outcome as measurement.result
 	// (derived from the real exit code — G3). It reads the frozen command via the
 	// shared changefacts.Reader, runs it with the plain os/exec seam (cliexec.OSRunner,
 	// as validate_change does), and upserts the measurement via the shared
 	// OwnedFactWriter (its own Source, measurement-harness — G5-safe). WHERE the
-	// command runs — the run's checkout root — is the forge-io / clean-room workspace
-	// (nil here, schema-only like write_change's resolver; the group-11 journey injects
-	// a real one). Each nil dep makes Execute fail loudly, never silently drop a fact.
-	var checkout measuretask.Workspace // nil until the checkout seam lands
+	// command runs — the run's checkout root — is the runspace Checkouts seam above
+	// (container execution lands in group 4B). Each nil dep makes Execute fail loudly,
+	// never silently drop a fact.
 	if err := reg.RegisterExecutor(measuretask.New(factReader, cliexec.OSRunner{}, changeWriter, checkout, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
 	}
@@ -163,23 +189,20 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// verify_artifact (clean-room-verify) is the G4 gate: it provisions fresh
 	// isolation via the cleanroom Runner, runs the artifact's own resolve+test cold,
 	// judges the evidence with verify.Decide, and stamps verify.result. The Runner is
-	// always supplied (LocalRunner — M0 cache-home isolation); WHERE the artifact lives
-	// (the checkout) and HOW to prove it (the reproducibility manifest) are the forge-io
-	// checkout + semdev-init seams, nil at M0 (schema-only, like write_change). It writes
-	// via the shared OwnedFactWriter (its own Source, verify-harness — G5-safe). Execute
-	// fails loudly if any nil seam is missing.
-	var checkout2 verifyartifact.Workspace // nil until the checkout seam lands
-	var manifests verifyartifact.Manifests // nil until semdev init lands
+	// LocalRunner (M0 cache-home isolation; container execution lands in group 4B);
+	// WHERE the artifact lives (checkout2) and HOW to prove it (manifests) are the
+	// runspace seams wired above. It writes via the shared OwnedFactWriter (its own
+	// Source, verify-harness — G5-safe). Execute fails loudly if any nil seam is missing.
 	if err := reg.RegisterExecutor(verifyartifact.New(cleanroom.LocalRunner{}, checkout2, manifests, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
 	}
 
 	// check_floors (dev-from-task) is the floor-tools wrapper: it runs the pure floor
 	// library over a task's current attempt and stamps floor.finding. WHICH files the
-	// attempt authored is checkout/git state (the Attempts seam), nil at M0 (schema-
-	// only); it writes via the shared OwnedFactWriter (its own Source, floor-tools —
-	// G5-safe). Execute fails loudly if either seam is missing.
-	var attempts checkfloors.Attempts // nil until the bounded dev loop / checkout seam lands
+	// attempt authored is the runspace Attempts seam wired above (it reads the task's
+	// declared target files from the run's checkout). It writes via the shared
+	// OwnedFactWriter (its own Source, floor-tools — G5-safe). Execute fails loudly if
+	// either seam is missing.
 	if err := reg.RegisterExecutor(checkfloors.New(attempts, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", checkfloors.ToolName, err)
 	}

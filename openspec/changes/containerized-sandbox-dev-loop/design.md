@@ -313,6 +313,34 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   proof catches it before any dev run relies on it; parks toward the operator. The
   cold proof is the backstop that makes an operator-declared image trustworthy.
 
+### Group-4 seam carry-forwards (runspace, from the 4A review — settle before the live loop)
+
+- **[All-absent attempt reads green (SB5 theater)]** → the `Attempts` seam faithfully
+  reports which declared target files a dev iteration authored, but the five floors do
+  NOT reject an attempt that authored NONE of its targets (`tests-must-exist`/`anti-mock`
+  "do not apply" on an empty set → all pass → `check_floors` rejected=false). Before
+  `check_floors` runs against a live checkout (group 4B/7), add a PRESENCE gate — an
+  attempt whose declared `TargetFiles` are absent from `Files` must reject or park — in
+  `check_floors` / the floors (compare `len(Files)` vs `TargetFiles`), not the resolver.
+  Not reachable at M0 (the `go-health-class` fixture ships both target files; the loop is
+  not yet live).
+- **[Checkout restart-safety + destructive re-materialize]** → a run's checkout is
+  in-memory infra (lost on restart) and `Materialize` is idempotent-destructive (a new
+  copy replaces the prior). Two contracts the provision rule (SB7) must honor: (a) its
+  self-extinguishing absence guard must key on the physical checkout STILL EXISTING (a
+  lost in-memory checkout after a restart must re-provision, not stay parked on the
+  fired-once marker); (b) it must NOT re-materialize mid-loop (that would discard
+  apply_patch's in-progress work, SB6). Fail-closed-on-missing is the correct posture; the
+  open question is the recovery path (re-materialize-on-restart vs park-and-human-retrigger).
+- **[Symlink containment is lexical at M0]** → `copyTree` skips symlinks (closing the
+  escape surface for the M0 local copy) and `safeJoin` is a lexical `filepath.Rel` check.
+  When the M2 real `--recursive` clone preserves symlinks, add `EvalSymlinks`-based
+  containment (or `O_NOFOLLOW`) so a symlink-based path escape cannot slip past.
+- **[Checkout temp-dir leak]** → `Checkouts` has no teardown wired; materialized `run-*`
+  dirs and the per-process base leak for the process lifetime (M0-acceptable, journey-
+  driven/short-lived). Wire a `Close`/reap when the runtime lifecycle owns the checkouts
+  (group 5).
+
 ## Migration Plan
 
 Infra-first sequence (each rung proven before the next):

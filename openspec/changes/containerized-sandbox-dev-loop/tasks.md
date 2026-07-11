@@ -22,9 +22,9 @@
 
 ## 4. Wire the nil seams to the container
 
-- [ ] 4.1 `Manifests` seam → resolve the declared image + run fields for a run
-- [ ] 4.2 `Workspace` seam → resolve the run's container checkout root (for `measure_task`)
-- [ ] 4.3 `Attempts` seam → resolve the developer's authored diff/files in the checkout (for `check_floors`)
+- [x] 4.1 `Manifests` seam → resolve the declared image + run fields for a run
+- [x] 4.2 `Workspace` seam → resolve the run's container checkout root (for `measure_task`)
+- [x] 4.3 `Attempts` seam → resolve the developer's authored diff/files in the checkout (for `check_floors`)
 - [ ] 4.4 `measure_task` / `check_floors` / `verify_artifact` execute against the container checkout via these seams (SB4/SB6)
 
 ## 5. Provision-and-prove-cold station (rule-owned, G2)
