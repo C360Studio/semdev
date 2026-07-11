@@ -22,6 +22,7 @@ import (
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
+	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
@@ -159,6 +160,10 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		provSources   provisionsandbox.Sources
 		provCheckouts provisionsandbox.Checkouts
 		provManifests provisionsandbox.Manifests
+		// apply_patch (group 6) MUTATES the run's checkout — the same instance provision
+		// stood up and measure/verify read, so the developer's authored diff lands in the
+		// checkout the loop then measures.
+		patcher applypatch.Patcher
 	)
 	if deps.NATSClient != nil {
 		checkouts, cerr := runspace.NewCheckouts("")
@@ -176,6 +181,9 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		provSources = runspace.StaticSource{Dir: sandboxSourceDir}
 		provCheckouts = checkouts
 		provManifests = runspace.Manifests{}
+		// git apply runs on the host checkout root (= the container's /work bind-mount),
+		// so the plain os/exec runner authors into the sandbox the loop measures.
+		patcher = runspace.NewPatcher(checkouts, cliexec.OSRunner{})
 	}
 
 	// measure_task (harness-measurement) runs a projected task's IMMUTABLE
@@ -234,6 +242,15 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// prove is a park, never a silent skip (SB5).
 	if err := reg.RegisterExecutor(provisionsandbox.New(provSources, provCheckouts, provManifests, provisionsandbox.DefaultProver(), nil, factReader, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", provisionsandbox.ToolName, err)
+	}
+
+	// apply_patch (sandbox, SB6) is the developer's code-authoring tool: it applies a
+	// unified diff to the run's checkout path-guarded to inside it (never the host) and
+	// reports the touched files. It measures no outcome (G3) and stamps no fact (G2) —
+	// the dev loop's measure_task/floors read the mutated checkout. Nil patcher (the
+	// census) makes Execute fail loudly.
+	if err := reg.RegisterExecutor(applypatch.New(patcher, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", applypatch.ToolName, err)
 	}
 
 	return nil

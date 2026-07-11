@@ -52,6 +52,10 @@ var regressionManifest = []struct {
 		"the operator-declared image proves the repo resolves+builds COLD before the dev loop relies on it; a fabricated dependency fails cold and parks — never a pass over an unproven sandbox (the make-or-break both donors died on)"},
 	{"G4", "test/fixtures/fixtures_test.go", []string{"TestGoHealthClassCompilesButTestsFail", "TestFabricatedVariantNotReady"},
 		"the committed fixture is a real module with a real failing test (builds but tests red); its cache-masked-fabrication variant is rejected cold on the committed artifact"},
+	{"SB6", "internal/runspace/patcher_test.go", []string{"TestPatcherRejectsPathEscape", "TestPatcherFailsClosedWithoutCheckout"},
+		"apply_patch's containment: a diff that escapes the checkout is rejected before git runs (nothing lands on the host) and a run with no materialized checkout fails closed — the security guarantee g7's in-container refactor must not silently drop"},
+	{"SB6", "internal/runspace/patcher_fixture_test.go", []string{"TestPatcherFixesFixtureRedToGreen"},
+		"apply_patch authors the fixture's REAL fix and the previously-failing go test goes green — the author→measure loop proven against real code, not a claim (the non-theater proof)"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if

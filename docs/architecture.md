@@ -59,6 +59,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
 | `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
 | `provision_sandbox` | tool | sandbox | `provision-sandbox-tool` |
+| `apply_patch` | tool | sandbox | `apply-patch-tool` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

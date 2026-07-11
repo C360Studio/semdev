@@ -36,8 +36,8 @@
 
 ## 6. apply_patch (the developer authors)
 
-- [ ] 6.1 `apply_patch` tool: schema takes only patch/target (no outcome, G3); applies to the run's checkout path-guarded to `/work` (reject escape); registered (G1 entry + note + G5 writer if it stamps)
-- [ ] 6.2 Red-first: apply_patch cannot write outside the checkout; the measured pass/fail is the command's real exit status, not model-supplied (G3)
+- [x] 6.1 `apply_patch` tool (`internal/tools/applypatch`): schema takes only the unified `diff` (no outcome, G3); the `runspace.Patcher` seam resolves the run's checkout, PATH-GUARDS every touched file to inside it (`safeJoin`, reject `..`/absolute — `git apply`'s own escape rejection is the backstop), then applies via `git apply -p1` on the host checkout root (= the container `/work` bind-mount). Registered (G1 entry + `apply-patch-tool` note); stamps NO fact so no G5 writer (G2 — the loop's measure/floors read the mutated checkout)
+- [x] 6.2 Red-first: `TestPatcherRejectsPathEscape` (a `../` diff is rejected before git runs and nothing lands on the host) + `TestPatcherReportsApplyConflict`/`TestPatcherFailsClosedWithoutCheckout` + the tool's G3 schema pin (`TestApplySchemaTakesOnlyDiff` — only `diff`, no outcome field). Rename/copy diffs are rejected at M0 (paths the parser can't fully enumerate); the measured pass/fail stays a separate harness measurement (measure_task, g7)
 
 ## 7. Dev loop in the sandbox
 

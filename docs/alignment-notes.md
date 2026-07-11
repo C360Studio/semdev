@@ -406,3 +406,31 @@ Template:
   writer of the `sandbox.ready/.blocked/.attestation.*` package (`sandbox-provisioner`).
 - **Registry entry:** `provision_sandbox` (`tool`)
 - **Change:** containerized-sandbox-dev-loop
+
+## apply-patch-tool
+
+- **Primitive considered:** a persona that "edits the files" and reports success, or
+  reusing the framework `bash`/file-write tools to let the developer mutate the tree.
+- **Why it cannot express this:** authoring code was the mechanism semdev entirely
+  lacked (both predecessors let the model CLAIM a fix rather than land one). No rule
+  can apply a unified diff or read a git-apply exit code; and a general file-write
+  tool is exactly the "model writes wherever it wants, then asserts it works" hole —
+  it would let the developer escape the checkout AND supply its own outcome. So a thin
+  tool (`internal/tools/applypatch`) wraps the `runspace.Patcher` seam: the developer
+  emits a unified diff, the harness PATH-GUARDS every touched file to inside the run's
+  checkout (`safeJoin` — a `..`/absolute target is rejected before git runs; `git apply`'s
+  own escape protection is the backstop, not the guard) and applies it with `git apply
+  -p1`. The checkout is the host dir bind-mounted at the container's `/work`, so applying
+  on the host root IS authoring in the sandbox the dev loop (measure/floors, in-container
+  at g7) then reads.
+- **G3 (the load-bearing property):** the schema takes ONLY the diff — never a pass/fail
+  or "it works" field. The developer supplies the intelligence (the change); whether the
+  task then passes is a SEPARATE harness measurement (`measure_task`), so a developer can
+  never assert its own change works. A rejected diff (escape, malformed, or a clean-apply
+  conflict) is a tool error the developer re-authors from, not a silent success.
+- **Fact shape:** none — apply_patch stamps NO graph fact and fires no transition (G2).
+  It is a pure checkout mutation; the dev-loop bookkeeping (`task.attempt`) and the
+  measured outcome (`measurement.result`) are stamped by their own harnesses in the loop
+  (g7). No G5 writer (it writes no fact).
+- **Registry entry:** `apply_patch` (`tool`)
+- **Change:** containerized-sandbox-dev-loop

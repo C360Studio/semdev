@@ -1,14 +1,16 @@
-// Package cliexec is the thin exec seam semdev uses to shell out to the real
-// OpenSpec CLI as a deterministic compatibility oracle — `openspec validate` (the
-// validate step) and, at M1, `openspec archive`. It exists so those steps depend
-// on an interface, not os/exec directly, and can be unit-tested with a scripted
+// Package cliexec is the thin exec seam semdev uses to shell out to a local, TRUSTED
+// command and read its exit code as data. Its consumers: the OpenSpec CLI
+// compatibility oracle — `openspec validate` (the validate step) and, at M1,
+// `openspec archive` — and `git apply` (the apply_patch code-authoring seam, group 6,
+// which applies a developer's diff to the run's checkout). It exists so those steps
+// depend on an interface, not os/exec directly, and can be unit-tested with a scripted
 // runner (no CLI, no filesystem) while production runs the real binary.
 //
 // It is deliberately DISTINCT from the clean-room verification Runner (group 8):
 // that seam provisions fresh product-build isolation to PROVE the delivered
-// artifact; this one only shells a local, trusted oracle CLI to read its exit
-// code. Keeping them separate avoids conflating "run the sponsor's validator" with
-// "prove the product in a cold sandbox" — different trust and isolation contracts.
+// artifact; this one only shells a local, trusted command to read its exit code.
+// Keeping them separate avoids conflating "run a trusted local tool" with "prove the
+// product in a cold sandbox" — different trust and isolation contracts.
 //
 // A non-zero exit is DATA, not an error: Run returns the captured Result (with the
 // real ExitCode) and a nil error whenever the process ran to completion, so the
