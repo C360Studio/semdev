@@ -67,7 +67,12 @@ func RegisterAll(reg *component.Registry) error {
 // (cmd/*) reads os.Getenv("GITHUB_TOKEN") at the composition edge and passes it in.
 // (The framework's own RegisterBuiltins still reads GITHUB_TOKEN internally for its
 // github_read/write tools — that is framework behavior, outside this seam.)
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, sandboxSourceDir string) error {
+//
+// sandboxes is the run-scoped WARM dev-container registry (created by the runtime so
+// Stop can reap it): provision_sandbox writes to it, measure_task reads from it. The
+// census passes nil so those seams stay literal-nil and the tools register
+// schema-only; the live boot passes the shared instance.
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, sandboxSourceDir string, sandboxes *runspace.Sandboxes) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -148,18 +153,26 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// nil-checks); Execute fails loudly if a seam is missing, and each seam fails closed
 	// when a run has no checkout (park toward the human, never a silent host-path guess).
 	var (
-		checkout  measuretask.Workspace    // measure_task's checkout root
 		checkout2 verifyartifact.Workspace // verify_artifact's checkout root
 		manifests verifyartifact.Manifests // verify_artifact's reproducibility manifest
 		attempts  checkfloors.Attempts     // check_floors' authored-attempt files
-		// provision_sandbox (group 5) stands the checkout UP: it materializes the
-		// run's fresh copy from its source and cold-proves the declared image. It
-		// shares the SAME *runspace.Checkouts instance the Workspace seams above use,
-		// so the checkout it materializes is exactly the one measure_task/verify later
-		// resolve — one run, one on-disk working copy.
+		// measure_task (group 7B) runs the frozen test command IN the run's WARM sandbox
+		// container — provision_sandbox stood it up over the checkout. The warm-sandbox
+		// registry is the SAME *runspace.Sandboxes instance provision writes to and
+		// measure reads from (one run, one warm container), passed in so the runtime can
+		// reap it on Stop.
+		measureSandboxes measuretask.Sandboxes
+		// provision_sandbox (group 5/7B) stands the checkout UP and, on a proven-cold
+		// baseline, stands the WARM dev container up: it materializes the run's fresh
+		// copy from its source (provCheckouts, from provSources), cold-proves the
+		// declared image, then leaves the warm container Up (provWarmers) for the loop.
+		// It shares the SAME *runspace.Checkouts instance the Workspace seams use, so the
+		// checkout it materializes is exactly the one measure_task/verify later resolve —
+		// one run, one on-disk working copy.
 		provSources   provisionsandbox.Sources
 		provCheckouts provisionsandbox.Checkouts
 		provManifests provisionsandbox.Manifests
+		provWarmers   provisionsandbox.Warmers
 		// apply_patch (group 6) MUTATES the run's checkout — the same instance provision
 		// stood up and measure/verify read, so the developer's authored diff lands in the
 		// checkout the loop then measures.
@@ -170,10 +183,13 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		if cerr != nil {
 			return fmt.Errorf("create run checkouts: %w", cerr)
 		}
-		checkout = checkouts
 		checkout2 = checkouts
 		manifests = runspace.Manifests{}
 		attempts = runspace.NewAttempts(factReader, checkouts)
+		// The warm-sandbox registry (created by the runtime and passed in so Stop can
+		// reap it) is shared by provision (writer) and measure (reader).
+		measureSandboxes = sandboxes
+		provWarmers = sandboxes
 		// The run's SOURCE (what to materialize the checkout from) is a StaticSource at
 		// M0 — the operator-configured target dir (the in-repo fixture the journey
 		// drives); forge-io's per-run `--recursive` PR clone lands behind this seam at
@@ -189,13 +205,14 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// measure_task (harness-measurement) runs a projected task's IMMUTABLE
 	// task.spec.<i>.test_command and stamps the OS-level outcome as measurement.result
 	// (derived from the real exit code — G3). It reads the frozen command via the
-	// shared changefacts.Reader, runs it with the plain os/exec seam (cliexec.OSRunner,
-	// as validate_change does), and upserts the measurement via the shared
-	// OwnedFactWriter (its own Source, measurement-harness — G5-safe). WHERE the
-	// command runs — the run's checkout root — is the runspace Checkouts seam above
-	// (container execution lands in group 4B). Each nil dep makes Execute fail loudly,
-	// never silently drop a fact.
-	if err := reg.RegisterExecutor(measuretask.New(factReader, cliexec.OSRunner{}, changeWriter, checkout, deps.Logger)); err != nil {
+	// shared changefacts.Reader, Execs it IN the run's warm sandbox container
+	// (measureSandboxes — provision_sandbox stood it up over the checkout apply_patch
+	// wrote), and upserts the measurement via the shared OwnedFactWriter (its own
+	// Source, measurement-harness — G5-safe). Measuring in-container is the make-or-break:
+	// the outcome is of the artifact built cold in the operator-declared image, never a
+	// host process over an unproven environment. Each nil dep makes Execute fail loudly;
+	// an unprovisioned sandbox makes Resolve fail closed (park) — never a silent host exec.
+	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
 	}
 
@@ -233,14 +250,15 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 
 	// provision_sandbox (sandbox) is the provision-and-prove-cold station: on an
 	// approved run a rule forces it to materialize the run's checkout (provCheckouts,
-	// from provSources), build the operator-declared image (provManifests), and prove
-	// the repo builds COLD (DefaultProver → coldproof.ProveBaseline), then stamp the
-	// derived sandbox.ready/attestation or a sandbox.blocked reason (G3). It shares
-	// the run's changefacts.Reader (idempotency guard) and the OwnedFactWriter (its
-	// own Source, sandbox-provisioner — G5-safe). store is nil at M0 (no governed
-	// secrets, SB2c). Each nil seam makes Execute fail loudly — a sandbox it cannot
-	// prove is a park, never a silent skip (SB5).
-	if err := reg.RegisterExecutor(provisionsandbox.New(provSources, provCheckouts, provManifests, provisionsandbox.DefaultProver(), nil, factReader, changeWriter, deps.Logger)); err != nil {
+	// from provSources), build the operator-declared image (provManifests), prove the
+	// repo builds COLD (DefaultProver → coldproof.ProveBaseline), and — on a proven
+	// baseline — stand up the WARM dev container the loop measures in (provWarmers, the
+	// shared Sandboxes), then stamp the derived sandbox.ready/attestation or a
+	// sandbox.blocked reason (G3). It shares the run's changefacts.Reader (idempotency
+	// guard) and the OwnedFactWriter (its own Source, sandbox-provisioner — G5-safe).
+	// store is nil at M0 (no governed secrets, SB2c). Each nil seam makes Execute fail
+	// loudly — a sandbox it cannot prove or stand up is a park, never a silent skip (SB5).
+	if err := reg.RegisterExecutor(provisionsandbox.New(provSources, provCheckouts, provManifests, provWarmers, provisionsandbox.DefaultProver(), nil, factReader, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", provisionsandbox.ToolName, err)
 	}
 

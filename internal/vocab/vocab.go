@@ -47,7 +47,20 @@ var Predicates = []Predicate{
 	{"openspec.validated", "openspec-validate-harness", "openspec-io", m0},
 	{"openspec.archived", "openspec-archive-harness", "openspec-io", m0},
 	{"task.spec.*", "task-projector", "dev-from-task", m0},
-	{"task.attempt", "dev-loop-harness", "dev-from-task", m0},
+	// task.attempt.* is the PER-TASK attempt counter: the measure-trigger rule
+	// (dev-from-task/05) appends one triple per attempt on the developer-loop terminal,
+	// object = the developer loop instance (distinct per attempt). A rule add_triple
+	// goes through graph-ingest's UNCONDITIONAL append (no property-replace, no
+	// set-dedup — verified against Component.AddTriple), and the mutation is at-least-
+	// once (a lost NATS ack retries and double-appends). So the group-7D budget gate
+	// MUST count DISTINCT OBJECTS of task.attempt.<i> (the loop instance) against
+	// task.spec.<i>.budget — never raw triple cardinality: distinct-object counting is
+	// robust to the retry double-append AND counts every real attempt (the dev.measured
+	// marker already bounds it to one append per developer loop in the normal path). A
+	// NAMESPACE (task.attempt.<i>) so the count is per-task, not global — realized by
+	// the sandbox change's dev loop (group 7B); the NAME was reserved in m0's founding
+	// dev-loop vocabulary.
+	{"task.attempt.*", "dev-measure-rule", "dev-from-task", m0},
 	{"floor.finding.*", "floor-tools", "dev-from-task", m0},
 	{"measurement.result.*", "measurement-harness", "harness-measurement", m0},
 	{"review.verdict.*", "reviewer-quinn", "harness-measurement", m0},
@@ -69,6 +82,12 @@ var Predicates = []Predicate{
 	// decision it consumed, so a graph replay cannot re-spawn Amelia (self-extinguishing,
 	// loop-scoped like the run.*_kickoff markers are run-scoped).
 	{"dev.dispatched", "dev-dispatch-rule", "dev-from-task", sandbox},
+	// dev.measured is the fired-once marker the measure-trigger rule (dev-from-task/05)
+	// stamps on the DEVELOPER loop whose successful terminal it consumed, so a graph
+	// replay cannot re-spawn a duplicate measure loop (self-extinguishing, loop-scoped
+	// like dev.dispatched). A fresh developer loop per retry carries no marker, so each
+	// attempt re-measures for free.
+	{"dev.measured", "dev-measure-rule", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

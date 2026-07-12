@@ -24,22 +24,28 @@
 // job (a separate writer), not this fact's.
 //
 // The tool fires no lifecycle transition (G2): it records evidence; a rule reading
-// the review verdict advances the run. WHERE the command runs — the run's checked-
-// out workspace — is runtime state the forge-io checkout / clean-room Runner own; a
-// narrow Workspace seam resolves it, nil (schema-only) at M0 like write_change's
-// resolver, and Execute fails loudly if any dependency is missing so a measurement
-// is never silently dropped.
+// the review verdict advances the run. WHERE the command runs — the run's WARM
+// sandbox container — is runtime state provision_sandbox stood up (design SB4): the
+// tool Execs the frozen command into that container (over the checkout the
+// developer's apply_patch wrote, bind-mounted at /work), so the measurement is of
+// the artifact BUILT COLD in the operator-declared image, never a host process over
+// an unproven environment (the semspec disease). A narrow Sandboxes seam resolves
+// the warm container, nil (schema-only) at M0 like the other tools' resolvers, and
+// Execute fails loudly if any dependency is missing so a measurement is never
+// silently dropped — and FAILS CLOSED (parks) if no sandbox was provisioned.
 package measuretask
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"time"
 
 	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/measurement"
@@ -57,37 +63,38 @@ const ToolName = "measure_task"
 const Source = "measurement-harness"
 
 // measureTimeout bounds one test_command run. A hung suite is killed by the
-// deadline and surfaces (via cliexec) as a non-completion, which measures as
-// not-passed rather than blocking the loop forever.
+// deadline and surfaces (via the container exec's ctx cancellation) as a
+// non-completion, which measures as not-passed rather than blocking the loop forever.
 const measureTimeout = 10 * time.Minute
 
-// Workspace resolves the on-disk checkout ROOT of a run's target-repo workspace —
-// the directory the task's test_command runs in. It is the seam over the checkout
-// (the same run-scoped state write_change's resolver locates the change dir
-// within); its production implementation lands with forge-io / the clean-room
-// Runner. measure_task depends only on this narrow surface so it holds no
-// workspace state of its own (B1).
-type Workspace interface {
-	Root(ctx context.Context, runEntityID string) (string, error)
+// Sandboxes resolves the run's WARM sandbox container — the Runner + provisioned
+// Sandbox the frozen test_command Execs into. provision_sandbox stood it up (over
+// the checkout apply_patch wrote, bind-mounted at /work) and it lives across the dev
+// loop's iterations (SB4); nil at M0 schema-only registration. measure_task holds no
+// container/checkout state of its own (B1) — it only resolves and Execs. Resolve
+// FAILS CLOSED when nothing is provisioned, so a measurement is never taken over an
+// unproven environment (SB5).
+type Sandboxes interface {
+	Resolve(ctx context.Context, runEntityID string) (cleanroom.Runner, cleanroom.Sandbox, error)
 }
 
-// Executor reads a task's frozen test_command, runs it, and stamps the measurement.
+// Executor reads a task's frozen test_command, runs it in the run's warm sandbox,
+// and stamps the measurement.
 type Executor struct {
 	reader    changefacts.Reader
-	runner    cliexec.Runner
+	sandboxes Sandboxes
 	writer    agentictools.OwnedFactWriter
-	workspace Workspace
 	logger    *slog.Logger
 }
 
-// New builds the measure_task executor. reader/runner/writer/workspace may be nil
-// for schema-only registration (the tool censuses inspect ListTools without a live
-// NATS client or a checked-out workspace); Execute fails loudly if any is nil.
-func New(reader changefacts.Reader, runner cliexec.Runner, writer agentictools.OwnedFactWriter, workspace Workspace, logger *slog.Logger) *Executor {
+// New builds the measure_task executor. reader/sandboxes/writer may be nil for
+// schema-only registration (the tool censuses inspect ListTools without a live NATS
+// client or a provisioned sandbox); Execute fails loudly if any is nil.
+func New(reader changefacts.Reader, sandboxes Sandboxes, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{reader: reader, runner: runner, writer: writer, workspace: workspace, logger: logger}
+	return &Executor{reader: reader, sandboxes: sandboxes, writer: writer, logger: logger}
 }
 
 type payload struct {
@@ -101,8 +108,8 @@ type payload struct {
 // fails toward the human if the task was never projected. It stamps no outcome from
 // the caller (G3) and fires no transition (G2).
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.reader == nil || e.runner == nil || e.writer == nil || e.workspace == nil {
-		return errResult(call, agentic.ToolErrorInternal, "measure_task: harness not fully wired (reader/runner/writer/workspace)")
+	if e.reader == nil || e.sandboxes == nil || e.writer == nil {
+		return errResult(call, agentic.ToolErrorInternal, "measure_task: harness not fully wired (reader/sandboxes/writer)")
 	}
 	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
 	if !ok || runEntityID == "" {
@@ -134,20 +141,34 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 			"measure_task: task.spec.%d has no test_command on %s — was the change projected (project_tasks)?", idx, runEntityID)
 	}
 
-	root, err := e.workspace.Root(ctx, runEntityID)
+	// Resolve the run's WARM sandbox — provision_sandbox stood it up over the checkout
+	// the developer's apply_patch wrote (bind-mounted at /work). Resolve FAILS CLOSED
+	// if none was provisioned, so the run parks rather than measuring over an unproven
+	// environment (SB5) — the tool never falls back to a host exec.
+	runner, sb, err := e.sandboxes.Resolve(ctx, runEntityID)
 	if err != nil {
-		return errResult(call, agentic.ToolErrorInternal, "measure_task: resolve workspace root: %v", err)
+		return errResult(call, agentic.ToolErrorInternal, "measure_task: resolve run sandbox: %v", err)
 	}
 
-	// Run the frozen command through a shell so an authored command line (`go test
-	// ./...`, `make check`) executes as written; the exit code the shell propagates
-	// is the harness verdict. A non-completion (missing binary, timeout) comes back
-	// as a runner error, which Measure folds into ran=false / passed=false.
+	// Run the frozen command through a shell IN the sandbox container so an authored
+	// command line (`go test ./...`, `make check`) executes as written; the in-container
+	// exit code the shell propagates is the harness verdict. A non-completion (the
+	// container could not run the command, or the deadline cancelled it) comes back as
+	// a runner error, which Measure folds into ran=false / passed=false — the seam's
+	// exit-vs-transport contract keeps a dead container from false-greening.
 	runCtx, cancel := context.WithTimeout(ctx, measureTimeout)
 	defer cancel()
-	res, runErr := e.runner.Run(runCtx, root, "sh", "-c", command)
+	res, runErr := runner.Exec(runCtx, sb, []string{"sh", "-c", command})
 
-	result := measurement.Measure(strconv.Itoa(idx), command, res, runErr)
+	// Map the neutral cleanroom result onto the measurement seam. A timeout in the
+	// container path arrives as a run error (the deadline cancelled the exec), which
+	// Measure already folds into ran=false / passed=false — so the gate is correct
+	// regardless. We ALSO derive timed_out here (the container Result carries no such
+	// flag) so a timeout stays distinguishable in the graph facts from a missing-binary
+	// / dead-container transport fault, both of which are ran=false otherwise.
+	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
+	result := measurement.Measure(strconv.Itoa(idx), command,
+		cliexec.Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, TimedOut: timedOut}, runErr)
 	out := measurementTriples(runEntityID, idx, result, time.Now().UTC())
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "measure_task: stamp measurement.result.%d on %s: %v", idx, runEntityID, err)
@@ -171,7 +192,12 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		"stdout":     result.Stdout,
 		"stderr":     result.Stderr,
 	})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
+	// StopLoop: the measure-trigger rule (dev-from-task/05) forces a single-turn
+	// measure loop; ending the turn here is what keeps it one model call (mirrors
+	// project_tasks/create_change/validate). A non-zero measurement is DATA, not a
+	// tool error — it ends the turn as a success too; the loop gate reads the stamped
+	// measurement.result, not this StopLoop, to decide advance/retry.
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
 // readTestCommand reads the frozen task.spec.<idx>.test_command off the run entity.

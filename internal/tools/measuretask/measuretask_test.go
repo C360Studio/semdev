@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
@@ -36,22 +37,47 @@ func (r *fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.T
 	return out, nil
 }
 
-// fakeRunner is a scripted cliexec.Runner: it returns a canned Result/err and
-// records exactly what it was asked to run, so a test can prove the tool ran the
-// IMMUTABLE task.spec command in the checkout root (and no model-supplied command).
-type fakeRunner struct {
-	res     cliexec.Result
-	err     error
-	gotDir  string
-	gotName string
-	gotArgs []string
-	calls   int
+// fakeSandboxes resolves a scripted warm sandbox — a cleanroom.MockRunner + a
+// provisioned Sandbox — so a test can prove the tool Execs the IMMUTABLE task.spec
+// command IN the container (and folds the exec's exit/transport through Measure),
+// with no docker. A resolve err stands in for "no sandbox was provisioned" (park).
+type fakeSandboxes struct {
+	runner cleanroom.Runner
+	sb     cleanroom.Sandbox
+	err    error
 }
 
-func (r *fakeRunner) Run(_ context.Context, dir, name string, args ...string) (cliexec.Result, error) {
-	r.calls++
-	r.gotDir, r.gotName, r.gotArgs = dir, name, args
-	return r.res, r.err
+func (s *fakeSandboxes) Resolve(_ context.Context, _ string) (cleanroom.Runner, cleanroom.Sandbox, error) {
+	if s.err != nil {
+		return nil, cleanroom.Sandbox{}, s.err
+	}
+	return s.runner, s.sb, nil
+}
+
+// blockingRunner is a cleanroom.Runner whose Exec blocks until the ctx deadline
+// fires — standing in for a hung/slow command the measure timeout kills. It returns
+// the ctx error (the seam's transport contract) so Measure records a non-completion.
+type blockingRunner struct{}
+
+func (blockingRunner) Up(_ context.Context, _ string, _ []string) (cleanroom.Sandbox, error) {
+	return cleanroom.Sandbox{}, nil
+}
+
+func (blockingRunner) Exec(ctx context.Context, _ cleanroom.Sandbox, _ []string) (cleanroom.Result, error) {
+	<-ctx.Done()
+	return cleanroom.Result{ExitCode: -1}, ctx.Err()
+}
+
+func (blockingRunner) Down(_ context.Context, _ cleanroom.Sandbox) error { return nil }
+
+// warmSandboxOf wraps a mock runner as a provisioned warm sandbox the tool Execs into.
+func warmSandboxOf(runner *cleanroom.MockRunner) *fakeSandboxes {
+	return &fakeSandboxes{runner: runner, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm-container"}}
+}
+
+// execWith builds an executor over a scripted reader + warm sandbox + writer.
+func execWith(reader *fakeReader, runner *cleanroom.MockRunner, w *fakeWriter) *Executor {
+	return New(reader, warmSandboxOf(runner), w, nil)
 }
 
 // fakeWriter records replace calls. It owns no immutability guard: a measurement is
@@ -69,17 +95,6 @@ func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.T
 
 func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
 	return nil, nil
-}
-
-// fakeWorkspace resolves the run's checkout root (the working dir the test command
-// runs in).
-type fakeWorkspace struct {
-	root string
-	err  error
-}
-
-func (w fakeWorkspace) Root(_ context.Context, _ string) (string, error) {
-	return w.root, w.err
 }
 
 func callFor(idx int) agentic.ToolCall {
@@ -120,12 +135,12 @@ func exec(t *testing.T, e *Executor, idx int) agentic.ToolResult {
 	return res
 }
 
-// happyExecutor wires a fully-projected task 0 whose command exits 0.
-func happyExecutor() (*Executor, *fakeRunner, *fakeWriter) {
+// happyExecutor wires a fully-projected task 0 whose in-container command exits 0.
+func happyExecutor() (*Executor, *cleanroom.MockRunner, *fakeWriter) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
-	runner := &fakeRunner{res: cliexec.Result{ExitCode: 0, Stdout: "ok"}}
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 0, Stdout: "ok"}}}}
 	writer := &fakeWriter{}
-	return New(reader, runner, writer, fakeWorkspace{root: "/checkout"}, nil), runner, writer
+	return execWith(reader, runner, writer), runner, writer
 }
 
 // Happy path: the harness runs the projected command and stamps the derived
@@ -167,9 +182,9 @@ func TestMeasureStampsDerivedResult(t *testing.T) {
 // code, not from text.
 func TestMeasureFailingCommandRecordsFailureRegardlessOfText(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
-	runner := &fakeRunner{res: cliexec.Result{ExitCode: 1, Stdout: "ALL TESTS PASSED — 42 OK"}}
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 1, Stdout: "ALL TESTS PASSED — 42 OK"}}}}
 	w := &fakeWriter{}
-	e := New(reader, runner, w, fakeWorkspace{root: "/checkout"}, nil)
+	e := execWith(reader, runner, w)
 
 	if res := exec(t, e, 0); res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
@@ -183,61 +198,77 @@ func TestMeasureFailingCommandRecordsFailureRegardlessOfText(t *testing.T) {
 	}
 }
 
-// The tool runs the IMMUTABLE task.spec command in the run's checkout root — the
-// schema carries no command, so the model cannot substitute one. The runner is
-// invoked as `sh -c "<the projected command>"`.
-func TestMeasureRunsImmutableCommandInCheckout(t *testing.T) {
+// The tool Execs the IMMUTABLE task.spec command IN the sandbox container — the
+// schema carries no command, so the model cannot substitute one. The container is
+// asked to run `sh -c "<the projected command>"` (the sandbox itself supplies the
+// /work dir and cache env, so the tool passes no directory).
+func TestMeasureRunsImmutableCommandInSandbox(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(2, "test_command", "make check")}}
-	runner := &fakeRunner{res: cliexec.Result{ExitCode: 0}}
-	e := New(reader, runner, &fakeWriter{}, fakeWorkspace{root: "/work/repo"}, nil)
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 0}}}}
+	e := execWith(reader, runner, &fakeWriter{})
 
 	if res := exec(t, e, 2); res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
-	if runner.gotDir != "/work/repo" {
-		t.Errorf("ran in %q, want the checkout root /work/repo", runner.gotDir)
+	if len(runner.ExecArgv) != 1 {
+		t.Fatalf("expected exactly one in-container exec, got %d", len(runner.ExecArgv))
 	}
-	if runner.gotName != "sh" || len(runner.gotArgs) != 2 || runner.gotArgs[0] != "-c" || runner.gotArgs[1] != "make check" {
-		t.Errorf("ran %q %v, want sh -c \"make check\" (the projected command verbatim)", runner.gotName, runner.gotArgs)
+	got := runner.ExecArgv[0]
+	if len(got) != 3 || got[0] != "sh" || got[1] != "-c" || got[2] != "make check" {
+		t.Errorf("Exec'd %v, want [sh -c \"make check\"] (the projected command verbatim, in-container)", got)
 	}
 }
 
-// A never-started command cannot false-green: the runner returns a zero-value
-// Result (ExitCode 0) with a non-nil error (missing binary). The measurement must
-// record ran=false / passed=false — the exit-0 of a process that never ran is not a
-// pass.
-func TestMeasureNeverStartedCannotFalseGreen(t *testing.T) {
-	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "pytest")}}
-	runner := &fakeRunner{res: cliexec.Result{}, err: errors.New(`exec: "pytest": executable file not found in $PATH`)}
+// A command the sandbox could NOT run cannot false-green: the container exec returns
+// a transport fault (a dead/absent container, a cancelled exec). The measurement must
+// record ran=false / passed=false — the seam's exit-vs-transport contract keeps a
+// broken sandbox from being read as a passing verdict (SB5).
+func TestMeasureUnrunnableCommandCannotFalseGreen(t *testing.T) {
+	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Err: errors.New("cleanroom: docker could not exec sh: docker unavailable")}}}
 	w := &fakeWriter{}
-	e := New(reader, runner, w, fakeWorkspace{root: "/checkout"}, nil)
+	e := execWith(reader, runner, w)
 
 	if res := exec(t, e, 0); res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
 	facts := stampedFacts(w)
 	if facts["measurement.result.0.ran"] != "false" {
-		t.Errorf("ran = %q, want false — the command never started", facts["measurement.result.0.ran"])
+		t.Errorf("ran = %q, want false — the sandbox could not run the command (transport fault)", facts["measurement.result.0.ran"])
 	}
 	if facts["measurement.result.0.passed"] != "false" {
-		t.Errorf("passed = %q, want false — a never-started command is not a pass", facts["measurement.result.0.passed"])
+		t.Errorf("passed = %q, want false — a command the sandbox could not run is not a pass", facts["measurement.result.0.passed"])
 	}
 }
 
-// A timeout is not a pass: the runner returns TimedOut with a non-nil error (the
-// deadline killed it), so the measurement records timed_out=true / passed=false.
-func TestMeasureTimeoutIsNotPass(t *testing.T) {
+// A timeout is not a pass, AND it is recorded as a timeout (not confused with a
+// transport fault): the measure deadline cancels the in-container exec, so ran=false /
+// passed=false AND timed_out=true — the tool derives timed_out from the exec ctx's
+// DeadlineExceeded so a hung suite stays distinguishable in the graph facts from a
+// missing-binary / dead-container fault (both of which are ran=false otherwise).
+func TestMeasureTimeoutIsRecordedAndNotPass(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
-	runner := &fakeRunner{res: cliexec.Result{ExitCode: 1, TimedOut: true}, err: errors.New("run sh: timed out")}
 	w := &fakeWriter{}
-	e := New(reader, runner, w, fakeWorkspace{root: "/checkout"}, nil)
+	// A caller ctx with a short deadline propagates as the effective exec deadline
+	// (the earlier of it and measureTimeout), so the blocking runner is killed by
+	// DeadlineExceeded — exactly what a real hung suite does at measureTimeout.
+	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, w, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
 
-	if res := exec(t, e, 0); res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	res, err := e.Execute(ctx, callFor(0))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("a timeout is a recorded measurement, not a tool error: %s", res.Error)
 	}
 	facts := stampedFacts(w)
 	if facts["measurement.result.0.timed_out"] != "true" {
-		t.Errorf("timed_out = %q, want true", facts["measurement.result.0.timed_out"])
+		t.Errorf("timed_out = %q, want true — a killed-by-deadline exec must record as a timeout", facts["measurement.result.0.timed_out"])
+	}
+	if facts["measurement.result.0.ran"] != "false" {
+		t.Errorf("ran = %q, want false — a timed-out exec did not complete", facts["measurement.result.0.ran"])
 	}
 	if facts["measurement.result.0.passed"] != "false" {
 		t.Errorf("passed = %q, want false — a timed-out run is not a pass", facts["measurement.result.0.passed"])
@@ -247,11 +278,17 @@ func TestMeasureTimeoutIsNotPass(t *testing.T) {
 // A measurement is MUTABLE: re-measuring the same task is allowed (no immutability
 // rejection, unlike task.spec) and upserts — it stamps again, latest wins.
 func TestMeasureIsMutableReMeasureReplaces(t *testing.T) {
-	e, runner, w := happyExecutor()
+	// The code regressed between runs: exec 1 passes, exec 2 exits non-zero.
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
+		{Result: cleanroom.Result{ExitCode: 0, Stdout: "ok"}},
+		{Result: cleanroom.Result{ExitCode: 1}},
+	}}
+	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
+	w := &fakeWriter{}
+	e := execWith(reader, runner, w)
 	if res := exec(t, e, 0); res.Error != "" {
 		t.Fatalf("first measure: %s", res.Error)
 	}
-	runner.res = cliexec.Result{ExitCode: 1} // the code regressed on the second run
 	if res := exec(t, e, 0); res.Error != "" {
 		t.Fatalf("second measure must be allowed (measurements are mutable): %s", res.Error)
 	}
@@ -270,7 +307,7 @@ func TestMeasureIsMutableReMeasureReplaces(t *testing.T) {
 // A task that was never projected (no task.spec.<i>) is an error, not a silent
 // no-op — there is no command to measure.
 func TestMeasureMissingTaskSpecErrors(t *testing.T) {
-	e := New(&fakeReader{}, &fakeRunner{}, &fakeWriter{}, fakeWorkspace{root: "/checkout"}, nil)
+	e := execWith(&fakeReader{}, &cleanroom.MockRunner{}, &fakeWriter{})
 	res := exec(t, e, 3)
 	if res.Error == "" {
 		t.Fatal("expected an error when task.spec.3 does not exist")
@@ -281,24 +318,24 @@ func TestMeasureMissingTaskSpecErrors(t *testing.T) {
 // guarantees it, but the tool must not run an empty command).
 func TestMeasureMissingTestCommandErrors(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "goal", "add the guard")}}
-	runner := &fakeRunner{}
-	res := exec(t, New(reader, runner, &fakeWriter{}, fakeWorkspace{root: "/checkout"}, nil), 0)
+	runner := &cleanroom.MockRunner{}
+	res := exec(t, execWith(reader, runner, &fakeWriter{}), 0)
 	if res.Error == "" || !strings.Contains(res.Error, "test_command") {
 		t.Fatalf("missing test_command must error, got %q", res.Error)
 	}
-	if runner.calls != 0 {
+	if runner.ExecCalls != 0 {
 		t.Error("must not run anything when there is no command")
 	}
 }
 
 // A negative task index is rejected before any read or run.
 func TestMeasureRejectsNegativeIndex(t *testing.T) {
-	runner := &fakeRunner{}
-	res := exec(t, New(&fakeReader{}, runner, &fakeWriter{}, fakeWorkspace{root: "/checkout"}, nil), -1)
+	runner := &cleanroom.MockRunner{}
+	res := exec(t, execWith(&fakeReader{}, runner, &fakeWriter{}), -1)
 	if res.Error == "" {
 		t.Fatal("expected an error for a negative task index")
 	}
-	if runner.calls != 0 {
+	if runner.ExecCalls != 0 {
 		t.Error("a rejected index must run nothing")
 	}
 }
@@ -312,7 +349,7 @@ func TestMeasureRequiresTaskIndex(t *testing.T) {
 		Metadata:  map[string]any{agentic.MetadataKeyRunEntityID: runEntity},
 		Arguments: map[string]any{},
 	}
-	res, err := New(&fakeReader{}, &fakeRunner{}, &fakeWriter{}, fakeWorkspace{root: "/checkout"}, nil).Execute(context.Background(), call)
+	res, err := execWith(&fakeReader{}, &cleanroom.MockRunner{}, &fakeWriter{}).Execute(context.Background(), call)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -321,15 +358,32 @@ func TestMeasureRequiresTaskIndex(t *testing.T) {
 	}
 }
 
-// Schema-only registration (nil reader/writer/workspace) fails loudly if executed,
+// Schema-only registration (nil reader/sandboxes/writer) fails loudly if executed,
 // never silently drops the measurement.
 func TestMeasureFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil, nil, nil).Execute(context.Background(), callFor(0))
+	res, err := New(nil, nil, nil, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if res.Error == "" {
 		t.Error("a nil-harness measurement must fail loudly")
+	}
+}
+
+// No warm sandbox provisioned for the run → Resolve fails closed → measure_task
+// errors (park toward the human), never a silent host exec over an unproven
+// environment (SB5).
+func TestMeasureFailsClosedWithoutSandbox(t *testing.T) {
+	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
+	w := &fakeWriter{}
+	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, w, nil)
+
+	res := exec(t, e, 0)
+	if res.Error == "" || !strings.Contains(res.Error, "sandbox") {
+		t.Fatalf("an unprovisioned sandbox must fail closed with a sandbox error, got %q", res.Error)
+	}
+	if len(w.replaces) != 0 {
+		t.Error("a run with no sandbox must stamp NO measurement (never a false result over an absent environment)")
 	}
 }
 

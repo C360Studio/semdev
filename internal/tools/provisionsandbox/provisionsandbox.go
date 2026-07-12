@@ -98,6 +98,20 @@ type Manifests interface {
 	Resolve(ctx context.Context, checkoutRoot string) (harness.Manifest, error)
 }
 
+// Warmers stands up the run's WARM dev sandbox container — the one the bounded
+// loop's measure_task (and, later, check_floors) Exec into across
+// apply→measure→retry iterations (design SB4). provision_sandbox stands it up ONCE,
+// AFTER the cold baseline proved the declared image builds the repo cold, over the
+// SAME checkout apply_patch writes (so measure reads the patched bytes). It is the
+// SAME instance boot wires to measure_task's Sandboxes seam, so the container this
+// station stands up is the one measure later Execs through. A warm-Up fault is a
+// provisioning/transport fault the run parks on (SB5). nil at M0 schema-only
+// registration. The warm container is torn down by the runtime reaper, never a
+// lifecycle transition (G2).
+type Warmers interface {
+	Provision(ctx context.Context, runEntityID, image, workDir string, cacheEnvs []string) (cleanroom.Sandbox, error)
+}
+
 // Prover builds the declared image and proves the repo builds COLD, returning the
 // baseline verdict. It is coldproof.ProveBaseline behind an interface so the fact-
 // stamping is unit-testable without docker (a fake returns a canned Baseline); the
@@ -122,6 +136,7 @@ type Executor struct {
 	sources   Sources
 	checkouts Checkouts
 	manifests Manifests
+	warmers   Warmers
 	prover    Prover
 	store     secrets.Store // governed creds-refs (SB2c); nil at M0 (no secrets)
 	reader    changefacts.Reader
@@ -137,18 +152,18 @@ type Executor struct {
 
 // New builds the provision_sandbox executor. prover is always supplied (a pure
 // adapter — DefaultProver in production, a fake in tests); sources/checkouts/
-// manifests/reader/writer are nil for schema-only registration (the censuses scan
-// ListTools without a live checkout or NATS client). store is nil at M0 (no
-// governed secrets). Execute fails loudly if any required dependency is missing —
-// a provisioning that cannot prove is a park, never a silent skip (SB5).
-func New(sources Sources, checkouts Checkouts, manifests Manifests, prover Prover, store secrets.Store, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// manifests/warmers/reader/writer are nil for schema-only registration (the
+// censuses scan ListTools without a live checkout or NATS client). store is nil at
+// M0 (no governed secrets). Execute fails loudly if any required dependency is
+// missing — a provisioning that cannot prove is a park, never a silent skip (SB5).
+func New(sources Sources, checkouts Checkouts, manifests Manifests, warmers Warmers, prover Prover, store secrets.Store, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if prover == nil {
 		prover = DefaultProver()
 	}
-	return &Executor{sources: sources, checkouts: checkouts, manifests: manifests, prover: prover, store: store, reader: reader, writer: writer, dockerCheck: cleanroom.DockerAvailable, logger: logger}
+	return &Executor{sources: sources, checkouts: checkouts, manifests: manifests, warmers: warmers, prover: prover, store: store, reader: reader, writer: writer, dockerCheck: cleanroom.DockerAvailable, logger: logger}
 }
 
 // Execute materializes the checkout, proves the declared image builds it cold, and
@@ -156,8 +171,8 @@ func New(sources Sources, checkouts Checkouts, manifests Manifests, prover Prove
 // cold is recorded as a block (a park downstream), never a silent pass — the
 // recorded readiness is DERIVED from the cold proof, not supplied by the model (G3).
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.sources == nil || e.checkouts == nil || e.manifests == nil || e.reader == nil || e.writer == nil {
-		return errResult(call, agentic.ToolErrorInternal, "provision_sandbox: harness not fully wired (sources/checkouts/manifests/reader/writer)")
+	if e.sources == nil || e.checkouts == nil || e.manifests == nil || e.warmers == nil || e.reader == nil || e.writer == nil {
+		return errResult(call, agentic.ToolErrorInternal, "provision_sandbox: harness not fully wired (sources/checkouts/manifests/warmers/reader/writer)")
 	}
 	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
 	if !ok || runEntityID == "" {
@@ -212,6 +227,18 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	tier := sandboxTierName(manifest.Tiers, baselineClaim)
 	if !baseline.Ready() || tier == "" {
 		return e.block(ctx, call, runEntityID, notReadyReason(baseline))
+	}
+
+	// The cold baseline passed. Stand up the WARM dev container the bounded loop's
+	// measure_task Execs into (SB4 warm dev iterations): the SAME declared image,
+	// over the SAME checkout apply_patch writes (bind-mounted at /work), with fresh
+	// per-run caches. Up'd ONCE here and reused across apply→measure→retry (the cold
+	// baseline and cold final verify are separate throwaway containers — three
+	// instances, one warm), torn down by the runtime reaper. A warm-Up fault is a
+	// provisioning/transport fault (docker) → park toward the human, exactly like the
+	// docker-absent path — never a silent proceed onto an unstood-up sandbox (SB5).
+	if _, err := e.warmers.Provision(ctx, runEntityID, baseline.Image.Ref, checkoutRoot, manifest.CacheHomeEnvs); err != nil {
+		return e.block(ctx, call, runEntityID, fmt.Sprintf("proved the repo builds cold but could not stand up the warm dev container: %v — retryable infra fault (park toward the human)", err))
 	}
 	return e.ready(ctx, call, runEntityID, baseline.Image.Digest, tier)
 }

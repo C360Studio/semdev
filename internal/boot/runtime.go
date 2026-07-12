@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/config"
 	"github.com/c360studio/semstreams/metric"
@@ -140,7 +141,11 @@ type Runtime struct {
 	configMgr    *config.Manager
 	svcMgr       *service.Manager
 	toolRegistry *agentictools.ExecutorRegistry
-	logger       *slog.Logger
+	// sandboxes is the run-scoped warm dev-container registry; Stop reaps its
+	// containers so a shutdown leaks no docker resource. nil is a valid zero (no
+	// live tools wired), so Stop nil-guards it.
+	sandboxes *runspace.Sandboxes
+	logger    *slog.Logger
 }
 
 // resolveNATSURLs implements the documented precedence: an explicit
@@ -342,6 +347,12 @@ type runtimeRegistries struct {
 	payloadReg   *payloadregistry.Registry
 	toolReg      *agentictools.ExecutorRegistry
 	lifecycleMgr *lifecycle.Manager
+	// sandboxes is the run-scoped WARM dev-container registry provision_sandbox writes
+	// to and measure_task reads from (the same instance, one warm container per run).
+	// NewRuntime holds it so Stop can reap the containers (a SIGINT must not leak a
+	// docker container per run). Created only on the live path (a real NATS client);
+	// nil for the schema-scanning censuses.
+	sandboxes *runspace.Sandboxes
 }
 
 // buildRuntimeRegistries wires every registry a component or tool can be
@@ -377,7 +388,11 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		Platform:   platform,
 		Logger:     logger,
 	}
-	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, opts.SandboxSourceDir); err != nil {
+	// The warm dev-container registry is created here (the live path always has a real
+	// client) and handed to the tools; NewRuntime keeps it via this struct so Stop can
+	// reap the containers it stood up.
+	sandboxes := runspace.NewSandboxes()
+	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, opts.SandboxSourceDir, sandboxes); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 
@@ -391,6 +406,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		payloadReg:   payloadReg,
 		toolReg:      toolReg,
 		lifecycleMgr: lifecycleMgr,
+		sandboxes:    sandboxes,
 	}, nil
 }
 
@@ -424,10 +440,10 @@ func createConfiguredServices(svcMgr *service.Manager, services types.ServiceCon
 // service.Dependencies every constructed service and component shares, and
 // finally constructs (but does not start) every enabled, constructor-
 // registered service in cfg.Services. Returns the service manager and the
-// tool registry — the latter so NewRuntime's caller (the integration smoke
-// test, primarily) can assert on the advertised tool set without standing up
-// a second registration path.
-func wireServices(ctx context.Context, cfg *config.Config, natsClient *natsclient.Client, configMgr *config.Manager, opts RunOptions, logger *slog.Logger) (*service.Manager, *agentictools.ExecutorRegistry, error) {
+// built registries bundle — the latter so NewRuntime can expose the tool
+// registry (the integration smoke test asserts on the advertised tool set) and
+// hold the warm-sandbox registry for Stop to reap.
+func wireServices(ctx context.Context, cfg *config.Config, natsClient *natsclient.Client, configMgr *config.Manager, opts RunOptions, logger *slog.Logger) (*service.Manager, *runtimeRegistries, error) {
 	metricsRegistry := metric.NewMetricsRegistry()
 	platform := platformMeta(cfg)
 
@@ -468,7 +484,7 @@ func wireServices(ctx context.Context, cfg *config.Config, natsClient *natsclien
 		return nil, nil, err
 	}
 
-	return svcMgr, regs.toolReg, nil
+	return svcMgr, regs, nil
 }
 
 // NewRuntime wires the full shared runtime: config → NATS → JetStream streams
@@ -514,7 +530,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 		return nil, fmt.Errorf("start config manager: %w", err)
 	}
 
-	svcMgr, toolRegistry, err := wireServices(ctx, cfg, natsClient, configMgr, opts, logger)
+	svcMgr, regs, err := wireServices(ctx, cfg, natsClient, configMgr, opts, logger)
 	if err != nil {
 		_ = configMgr.Stop(5 * time.Second)
 		_ = natsClient.Close(ctx)
@@ -536,7 +552,8 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 		nats:         natsClient,
 		configMgr:    configMgr,
 		svcMgr:       svcMgr,
-		toolRegistry: toolRegistry,
+		toolRegistry: regs.toolReg,
+		sandboxes:    regs.sandboxes,
 		logger:       logger,
 	}, nil
 }
@@ -587,6 +604,19 @@ func (r *Runtime) Stop(timeout time.Duration) error {
 		r.logger.Warn("svcMgr.StopAll did not return within the shutdown budget; abandoning it and continuing shutdown (known semstreams ComponentManager deadlock, C360Studio/semstreams#508 — see runtime.Stop docs)",
 			slog.Duration("budget", timeout+stopServicesGrace))
 		errs = append(errs, fmt.Errorf("%w (after %s)", errStopServicesWedged, timeout+stopServicesGrace))
+	}
+
+	// Reap any warm dev sandboxes (docker containers + fresh cache volumes) the run
+	// loop stood up. This is a lifecycle-INDEPENDENT best-effort teardown (G2: not a
+	// transition — runspace owns the infra), so a Stop/SIGINT does not leak a container
+	// per run. It runs regardless of a wedged StopAll (Down detaches from ctx
+	// internally), on its own bounded window.
+	if r.sandboxes != nil {
+		reapCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		if err := r.sandboxes.CloseAll(reapCtx); err != nil {
+			errs = append(errs, fmt.Errorf("reap warm sandboxes: %w", err))
+		}
+		cancel()
 	}
 
 	if err := r.configMgr.Stop(timeout); err != nil {

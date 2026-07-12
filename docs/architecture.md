@@ -28,7 +28,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `openspec.validated` | openspec-validate-harness | openspec-io |
 | `openspec.archived` | openspec-archive-harness | openspec-io |
 | `task.spec.*` | task-projector | dev-from-task |
-| `task.attempt` | dev-loop-harness | dev-from-task |
+| `task.attempt.*` | dev-measure-rule | dev-from-task |
 | `floor.finding.*` | floor-tools | dev-from-task |
 | `measurement.result.*` | measurement-harness | harness-measurement |
 | `review.verdict.*` | reviewer-quinn | harness-measurement |
@@ -39,6 +39,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `sandbox.blocked` | sandbox-provisioner | sandbox |
 | `sandbox.attestation.*` | sandbox-provisioner | sandbox |
 | `dev.dispatched` | dev-dispatch-rule | dev-from-task |
+| `dev.measured` | dev-measure-rule | dev-from-task |
 
 ## Components
 

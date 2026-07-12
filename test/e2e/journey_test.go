@@ -79,6 +79,11 @@ const journeyDevRewakeMarker = "Begin developing"
 // (dev-from-task/04-dispatch-developer.json) the mock's apply_patch turn guards on.
 const journeyDeveloperMarker = "SEMDEV DEVELOPER"
 
+// journeyMeasureMarker is a distinctive substring of the measure prompt
+// (dev-from-task/05-measure-developed-task.json) the mock's measure_task turn guards
+// on — the prompt threads no slug/ref, so this stable phrase keys the positional cursor.
+const journeyMeasureMarker = "measure the developed task"
+
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -125,16 +130,18 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   6. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
 	//   7. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
 	//   8. D1 developer (Amelia)     → apply_patch(fix diff)    [authors the fix in-checkout]
+	//   9. M1 measure coordinator    → measure_task(index 0)    [in-container go test, real]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–8 thread the run entity id, so they mark on a stable
-	// phrase of their prompts (provision, dev re-wake, developer). The cursor — not
-	// the marker — distinguishes the turns: projection → provision → dev re-wake →
-	// dispatch is serialized by the rule gates (sandbox/01 gates on task.spec presence,
-	// the dev re-wake gates on sandbox.ready, dispatch fires on the dev_from_task
-	// decision), so no two forced turns race. An unscripted turn returns
-	// mockllm.UnmatchedSentinel, failing loudly not green.
+	// mark on the slug; turns 6–9 thread the run entity id, so they mark on a stable
+	// phrase of their prompts (provision, dev re-wake, developer, measure). The cursor
+	// — not the marker — distinguishes the turns: projection → provision → dev re-wake
+	// → dispatch → measure is serialized by the rule gates (sandbox/01 gates on
+	// task.spec presence, the dev re-wake gates on sandbox.ready, dispatch fires on the
+	// dev_from_task decision, measure fires on the developer loop's success), so no two
+	// forced turns race. An unscripted turn returns mockllm.UnmatchedSentinel, failing
+	// loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -177,6 +184,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 			Marker: journeyDeveloperMarker,
 			Tool:   &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}},
 		},
+		mockllm.Fixture{
+			Marker: journeyMeasureMarker,
+			Tool:   &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}},
+		},
 	)
 	if err := mock.Start(); err != nil {
 		t.Fatalf("start mock LLM: %v", err)
@@ -184,9 +195,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	defer func() { _ = mock.Stop() }()
 
 	// The provision station builds the fixture's declared golang image and proves it
-	// cold inside the run's container (real docker, real go build) — so this journey
-	// needs a wider budget than the pure-routing stations before it.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// cold (real docker, real go build), and the measure station then runs `go test`
+	// in the warm container — so this journey needs a wide budget over the pure-routing
+	// stations before it.
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 
 	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
@@ -318,14 +330,32 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireDeveloperLoopCompleted(ctx, t, runEntityID)
 	t.Logf("station 10: developer dispatched — Amelia authored the fix via apply_patch (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly eight model turns drove the arc through the author station: C1
+	// Station 11 — the make-or-break payoff: the fix is MEASURED cold, in-container.
+	// The measure-trigger rule (dev-from-task/05) fires on Amelia's successful terminal
+	// and spawns a forced measure_task loop (run_scope=inherit), which Execs the task's
+	// frozen test command (`go test ./...`) IN the run's WARM sandbox container — the
+	// one provision_sandbox stood up over the SAME checkout apply_patch wrote — and
+	// stamps the harness-derived measurement.result.0. Because the developer's diff
+	// actually fixed the boundary bug, the in-container `go test` PASSES: assert
+	// measurement.result.0.passed == "true" — proof the whole loop did REAL work
+	// (author → apply → build cold → test), not theater. This is the exact class both
+	// predecessors faked (a hollow attempt that measured nothing). Also assert the
+	// attempt counter task.attempt.0 was appended (the budget/retry gate counts it, 7D).
+	// Red-first: disable dev-from-task/05 and this station times out; break the warm
+	// container (or measure over unpatched bytes) and passed comes back "false".
+	requireMeasurementPassed(ctx, t, runEntityID)
+	requireTriplePresent(ctx, t, runEntityID, "task.attempt.0")
+	t.Logf("station 11: task measured in-container — measurement.result.0.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly nine model turns drove the arc through the measure station: C1
 	// decide(issue_intake), C2 decide(create_change), A1 create_change, V1
 	// validate_change, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task),
-	// D1 apply_patch. The resume + anchor are rule-owned (no model call). The one new
-	// turn since station 8's arc is Amelia's apply_patch (D1). A spurious re-spawn, a
-	// double dispatch, or an unscripted turn would push this past 8, so pin it.
-	if got := mock.RequestCount(); got != 8 {
-		t.Fatalf("expected exactly 8 model turns (…, C3 decide(dev_from_task), D1 apply_patch), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
+	// D1 apply_patch, M1 measure_task. The resume + anchor + attempt-append are
+	// rule-owned (no model call). The one new turn since station 10 is the forced
+	// measure loop (M1). A spurious re-spawn (e.g. a measure loop that re-triggers the
+	// measure rule), a double dispatch, or an unscripted turn would push this past 9.
+	if got := mock.RequestCount(); got != 9 {
+		t.Fatalf("expected exactly 9 model turns (…, D1 apply_patch, M1 measure_task), got %d — extra turns indicate a re-spawn/loop (e.g. measure re-triggering itself), a double dispatch, or an unscripted turn", got)
 	}
 }
 
@@ -462,6 +492,60 @@ func requireDeveloperLoopCompleted(ctx context.Context, t *testing.T, runEntityI
 	}, "no developer loop bound to run "+runEntityID+" reached agent.loop.outcome=success — dispatch-developer "+
 		"(dev-from-task/04) did not fire or apply_patch failed: check the rule fires on the dev_from_task decision, "+
 		"run_scope=inherit binds Amelia, apply_patch is advertised/scripted, and the fixture fix diff applies cleanly")
+}
+
+// requireMeasurementPassed polls the run entity until measurement.result.0.passed ==
+// "true" — the proof the measure-trigger rule (dev-from-task/05) fired on Amelia's
+// successful terminal, the forced measure_task loop resolved the run's WARM sandbox,
+// Exec'd the frozen `go test ./...` IN the container (over the patched checkout), and
+// the real exit code was 0. This is the make-or-break: a passing IN-CONTAINER measure
+// of the fixed artifact, the class both predecessors faked. A stamped passed="false"
+// is a hard failure (the fix did not take, or measure ran over unpatched bytes /
+// against a wrong sandbox), surfaced immediately rather than by timeout. The window is
+// wide: the warm container's first `go test` compiles the package in a fresh cache.
+func requireMeasurementPassed(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const passed = "measurement.result.0.passed"
+	requireEventually(t, 3*time.Minute, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if got := tripleString(e, passed); got == "false" {
+			t.Fatalf("measure_task stamped a FAILING in-container measurement (%s=false, exit_code=%s) — the fix did not make the test pass in the warm sandbox, or measure ran over unpatched bytes / a wrong sandbox: check apply_patch wrote the SAME checkout the warm container bind-mounts, and that task.spec.0.test_command matches the fixture (`go test ./...`)",
+				passed, tripleString(e, "measurement.result.0.exit_code"))
+		}
+		return tripleString(e, passed) == "true"
+	}, "run entity "+runEntityID+" never gained "+passed+"=true — the measure-trigger rule (dev-from-task/05) did not fire, "+
+		"the warm sandbox was not provisioned/resolved, or the in-container `go test` did not run: check the developer loop reached "+
+		"success, the dev.measured marker/guard, that measure_task was advertised/scripted, and that provision_sandbox left a warm "+
+		"container Up over the run's checkout")
+}
+
+// requireTriplePresent polls until the run entity carries at least one triple for
+// predicate (any object). Used for appended multi-value predicates like
+// task.attempt.<i>, where the object (a loop instance) is not known up front.
+func requireTriplePresent(ctx context.Context, t *testing.T, runEntityID, predicate string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	requireEventually(t, 30*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		for _, tr := range e.Triples {
+			if tr.Predicate == predicate {
+				return true
+			}
+		}
+		return false
+	}, "run entity "+runEntityID+" never gained a "+predicate+" triple — the measure-trigger rule (dev-from-task/05) "+
+		"must append the per-task attempt counter on the developer-loop terminal (the group-7D budget gate counts it)")
 }
 
 // requireRunAnchor polls until THIS wake's coordinator loop carries an
@@ -628,14 +712,21 @@ func journeyChangeArgs() map[string]any {
 				}},
 			}},
 		}},
+		// The task's target_files + test_command must match the run's SANDBOX artifact
+		// (the go-health-class fixture, module example.com/health): measure_task (station
+		// 11) runs this frozen test_command IN the warm container, and the developer's
+		// apply_patch diff (journeyFixtureFixDiff) fixes health.go. `go test ./...` at the
+		// fixture root goes green once the boundary bug is fixed — so this is what proves,
+		// in-container, that the fix was REAL (not a placeholder pointing at a package the
+		// sandbox does not contain).
 		"tasks": []any{map[string]any{
-			"section": "1. Spine",
+			"section": "1. Health boundary",
 			"items": []any{map[string]any{
 				"number":       "1.1",
-				"text":         "emit the change onto the run",
-				"target_files": []any{"internal/spine/spine.go"},
-				"test_command": "go test ./internal/spine/...",
-				"assumptions":  []any{"the spine package exists"},
+				"text":         "fix the warning-threshold boundary in Classify",
+				"target_files": []any{"health.go"},
+				"test_command": "go test ./...",
+				"assumptions":  []any{"the health package classifies cpu/mem pressure"},
 				"non_goals":    []any{"no production hardening at M0"},
 				"budget":       3,
 			}},

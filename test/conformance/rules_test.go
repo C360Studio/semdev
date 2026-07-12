@@ -436,6 +436,45 @@ func TestDispatchDeveloperIsSelfExtinguishing(t *testing.T) {
 	}
 }
 
+// The measure station (dev-from-task/05, group 7B): on the developer loop's
+// SUCCESSFUL terminal, measure the task in-container and count the attempt. Like
+// every publish_agent spawn rule it MUST be self-extinguishing — LOOP-scoped (it
+// fires on the developer loop): a fired-once dev.measured marker stamped BEFORE the
+// publish, guarded by length_eq 0. It must fire ONLY on outcome=success (never
+// measure a failed/unapplied attempt), force measure_task, and append the per-task
+// attempt counter (task.attempt.0). Red-first: drop any of these and this fails.
+func TestMeasureTriggerIsSelfExtinguishing(t *testing.T) {
+	meas, ok := runLifecycleRules(t)["dev_from_task_measure_developed"]
+	if !ok {
+		t.Fatal("missing dev_from_task_measure_developed rule")
+	}
+	const marker = "dev.measured"
+	if !meas.hasAbsenceGuard(marker) {
+		t.Errorf("measure trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate measure loop (publish_agent is not idempotent)", marker)
+	}
+	if !meas.hasTriple(marker) {
+		t.Errorf("measure trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !meas.markerBeforePublish(marker) {
+		t.Errorf("measure trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
+	}
+	if !meas.forcesFunction("measure_task") {
+		t.Error("measure trigger must force the measure_task call (tool_choice mode=function, function_name=measure_task)")
+	}
+	// It must fire on the developer loop's SUCCESSFUL terminal — outcome=success
+	// excludes a failed apply (measuring an unapplied checkout is theater).
+	if c, ok := meas.condition("agent.loop.role"); !ok || c.Value != "developer" {
+		t.Error("measure trigger must fire on a developer loop (agent.loop.role == developer)")
+	}
+	if c, ok := meas.condition("agent.loop.outcome"); !ok || c.Value != "success" {
+		t.Error("measure trigger must fire ONLY on agent.loop.outcome == success — a failed apply must not be measured")
+	}
+	// It must append the per-task attempt counter so the group-7D budget gate can count it.
+	if !meas.hasTriple("task.attempt.0") {
+		t.Error("measure trigger must append task.attempt.0 (the attempt counter the budget/retry gate counts against task.spec.0.budget)")
+	}
+}
+
 // The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
 // sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
 // posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once
