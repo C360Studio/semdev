@@ -1,0 +1,45 @@
+{
+  "id": "dev_from_task_check_floors",
+  "type": "expression",
+  "name": "Measured task → run the structural floors on the real diff (check_floors)",
+  "description": "The floors station (design SB4, group 7C). After measure_task has recorded a measurement in the warm sandbox, run semdev's deterministic structural floors over the developer's REAL authored diff — did the attempt author a test at all, is that test vacuous, did it ship a stub, does the source parse, did it 'test' only a mock, and (H1) did it author ANY of its declared targets at all. A rejecting floor blocks advance to review; the dev-loop gate (group 7D) reads the aggregate floor.finding.<i>.rejected to route advance vs retry. G2: this rule fires no lifecycle transition; check_floors measures and writes evidence, the gate is a separate step.\n\nTRIGGER = the MEASURE loop terminal, chained on a loop marker (not a run fact — a run-fact trigger would need a field-to-field self-extinguish guard, which floods the semstreams #519 WARN). measure_task stamps dev.measure_done on ITS OWN loop once it records a measurement (like create_change stamps openspec.change.authored on the authoring loop → the validate station). This rule fires on that marker: agent.loop.role=coordinator (the measure loop is a coordinator loop scoped to measure_task, exactly like provision/project_tasks) AND dev.measure_done ne \"\". The role=coordinator + dev.measure_done pair distinguishes the measure loop from the OTHER coordinator loops that also reach outcome=success (provision/create_change/validate/project_tasks) — none of them carry dev.measure_done. No outcome=success gate is needed here (unlike the measure trigger on the developer loop, whose apply_patch is fact-free): the marker itself is only stamped on measure_task's success path, so its presence already implies the measurement landed. It is stamped for a recorded measurement regardless of pass/fail, so a FAILING measurement still chains to floors → gate (which decides retry) — only a measure_task ERROR (no marker) stalls the chain toward the human.\n\nRUN BINDING: run_scope=inherit reads the measure loop's bare agent.run (inherit-spawned loops carry it) and binds the check_floors loop's RunID to the same run, so check_floors resolves THIS run's checkout (the same bytes measure ran over — no apply_patch runs between measure and floors) and stamps floor.finding.<i>.* on the run.\n\nROLE = coordinator (design roster: only Sarah/Amelia/Quinn; Sarah owns the harness tools). tool_choice=function forces check_floors and tools stays nil (global discovery advertises it); the loop calls it and StopLoops, writing floor.finding.* (not coordinator.decision.*), so it triggers no coordinator decision rule and no re-dispatch. check_floors takes only task_index (G3) — the floors are deterministic Go over the authored source, never a model claim.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps the fired-once marker dev.floors_dispatched=$entity.instance on the measure loop (the firing entity), and the dev.floors_dispatched length_eq 0 guard makes the trigger flip false the moment it fires. House restart-safety pattern (semteams agent-run/02, dev-from-task/02..05): publish_agent is NOT idempotent, and dev.measure_done stays stamped, so WITHOUT this marker a graph replay with RULE_STATE lost (ENTITY_STATES surviving) would re-spawn a DUPLICATE floors loop. The marker (a durable ENTITY_STATES triple on the measure loop) closes that independent of RULE_STATE. Marker stamped BEFORE the publish so a publish failure stalls-toward-human rather than duplicating. LOOP-scoped (like dev.dispatched) because this rule fires on the measure loop. A fresh measure loop per attempt (each retry) carries no dev.floors_dispatched, so floors re-run per attempt for free.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "dev.measure_done", "operator": "ne", "value": "", "required": true },
+    { "field": "dev.floors_dispatched", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.floors_dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.coordinator",
+      "role": "coordinator",
+      "model": "coordinator",
+      "tool_choice": { "mode": "function", "function_name": "check_floors" },
+      "properties": {
+        "phase": "floors"
+      },
+      "prompt": "SEMDEV — the developed task was measured in the sandbox. Now run the structural floors on the authored diff: call check_floors with task_index 0. The harness runs the deterministic floors (tests-must-exist, vacuous-test, stub, source-build, anti-mock, presence) over the run's checkout and records the findings — you supply no verdict. Calling check_floors completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "check_floors — run the structural floors on the real diff after measure (SB4, 7C)",
+    "trigger_rationale": "fires on the MEASURE loop terminal via the dev.measure_done loop marker (measure_task stamps it on its own loop, create_change→validate pattern). role=coordinator + dev.measure_done distinguishes the measure loop from the other coordinator loops that also reach success. Loop-marker chaining, NOT a run-fact field-to-field trigger, to stay warn-free (#519).",
+    "role_rationale": "coordinator (Sarah owns the harness tools; 3-role roster has no separate floors persona). tool_choice=function:check_floors + nil tools (global discovery) forces the call — a tool turn, not a routing turn. Mirrors dev-from-task/05 measure and sandbox/01 provision.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.floors_dispatched marker + length_eq 0 guard (house pattern). publish_agent is not idempotent, so the one-shot is intrinsic; check_floors' StopLoop keeps the floors loop one turn. Marker stamped BEFORE the publish. A fresh measure loop per attempt re-arms floors for free.",
+    "g3": "check_floors takes only task_index; the floors are deterministic Go over the authored source, and the aggregate floor.finding.<i>.rejected is harness-derived, never a model claim.",
+    "chain_note": "the gate (group 7D) fires on the check_floors LOOP terminal (check_floors stamps its own dev.floors_done marker there) and reads measurement.result.<i>.passed + floor.finding.<i>.rejected to route advance/retry/escalate via a check_gate tool — no field-to-field rule condition, no token handshake (the loop-terminal chain guarantees measure-then-floors ran for the same attempt). See design.md group-7 section.",
+    "deferred_tool_scoping": "tools omitted = global discovery; tool_choice=function:check_floors structurally constrains the call. Residual is populating bootstrap allowed_tools before the first real-LLM token (MEDIUM-3). Inert under the mock."
+  }
+}

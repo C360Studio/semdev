@@ -212,7 +212,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// the outcome is of the artifact built cold in the operator-declared image, never a
 	// host process over an unproven environment. Each nil dep makes Execute fail loudly;
 	// an unprovisioned sandbox makes Resolve fail closed (park) — never a silent host exec.
-	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
 	}
 

@@ -21,6 +21,7 @@ package floors
 
 // Floor names — the stable identifiers a Finding carries and the loop routes on.
 const (
+	FloorPresence       = "presence"
 	FloorTestsMustExist = "tests-must-exist"
 	FloorVacuousTest    = "vacuous-test"
 	FloorStub           = "stub"
@@ -70,6 +71,7 @@ func reject(floor, detail string) Finding {
 // also callable on its own.
 func CheckAll(a Attempt) []Finding {
 	return []Finding{
+		PresenceOfWork(a),
 		TestsMustExist(a),
 		VacuousTest(a),
 		StubArtifact(a),

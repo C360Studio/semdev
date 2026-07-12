@@ -13,6 +13,7 @@ import (
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/types"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -77,7 +78,7 @@ func warmSandboxOf(runner *cleanroom.MockRunner) *fakeSandboxes {
 
 // execWith builds an executor over a scripted reader + warm sandbox + writer.
 func execWith(reader *fakeReader, runner *cleanroom.MockRunner, w *fakeWriter) *Executor {
-	return New(reader, warmSandboxOf(runner), w, nil)
+	return New(reader, warmSandboxOf(runner), w, types.PlatformMeta{}, nil)
 }
 
 // fakeWriter records replace calls. It owns no immutability guard: a measurement is
@@ -177,6 +178,67 @@ func TestMeasureStampsDerivedResult(t *testing.T) {
 	}
 }
 
+// The chaining marker: measure_task stamps dev.measure_done on ITS OWN loop entity
+// (not the run) so the floors-trigger (dev-from-task/06) can fire on the measure loop.
+// It is stamped even for a FAILING measurement — a failing attempt must still chain to
+// floors→gate so the gate can decide retry; only a measure ERROR stalls the chain.
+func TestMeasureStampsMeasureDoneMarkerOnLoopEvenWhenFailing(t *testing.T) {
+	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
+	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 1}}}} // a FAILING measurement
+	w := &fakeWriter{}
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	e := New(reader, warmSandboxOf(runner), w, platform, nil)
+
+	call := callFor(0)
+	call.LoopID = "measure-loop-abc"
+	res, err := e.Execute(context.Background(), call)
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	if facts := stampedFacts(w); facts["measurement.result.0.passed"] != "false" {
+		t.Fatalf("precondition: this measurement must be failing, got passed=%q", facts["measurement.result.0.passed"])
+	}
+
+	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, call.LoopID)
+	if err != nil {
+		t.Fatalf("loop entity id: %v", err)
+	}
+	found := false
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate != MeasureDonePredicate {
+				continue
+			}
+			found = true
+			if tr.Subject != loopEntityID {
+				t.Errorf("%s stamped on %q, want the measure LOOP entity %q (not the run)", MeasureDonePredicate, tr.Subject, loopEntityID)
+			}
+			if tr.Source != Source {
+				t.Errorf("%s Source = %q, want %q (G5)", MeasureDonePredicate, tr.Source, Source)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("measure_task must stamp %s on its loop (even for a failing measurement) so the floors-trigger fires", MeasureDonePredicate)
+	}
+}
+
+// No loop id on the call (a unit-test / degenerate case) skips the marker with a warn
+// rather than failing a recorded measurement — the measurement still lands.
+func TestMeasureWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
+	e, _, w := happyExecutor() // callFor sets no LoopID
+	if res := exec(t, e, 0); res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	facts := stampedFacts(w)
+	if facts["measurement.result.0.passed"] != "true" {
+		t.Error("the measurement must still be recorded when no loop id is present")
+	}
+	if _, ok := facts[MeasureDonePredicate]; ok {
+		t.Error("no loop id → the marker must be skipped, not stamped on the run")
+	}
+}
+
 // G3, the spec scenario: a non-zero exit records FAILURE regardless of what the
 // command's stdout (or any model) claims. The outcome is derived from the real exit
 // code, not from text.
@@ -252,7 +314,7 @@ func TestMeasureTimeoutIsRecordedAndNotPass(t *testing.T) {
 	// A caller ctx with a short deadline propagates as the effective exec deadline
 	// (the earlier of it and measureTimeout), so the blocking runner is killed by
 	// DeadlineExceeded — exactly what a real hung suite does at measureTimeout.
-	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, w, nil)
+	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, w, types.PlatformMeta{}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
@@ -361,7 +423,7 @@ func TestMeasureRequiresTaskIndex(t *testing.T) {
 // Schema-only registration (nil reader/sandboxes/writer) fails loudly if executed,
 // never silently drops the measurement.
 func TestMeasureFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil, nil).Execute(context.Background(), callFor(0))
+	res, err := New(nil, nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -376,7 +438,7 @@ func TestMeasureFailsLoudlyWithoutHarness(t *testing.T) {
 func TestMeasureFailsClosedWithoutSandbox(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
 	w := &fakeWriter{}
-	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, w, nil)
+	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, w, types.PlatformMeta{}, nil)
 
 	res := exec(t, e, 0)
 	if res.Error == "" || !strings.Contains(res.Error, "sandbox") {

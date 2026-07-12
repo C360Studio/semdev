@@ -50,6 +50,35 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+// The presence floor (H1) closes the g4 hole: an attempt that authored NONE of its
+// declared targets must REJECT, not pass vacuously through the other five floors.
+func TestPresenceFloor(t *testing.T) {
+	// Declared targets, NONE authored on disk → reject (the SB5 no-work theater).
+	allAbsent := Attempt{TargetFiles: []string{"health.go", "util.go"}}
+	if f := PresenceOfWork(allAbsent); f.Passed {
+		t.Error("presence must reject an attempt that authored none of its declared targets")
+	}
+	// It also flows through the aggregate: an all-absent attempt is AnyRejected true,
+	// where every OTHER floor passes vacuously (no source to reject).
+	if !AnyRejected(CheckAll(allAbsent)) {
+		t.Error("an all-absent attempt must be rejected by CheckAll (presence floor) — else it reads green (g4 hole)")
+	}
+
+	// At least one target authored → pass (work is present to evaluate).
+	oneAuthored := Attempt{
+		TargetFiles: []string{"health.go", "util.go"},
+		Files:       []File{{Path: "health.go", Content: "package health\n"}},
+	}
+	if f := PresenceOfWork(oneAuthored); !f.Passed {
+		t.Errorf("presence must PASS a partial attempt (a legit fix may touch 1 of N targets): %s", f.Detail)
+	}
+
+	// No declared targets at all → not applicable, pass (never a false reject).
+	if f := PresenceOfWork(Attempt{}); !f.Passed {
+		t.Errorf("presence must not reject an attempt with no declared targets: %s", f.Detail)
+	}
+}
+
 func TestTestsMustExist(t *testing.T) {
 	// production source, no test → reject
 	noTest := Attempt{

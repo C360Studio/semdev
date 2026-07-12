@@ -84,6 +84,10 @@ const journeyDeveloperMarker = "SEMDEV DEVELOPER"
 // on — the prompt threads no slug/ref, so this stable phrase keys the positional cursor.
 const journeyMeasureMarker = "measure the developed task"
 
+// journeyFloorsMarker is a distinctive substring of the floors prompt
+// (dev-from-task/06-check-floors.json) the mock's check_floors turn guards on.
+const journeyFloorsMarker = "run the structural floors"
+
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -131,17 +135,19 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   7. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
 	//   8. D1 developer (Amelia)     → apply_patch(fix diff)    [authors the fix in-checkout]
 	//   9. M1 measure coordinator    → measure_task(index 0)    [in-container go test, real]
+	//  10. F1 floors coordinator     → check_floors(index 0)    [structural floors on the diff]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–9 thread the run entity id, so they mark on a stable
-	// phrase of their prompts (provision, dev re-wake, developer, measure). The cursor
-	// — not the marker — distinguishes the turns: projection → provision → dev re-wake
-	// → dispatch → measure is serialized by the rule gates (sandbox/01 gates on
-	// task.spec presence, the dev re-wake gates on sandbox.ready, dispatch fires on the
-	// dev_from_task decision, measure fires on the developer loop's success), so no two
-	// forced turns race. An unscripted turn returns mockllm.UnmatchedSentinel, failing
-	// loudly not green.
+	// mark on the slug; turns 6–10 thread the run entity id, so they mark on a stable
+	// phrase of their prompts (provision, dev re-wake, developer, measure, floors). The
+	// cursor — not the marker — distinguishes the turns: projection → provision → dev
+	// re-wake → dispatch → measure → floors is serialized by the rule gates (sandbox/01
+	// gates on task.spec presence, the dev re-wake gates on sandbox.ready, dispatch
+	// fires on the dev_from_task decision, measure fires on the developer loop's success,
+	// floors chains off the measure loop's dev.measure_done marker), so no two forced
+	// turns race. An unscripted turn returns mockllm.UnmatchedSentinel, failing loudly
+	// not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -187,6 +193,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyMeasureMarker,
 			Tool:   &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}},
+		},
+		mockllm.Fixture{
+			Marker: journeyFloorsMarker,
+			Tool:   &mockllm.ToolCall{Name: "check_floors", Args: map[string]any{"task_index": 0}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -347,15 +357,29 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireTriplePresent(ctx, t, runEntityID, "task.attempt.0")
 	t.Logf("station 11: task measured in-container — measurement.result.0.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly nine model turns drove the arc through the measure station: C1
-	// decide(issue_intake), C2 decide(create_change), A1 create_change, V1
-	// validate_change, P1 project_tasks, PS provision_sandbox, C3 decide(dev_from_task),
-	// D1 apply_patch, M1 measure_task. The resume + anchor + attempt-append are
-	// rule-owned (no model call). The one new turn since station 10 is the forced
-	// measure loop (M1). A spurious re-spawn (e.g. a measure loop that re-triggers the
-	// measure rule), a double dispatch, or an unscripted turn would push this past 9.
-	if got := mock.RequestCount(); got != 9 {
-		t.Fatalf("expected exactly 9 model turns (…, D1 apply_patch, M1 measure_task), got %d — extra turns indicate a re-spawn/loop (e.g. measure re-triggering itself), a double dispatch, or an unscripted turn", got)
+	// Station 12 — the structural floors run on the developer's REAL diff. The
+	// floors-trigger (dev-from-task/06) fires on the measure loop's dev.measure_done
+	// marker (the warn-free loop-marker chain, NOT a #519 field-to-field run-fact
+	// trigger) and spawns a forced check_floors loop (run_scope=inherit), which runs the
+	// deterministic go/ast floors over the task's target files in the checkout — the
+	// SAME bytes measure ran over — and stamps the aggregate floor.finding.0.rejected +
+	// the per-floor findings. Because the fix is a clean edit (real test present, source
+	// parses, no stub/mock, targets authored), NO floor rejects: assert
+	// floor.finding.0.rejected == "false" — the harness-derived structural verdict the
+	// group-7D gate routes advance on. Also assert the presence floor ran (the H1 gate
+	// that closes the all-absent-reads-green hole). Red-first: disable dev-from-task/06
+	// and this station times out.
+	requireFloorsPassed(ctx, t, runEntityID)
+	t.Logf("station 12: structural floors ran on the diff — floor.finding.0.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly ten model turns drove the arc through the floors station: …, D1
+	// apply_patch, M1 measure_task, F1 check_floors. The resume + anchor + attempt-append
+	// + the two loop markers are rule/tool-owned (no extra model call). The one new turn
+	// since station 11 is the forced floors loop (F1). A spurious re-spawn (e.g. the
+	// floors loop re-triggering the floors rule, or measure re-triggering itself), a
+	// double dispatch, or an unscripted turn would push this past 10.
+	if got := mock.RequestCount(); got != 10 {
+		t.Fatalf("expected exactly 10 model turns (…, M1 measure_task, F1 check_floors), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
 	}
 }
 
@@ -523,6 +547,36 @@ func requireMeasurementPassed(ctx context.Context, t *testing.T, runEntityID str
 		"the warm sandbox was not provisioned/resolved, or the in-container `go test` did not run: check the developer loop reached "+
 		"success, the dev.measured marker/guard, that measure_task was advertised/scripted, and that provision_sandbox left a warm "+
 		"container Up over the run's checkout")
+}
+
+// requireFloorsPassed polls the run entity until floor.finding.0.rejected == "false"
+// — the proof the floors-trigger (dev-from-task/06) fired on the measure loop, the
+// forced check_floors loop ran the deterministic floors over the task's target files
+// in the checkout, and NO floor rejected the developer's real diff. A stamped
+// rejected="true" is a hard failure (a floor caught fabrication in the fixed code, or
+// the floors ran over the wrong files), surfaced immediately rather than by timeout. It
+// also asserts the presence floor ran (the H1 gate) so the finding set is the full one.
+func requireFloorsPassed(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const rejected = "floor.finding.0.rejected"
+	const presencePassed = "floor.finding.0.presence.passed"
+	requireEventually(t, 45*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if got := tripleString(e, rejected); got == "true" {
+			t.Fatalf("check_floors REJECTED the developer's diff (%s=true) — a structural floor caught fabrication in the fixed code, or the floors ran over the wrong target files: check task.spec.0.target_files includes the test and that the checkout holds the patched bytes", rejected)
+		}
+		// Require the aggregate present AND a per-floor finding, so a partial/absent
+		// finding set cannot false-green the "not true" check above.
+		return tripleString(e, rejected) == "false" && tripleString(e, presencePassed) != ""
+	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set — the floors-trigger (dev-from-task/06) did not fire, "+
+		"or check_floors could not resolve the attempt: check measure_task stamped dev.measure_done on its loop, the floors rule fires on that marker, "+
+		"check_floors is advertised/scripted, and the Attempts seam resolves the target files from the checkout")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for
@@ -714,17 +768,20 @@ func journeyChangeArgs() map[string]any {
 		}},
 		// The task's target_files + test_command must match the run's SANDBOX artifact
 		// (the go-health-class fixture, module example.com/health): measure_task (station
-		// 11) runs this frozen test_command IN the warm container, and the developer's
-		// apply_patch diff (journeyFixtureFixDiff) fixes health.go. `go test ./...` at the
-		// fixture root goes green once the boundary bug is fixed — so this is what proves,
-		// in-container, that the fix was REAL (not a placeholder pointing at a package the
-		// sandbox does not contain).
+		// 11) runs this frozen test_command IN the warm container, and check_floors
+		// (station 12) runs the structural floors over these target files' CURRENT
+		// checkout contents. The developer's apply_patch diff (journeyFixtureFixDiff)
+		// fixes health.go; `go test ./...` at the fixture root goes green once the boundary
+		// bug is fixed. BOTH health.go and its test are declared targets: the floors read
+		// the declared targets, and the tests-must-exist floor would (correctly) reject a
+		// production-only attempt — the fixture's real health_test.go is what makes the
+		// floors pass, so it must be in the task's evaluation scope.
 		"tasks": []any{map[string]any{
 			"section": "1. Health boundary",
 			"items": []any{map[string]any{
 				"number":       "1.1",
 				"text":         "fix the warning-threshold boundary in Classify",
-				"target_files": []any{"health.go"},
+				"target_files": []any{"health.go", "health_test.go"},
 				"test_command": "go test ./...",
 				"assumptions":  []any{"the health package classifies cpu/mem pressure"},
 				"non_goals":    []any{"no production hardening at M0"},

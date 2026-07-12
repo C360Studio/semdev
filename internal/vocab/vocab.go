@@ -88,6 +88,18 @@ var Predicates = []Predicate{
 	// like dev.dispatched). A fresh developer loop per retry carries no marker, so each
 	// attempt re-measures for free.
 	{"dev.measured", "dev-measure-rule", "dev-from-task", sandbox},
+	// dev.measure_done is the CHAINING marker measure_task stamps on ITS OWN measure
+	// loop (value = task index) once it has recorded a measurement — the slug-independent
+	// "this coordinator loop just measured" signal the floors-trigger (dev-from-task/06)
+	// fires on to spawn check_floors and inherit the run. Tool-owned (writer
+	// measurement-harness, measure_task's Source — like create_change's openspec.change.
+	// authored marker); distinguishes the measure loop from the other coordinator loops
+	// that also reach outcome=success.
+	{"dev.measure_done", "measurement-harness", "dev-from-task", sandbox},
+	// dev.floors_dispatched is the fired-once marker the floors-trigger (dev-from-task/06)
+	// stamps on the measure loop before spawning check_floors, so a graph replay cannot
+	// re-spawn a duplicate floors loop (self-extinguishing, loop-scoped like dev.dispatched).
+	{"dev.floors_dispatched", "dev-floors-rule", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

@@ -40,6 +40,8 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `sandbox.attestation.*` | sandbox-provisioner | sandbox |
 | `dev.dispatched` | dev-dispatch-rule | dev-from-task |
 | `dev.measured` | dev-measure-rule | dev-from-task |
+| `dev.measure_done` | measurement-harness | dev-from-task |
+| `dev.floors_dispatched` | dev-floors-rule | dev-from-task |
 
 ## Components
 

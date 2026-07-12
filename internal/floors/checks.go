@@ -41,6 +41,32 @@ var notImplementedPhrases = []string{"not implemented", "unimplemented", "not ye
 func isGoFile(path string) bool   { return strings.HasSuffix(path, ".go") }
 func isTestFile(path string) bool { return strings.HasSuffix(path, "_test.go") }
 
+// PresenceOfWork rejects an attempt that authored NONE of its declared target files
+// — every declared target is absent from disk (a non-empty TargetFiles with an empty
+// Files set). That is the SB5 "verified over zero executions" shape and the g4 hole
+// this closes: the other five floors all pass VACUOUSLY on an empty file set (there is
+// no authored source to reject), so without this floor an attempt that did nothing at
+// all reads GREEN — exactly the theater that let both predecessors succeed against a
+// scaffold.
+//
+// It deliberately does NOT reject a PARTIAL attempt (some declared targets present,
+// some absent). The Attempts resolver includes every declared target that exists on
+// disk regardless of whether THIS diff touched it, so len(Files) < len(TargetFiles)
+// means "some declared target is absent from disk" — a legitimate intermediate or
+// optional-target state, not proof of no work; rejecting it would false-park honest
+// partial work. Only "authored nothing at all" (len(Files)==0 with declared targets)
+// is an unambiguous no-work signal, matching the under-fire-not-false-reject posture
+// of the other floors. Its verdict is deterministic from the Attempt shape alone (no
+// parse), so it holds for any ecosystem, not just Go.
+func PresenceOfWork(a Attempt) Finding {
+	if len(a.TargetFiles) > 0 && len(a.Files) == 0 {
+		return reject(FloorPresence, fmt.Sprintf(
+			"the attempt authored none of its %d declared target file(s) — no work is present on disk to evaluate; a floor verdict over zero authored files would be theater (SB5)",
+			len(a.TargetFiles)))
+	}
+	return pass(FloorPresence, "the attempt authored at least one of its declared target files")
+}
+
 // parseFile parses one authored Go file. ok is false when it does not parse —
 // SourceBuild owns that failure, so the other floors skip an unparseable file
 // rather than guess at its bytes.

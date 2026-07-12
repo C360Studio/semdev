@@ -411,6 +411,44 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   `run-lifecycle/03`, so this needs a targeted pin (guard required unless the trigger is a
   coordinator decision), not a blanket one. Known soft spot.
 
+### Group-7 dev-loop decisions + carry-forwards (as built; architect-validated, from the increment reviews)
+
+- **[Token handshake DROPPED → pure loop-terminal chaining] (architect ruling + #519 research)** →
+  the original blueprint's per-attempt "token handshake" (measure stamps `measurement.result.<i>.attempt`,
+  floors echoes it, the gate compares `floor.finding.<i>.attempt eq measurement.result.<i>.attempt`) is
+  UNNECESSARY and UNBUILDABLE. Unbuildable: those gate conditions are field-to-field, which floods the
+  semstreams #519 WARN (the `$entity.triple.` value form, guarded by `TestChangeApprovalGateFreshnessForwardContract`).
+  Unnecessary: the chain is strictly serial (dispatch → developer → measure → floors → gate, one developer
+  loop in flight per task, retries gate-dispatched), so "measure and floors evaluated the same attempt" is
+  guaranteed by construction — the only checkout writer is `apply_patch` inside a developer loop, and none
+  runs between measure's Exec and floors' Resolve, so the bytes are frozen. Each stage instead fires on the
+  PRIOR loop's terminal via a tool-stamped loop marker (`dev.measure_done` on the measure loop → floors;
+  `dev.floors_done` on the floors loop → gate, 7D), all warn-free literal conditions. Per-attempt re-arm comes
+  from fresh loops per attempt (the 7B property), not a token.
+- **[The serialization invariant is now LOAD-BEARING for correctness] (7D pin)** → dropping the token means
+  "one developer loop in flight per task; only dispatch-developer and the gate's retry branch may spawn a
+  `role=developer` loop into a run" is no longer just tidiness — it replaces the token's matched-attempt guard.
+  Add a conformance pin asserting exactly that WITH group 7D (G6: pin the change that creates the failure mode —
+  7C's arc is strictly linear with no retry driver, so no second developer loop can exist yet).
+- **[Floor fidelity is coupled to model-authored `target_files` including the test file] (MEDIUM)** → the
+  Attempts resolver evaluates the CURRENT contents of the task's DECLARED `target_files` (it includes any
+  target that exists on disk, touched or not). So `TestsMustExist` only sees a test when a `_test.go` is a
+  declared target. `target_files` originates from the change proposal `create_change` authors (effectively
+  model-authored). If a real task's `target_files` omits its test, `TestsMustExist` FALSE-PARKS a correct fix —
+  which is exactly why the journey's task declares BOTH `health.go` and `health_test.go`. Before the first
+  real-LLM token: either a `project_tasks`/`create_change` contract that always scopes the test file alongside
+  production targets, OR a resolver that derives sibling `_test.go` targets — plus a pin. Not 7C-introduced
+  (the group-3/4 resolver contract), but 7C makes it LIVE.
+- **[Floors reject-teeth are offline-only; station 12 is the happy-path bridge]** → the live journey proves
+  the floors RUN and PASS over a clean fix (`floor.finding.0.rejected=false`); a floor CATCHING fabrication
+  end-to-end is covered offline (`TestPresenceFloor`, `TestCheckFloorsVacuousTestRejected`), not in the arc.
+  Correctly-labeled bridge proof — add a rejecting-fixture station when a fabrication fixture variant drives
+  the loop (g10/g11).
+- **[measure_task's marker-write-after-measurement stall] (LOW, folds into the dev-loop-rail cap-exhaust gap)** →
+  measurement (run) then `dev.measure_done` (loop) are two non-atomic writes; a persistent marker-write failure
+  trips MaxIterations with no `run.awaiting_human` (marker-less measure loop chains nothing). Same posture as the
+  reviewed `create_change` two-write; the escalate/park lands in 7D. Ordering (substance-first) is correct.
+
 ## Migration Plan
 
 Infra-first sequence (each rung proven before the next):

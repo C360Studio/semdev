@@ -94,11 +94,15 @@ func TestCheckFloorsAllPassStampsFindings(t *testing.T) {
 	if res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
-	for _, floor := range []string{floors.FloorTestsMustExist, floors.FloorVacuousTest, floors.FloorStub, floors.FloorSourceBuild, floors.FloorAntiMock} {
+	for _, floor := range []string{floors.FloorPresence, floors.FloorTestsMustExist, floors.FloorVacuousTest, floors.FloorStub, floors.FloorSourceBuild, floors.FloorAntiMock} {
 		key := floors.FindingPrefix + "0." + floor + "." + floors.FactPassed
 		if facts[key] != "true" {
 			t.Errorf("%s = %q, want true", key, facts[key])
 		}
+	}
+	// The aggregate verdict the dev-loop gate reads: no floor rejected → rejected=false.
+	if got := facts[floors.FindingPrefix+"0."+floors.FactRejected]; got != "false" {
+		t.Errorf("%s0.%s = %q, want false (no floor rejected)", floors.FindingPrefix, floors.FactRejected, got)
 	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -128,6 +132,10 @@ func TestCheckFloorsVacuousTestRejected(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "\"rejected\":true") {
 		t.Errorf("result must flag rejected=true, got %s", res.Content)
+	}
+	// The STAMPED aggregate fact (what the gate reads, not the tool's Content) must be true.
+	if got := facts[floors.FindingPrefix+"0."+floors.FactRejected]; got != "true" {
+		t.Errorf("%s0.%s = %q, want true (a rejecting floor sets the aggregate)", floors.FindingPrefix, floors.FactRejected, got)
 	}
 }
 

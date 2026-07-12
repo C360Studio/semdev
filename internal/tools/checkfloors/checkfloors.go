@@ -115,12 +115,12 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 
 	findings := floors.CheckAll(attempt)
-	out := findingTriples(runEntityID, idx, floors.AttemptID(attempt), findings, time.Now().UTC())
+	rejected := floors.AnyRejected(findings)
+	out := findingTriples(runEntityID, idx, floors.AttemptID(attempt), rejected, findings, time.Now().UTC())
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "check_floors: stamp floor.finding for task %d on %s: %v", idx, runEntityID, err)
 	}
 
-	rejected := floors.AnyRejected(findings)
 	e.logger.Info("check_floors evaluated attempt",
 		slog.String("run_entity_id", runEntityID),
 		slog.Int("task_index", idx),
@@ -131,18 +131,25 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		"rejected":   rejected,
 		"findings":   findings,
 	})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
+	// StopLoop: the floors-trigger rule (dev-from-task/06) forces a single-turn floors
+	// loop; ending the turn here keeps it one model call (mirrors measure_task /
+	// project_tasks). A rejecting verdict is DATA, not a tool error — it ends the turn
+	// as a success too; the dev-loop gate reads the stamped floor.finding.<i>.rejected,
+	// not this StopLoop, to decide advance/retry.
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
 // findingTriples projects the floor findings into the owned per-task package on the
-// run entity: floor.finding.<idx>.attempt plus floor.finding.<idx>.<floor>.{passed,
-// detail}. The attempt id binds the whole set to the source it evaluated (so a gate
-// can reject a stale set). The floor set is fixed (CheckAll always returns the same
-// five floors), so the sub-keys upsert by predicate and re-evaluating the task
-// replaces its prior findings without leaving a stale sub-key.
-func findingTriples(runEntityID string, idx int, attemptID string, findings []floors.Finding, now time.Time) []message.Triple {
+// run entity: floor.finding.<idx>.{attempt,rejected} plus floor.finding.<idx>.<floor>.
+// {passed,detail}. attempt binds the whole set to the source it evaluated; rejected is
+// the aggregate verdict the dev-loop gate reads (true iff any floor rejected), so the
+// gate stays a single literal read rather than re-deriving from the per-floor keys. The
+// floor set is fixed (CheckAll always returns the same floors), so the sub-keys upsert
+// by predicate and re-evaluating the task replaces its prior findings without leaving a
+// stale sub-key.
+func findingTriples(runEntityID string, idx int, attemptID string, rejected bool, findings []floors.Finding, now time.Time) []message.Triple {
 	base := floors.FindingPrefix + strconv.Itoa(idx) + "."
-	out := make([]message.Triple, 0, len(findings)*2+1)
+	out := make([]message.Triple, 0, len(findings)*2+2)
 	mk := func(pred, obj string) {
 		out = append(out, message.Triple{
 			Subject:    runEntityID,
@@ -154,6 +161,7 @@ func findingTriples(runEntityID string, idx int, attemptID string, findings []fl
 		})
 	}
 	mk(base+floors.FactAttempt, attemptID)
+	mk(base+floors.FactRejected, strconv.FormatBool(rejected))
 	for _, f := range findings {
 		p := base + f.Floor + "."
 		mk(p+floors.FactPassed, strconv.FormatBool(f.Passed))

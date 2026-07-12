@@ -14,6 +14,7 @@ import (
 // guard for the wrapper's no-clear upsert (semstreams-reviewer MEDIUM).
 func TestCheckAllReturnsFixedFloorSet(t *testing.T) {
 	want := map[string]bool{
+		FloorPresence:       true,
 		FloorTestsMustExist: true,
 		FloorVacuousTest:    true,
 		FloorStub:           true,
@@ -48,7 +49,7 @@ func TestCheckAllReturnsFixedFloorSet(t *testing.T) {
 // <field>, so a dot inside a floor name would fracture the predicate segments and
 // mis-key the finding.
 func TestFloorNamesAreDotFree(t *testing.T) {
-	for _, name := range []string{FloorTestsMustExist, FloorVacuousTest, FloorStub, FloorSourceBuild, FloorAntiMock} {
+	for _, name := range []string{FloorPresence, FloorTestsMustExist, FloorVacuousTest, FloorStub, FloorSourceBuild, FloorAntiMock} {
 		if strings.Contains(name, ".") {
 			t.Errorf("floor name %q contains a dot — it must be a single predicate segment", name)
 		}

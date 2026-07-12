@@ -475,6 +475,49 @@ func TestMeasureTriggerIsSelfExtinguishing(t *testing.T) {
 	}
 }
 
+// The floors station (dev-from-task/06, group 7C): on the MEASURE loop terminal
+// (chained via the dev.measure_done loop marker, warn-free — NOT a field-to-field run
+// fact, #519), run the structural floors. Like every publish_agent spawn rule it MUST
+// be self-extinguishing — LOOP-scoped: a fired-once dev.floors_dispatched marker
+// stamped BEFORE the publish, guarded by length_eq 0. It must fire on the marker (not
+// re-derive), force check_floors, and require role=coordinator to distinguish the
+// measure loop. Red-first: drop any and this fails.
+func TestFloorsTriggerIsSelfExtinguishing(t *testing.T) {
+	fl, ok := runLifecycleRules(t)["dev_from_task_check_floors"]
+	if !ok {
+		t.Fatal("missing dev_from_task_check_floors rule")
+	}
+	const marker = "dev.floors_dispatched"
+	if !fl.hasAbsenceGuard(marker) {
+		t.Errorf("floors trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate floors loop (publish_agent is not idempotent)", marker)
+	}
+	if !fl.hasTriple(marker) {
+		t.Errorf("floors trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !fl.markerBeforePublish(marker) {
+		t.Errorf("floors trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
+	}
+	if !fl.forcesFunction("check_floors") {
+		t.Error("floors trigger must force the check_floors call (tool_choice mode=function, function_name=check_floors)")
+	}
+	// It fires on the MEASURE loop, distinguished by the tool-stamped dev.measure_done
+	// marker (present only on the measure loop) — NOT a field-to-field condition (#519).
+	if c, ok := fl.condition("dev.measure_done"); !ok || c.Operator != "ne" {
+		t.Error("floors trigger must fire on the measure loop's dev.measure_done marker (ne \"\") — the warn-free loop-marker chain")
+	}
+	if c, ok := fl.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
+		t.Error("floors trigger must require agent.loop.role == coordinator (the measure loop is a coordinator loop; the marker distinguishes it from other coordinator loops)")
+	}
+	// The trigger is honest only if measure_task actually stamps dev.measure_done. That
+	// producer is measure_task (a tool), covered by its own unit pin; here we assert the
+	// condition value form stays warn-free (no $entity.triple field-to-field, #519).
+	if c, ok := fl.condition("dev.measure_done"); ok {
+		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
+			t.Errorf("floors trigger condition on dev.measure_done uses the warn-flooding $entity.triple form (#519) — the loop-marker chain must compare to a literal")
+		}
+	}
+}
+
 // The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
 // sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
 // posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once
