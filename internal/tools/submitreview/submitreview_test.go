@@ -9,6 +9,7 @@ import (
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/types"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -96,7 +97,7 @@ func verdictFor(w *fakeWriter, taskIndex int) string {
 // verdict (or "") and the result.
 func runTask(t *testing.T, facts []message.Triple, w *fakeWriter, taskIndex int, findings ...string) (string, agentic.ToolResult) {
 	t.Helper()
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call(taskIndex, findings...))
+	res, err := New(&fakeReader{facts: facts}, w, types.PlatformMeta{}, nil).Execute(context.Background(), call(taskIndex, findings...))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestReviewErrorsWhenTaskNotProjected(t *testing.T) {
 func TestReviewRequiresTaskIndex(t *testing.T) {
 	c := call(0)
 	delete(c.Arguments, "task_index")
-	res, err := New(&fakeReader{facts: oneTaskPassing()}, &fakeWriter{}, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, &fakeWriter{}, types.PlatformMeta{}, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -285,7 +286,7 @@ func TestReviewReReviewUpserts(t *testing.T) {
 		t.Fatalf("first review verdict = %q, want approved", v)
 	}
 	// Now a finding appears on re-review of the same task.
-	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, nil).Execute(context.Background(), call(0, "regression found"))
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, types.PlatformMeta{}, nil).Execute(context.Background(), call(0, "regression found"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -302,12 +303,72 @@ func TestReviewReReviewUpserts(t *testing.T) {
 
 // Schema-only registration (nil reader/writer) fails loudly if executed.
 func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil).Execute(context.Background(), call(0))
+	res, err := New(nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), call(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if res.Error == "" {
 		t.Error("a nil-harness review must fail loudly")
+	}
+}
+
+// The chaining marker: submit_review stamps dev.reviewed on ITS OWN review loop entity
+// (value = the task index) after the verdict, so the verify station (8D) can fire on the
+// review loop. It is stamped for a changes_requested verdict too (the coherence gate must
+// still see the review), so a blocking review still chains forward.
+func TestReviewStampsReviewedMarkerOnLoopEvenWhenBlocking(t *testing.T) {
+	w := &fakeWriter{}
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	c := call(0, "regression found") // a finding → changes_requested
+	c.LoopID = "review-loop-abc"
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, platform, nil).Execute(context.Background(), c)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("a blocking verdict is data, not a tool error: %s", res.Error)
+	}
+	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, c.LoopID)
+	if err != nil {
+		t.Fatalf("loop entity id: %v", err)
+	}
+	var found bool
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate != ReviewedPredicate {
+				continue
+			}
+			found = true
+			if tr.Subject != loopEntityID {
+				t.Errorf("%s stamped on %q, want the review LOOP entity %q (not the run)", ReviewedPredicate, tr.Subject, loopEntityID)
+			}
+			if tr.Source != Source {
+				t.Errorf("%s Source = %q, want %q (G5)", ReviewedPredicate, tr.Source, Source)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("submit_review must stamp %s on its loop (even for a blocking verdict) so the verify station fires", ReviewedPredicate)
+	}
+}
+
+// Without a LoopID (unit/registration path) the verdict still lands but the marker is
+// skipped — a missing marker never fails a recorded verdict.
+func TestReviewWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
+	w := &fakeWriter{}
+	verdict, res := run(t, oneTaskPassing(), w) // call sets no LoopID
+	if res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	if verdict != VerdictApproved {
+		t.Fatalf("verdict = %q, want approved", verdict)
+	}
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == ReviewedPredicate {
+				t.Errorf("no LoopID → the reviewed marker must be skipped, but %s was stamped", ReviewedPredicate)
+			}
+		}
 	}
 }
 

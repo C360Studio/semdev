@@ -48,6 +48,8 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `dev.gate_dispatched` | dev-gate-rule | dev-from-task |
 | `dev.routed` | dev-route-rule | dev-from-task |
 | `dev.task_cleared.*` | dev-route-rule | dev-from-task |
+| `dev.review_dispatched` | dev-review-rule | dev-from-task |
+| `dev.reviewed` | reviewer-quinn | dev-from-task |
 
 ## Components
 

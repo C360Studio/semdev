@@ -1,0 +1,45 @@
+{
+  "id": "dev_from_task_review_cleared",
+  "type": "expression",
+  "name": "Gate → ADVANCE: Quinn reviews the cleared task (submit_review)",
+  "description": "The review station (design D16, group 8C). When check_gate advances a task (it measured green and no floor rejected), the reviewer persona Quinn reviews THAT task adversarially and records a per-task review.verdict.<i> — FLOORED by the task's measurement (G3: submit_review takes only task_index + findings, the verdict is DERIVED from the recorded measurement, never a model outcome). D16 moved review INTO the per-task dev loop; this is the station that realizes it. The verdict the open_pr coherence gate (group 8D) rolls up alongside verify.result + openspec.validated.\n\nTRIGGER = the check_gate LOOP's advance decision, chained on the dev.gate_decision loop marker (warn-free — not a run-fact field-to-field trigger, #519). This rule CO-FIRES with the advance router (dev-from-task/08a) on the same gate loop: 08a stamps dev.task_cleared (evidence), this spawns the review. They use DISTINCT self-extinguish markers (08a: dev.routed; this: dev.review_dispatched), so neither blocks the other. Fires on agent.loop.role=coordinator (the gate loop) AND dev.gate_decision eq \"advance\" (a single literal eq — only a cleared task is reviewed; retry/escalate do not review).\n\nRUN BINDING: run_scope=inherit reads the gate loop's bare agent.run and binds the review loop's RunID to the same run, so submit_review reads THIS run's task.spec + measurement.result and stamps review.verdict.<i> on the run.\n\nROLE = reviewer (Quinn — the design roster's reviewer, seeded as a persona fragment + a reviewer model in the registry; the ONE place a non-coordinator role is warranted, because submit_review is Quinn's gate per D16). This is the first role=reviewer loop in the arc. tool_choice=function forces submit_review and tools stays nil (global discovery); the loop calls it and StopLoops, writing review.verdict.* (not coordinator.decision.*), so it triggers no coordinator decision rule. Although the verdict is harness-DERIVED (deterministic, floored by the measurement — the persona does not judge the outcome), the review is conceptually Quinn's, and role=reviewer keeps the roster honest; a role=reviewer loop re-triggers NO rule (no rule fires on role=reviewer; the verify station keys on the dev.reviewed marker, not the role).\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps the fired-once marker dev.review_dispatched=$entity.instance on the gate loop (the firing entity), and the dev.review_dispatched length_eq 0 guard makes the trigger flip false the moment it fires. House restart-safety pattern (dev-from-task/04..08): publish_agent is NOT idempotent and dev.gate_decision stays stamped, so WITHOUT this marker a graph replay with RULE_STATE lost would re-spawn a DUPLICATE review loop. Marker stamped BEFORE the publish so a publish failure stalls-toward-human rather than duplicating. LOOP-scoped (like dev.dispatched) because this rule fires on the gate loop. A fresh gate loop per attempt carries no dev.review_dispatched, so a re-cleared task re-reviews for free.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "dev.gate_decision", "operator": "eq", "value": "advance", "required": true },
+    { "field": "dev.review_dispatched", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.review_dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.reviewer",
+      "role": "reviewer",
+      "model": "reviewer",
+      "tool_choice": { "mode": "function", "function_name": "submit_review" },
+      "properties": {
+        "phase": "review"
+      },
+      "prompt": "SEMDEV REVIEWER (Quinn) — the developed task cleared the sandbox gate (measured green, no structural floor rejected). Review it: call submit_review with task_index 0, listing any required changes as findings. The harness derives the verdict from the task's recorded measurement (a failing or missing measurement, or any finding you raise, blocks approval) — you supply no verdict. Calling submit_review completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "submit_review — Quinn reviews the cleared task on the gate-advance decision (D16, 8C)",
+    "trigger_rationale": "fires on the check_gate loop's dev.gate_decision eq advance (a literal eq loop marker, #519-immune). CO-FIRES with the advance router (08a) on the same gate loop via a distinct dev.review_dispatched marker.",
+    "role_rationale": "reviewer (Quinn; seeded persona fragment + reviewer model). The one non-coordinator role in the arc, because submit_review is Quinn's D16 gate. The verdict is still harness-derived/floored (G3); role=reviewer re-triggers no rule (the verify station keys on the dev.reviewed marker, not the role).",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.review_dispatched marker + length_eq 0 guard (house pattern). publish_agent is not idempotent, so the one-shot is intrinsic; submit_review's StopLoop keeps the review loop one turn. Marker stamped BEFORE the publish. A fresh gate loop per attempt re-arms review for free.",
+    "g3": "submit_review takes only task_index + findings; the verdict is DERIVED from the recorded measurement (measurement.CanApprove) and Quinn's findings, never a model outcome. A finding is additive (can only require more, never approve past a failure).",
+    "chain_note": "the verify station (group 8D) fires on the review LOOP's dev.reviewed marker (submit_review stamps it on its own loop) and runs the cold clean-room verify; then the coherence gate rolls up verify.result eq pass + review.verdict.* eq approved + openspec.validated ne \"\" → open_pr. See design.md group-8 section.",
+    "deferred_tool_scoping": "tools omitted = global discovery; tool_choice=function:submit_review structurally constrains the call. Residual is populating bootstrap allowed_tools before the first real-LLM token (MEDIUM-3). Inert under the mock."
+  }
+}

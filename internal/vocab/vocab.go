@@ -131,6 +131,18 @@ var Predicates = []Predicate{
 	// dev loop converged (measured green, no floor rejected, gate advanced). The clean-room
 	// verify station (group 8) chains on it. Rule-owned (writer dev-route-rule).
 	{"dev.task_cleared.*", "dev-route-rule", "dev-from-task", sandbox},
+
+	// the REVIEW station (group 8C). dev.review_dispatched is the fired-once marker the
+	// review-trigger (dev-from-task/09) stamps on the gate loop before spawning Quinn's
+	// submit_review, so a graph replay cannot re-spawn a duplicate review loop
+	// (self-extinguishing, loop-scoped like dev.dispatched).
+	{"dev.review_dispatched", "dev-review-rule", "dev-from-task", sandbox},
+	// dev.reviewed is the CHAINING marker submit_review stamps on ITS OWN review loop
+	// (value = task index) once it records a verdict — the "this reviewer loop just
+	// reviewed" signal the verify station (group 8D) fires on to spawn verify_artifact.
+	// Tool-owned (writer reviewer-quinn, submit_review's Source — like measure_task's
+	// dev.measure_done); distinguishes the review loop from other loops.
+	{"dev.reviewed", "reviewer-quinn", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

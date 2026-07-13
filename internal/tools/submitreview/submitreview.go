@@ -46,15 +46,24 @@ import (
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	"github.com/c360studio/semstreams/types"
 )
 
 // ToolName is the registered tool name and the reviewer's verdict handler.
 const ToolName = "submit_review"
 
-// Source is stamped on every review.verdict.<i> triple. It MUST equal the writer
-// declared for the review.verdict.* namespace in internal/vocab (G5) — a conformance
-// pin cross-checks it.
+// Source is stamped on every review.verdict.<i> triple AND the dev.reviewed loop marker.
+// It MUST equal the writer declared for the review.verdict.* namespace and dev.reviewed in
+// internal/vocab (G5) — a conformance pin cross-checks it.
 const Source = "reviewer-quinn"
+
+// ReviewedPredicate is the chaining marker submit_review stamps on ITS OWN review loop
+// entity (value = task index) once it has recorded a verdict — the slug-independent "this
+// reviewer loop just reviewed" signal the clean-room verify station (group 8D) fires on to
+// spawn verify_artifact. It rides the review loop (which carries agent.run) so the
+// verify-trigger's run_scope=inherit binds to the same run; it distinguishes the review
+// loop from other loops. Mirrors measure_task's dev.measure_done / check_floors' dev.floors_done.
+const ReviewedPredicate = "dev.reviewed"
 
 // VerdictPrefix is the namespace this tool owns on the run entity: the reviewer's
 // current per-task verdict, keyed by task index (review.verdict.<i>). Per-task
@@ -78,19 +87,21 @@ const (
 // Executor reads the run's task.spec + measurement facts, derives the floored
 // verdict, and stamps review.verdict.
 type Executor struct {
-	reader changefacts.Reader
-	writer agentictools.OwnedFactWriter
-	logger *slog.Logger
+	reader   changefacts.Reader
+	writer   agentictools.OwnedFactWriter
+	platform types.PlatformMeta // builds the review loop's entity id for the chaining marker
+	logger   *slog.Logger
 }
 
 // New builds the submit_review executor. reader/writer may be nil for schema-only
 // registration (the tool censuses inspect ListTools without a live NATS client);
-// Execute fails loudly if either is nil.
-func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// Execute fails loudly if either is nil. platform builds the review loop's entity id for
+// the dev.reviewed chaining marker.
+func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{reader: reader, writer: writer, logger: logger}
+	return &Executor{reader: reader, writer: writer, platform: platform, logger: logger}
 }
 
 type payload struct {
@@ -181,6 +192,37 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.String("verdict", verdict),
 		slog.Bool("measurement_pass", measurementPass),
 		slog.Int("findings", len(findings)))
+
+	// Stamp the chaining marker on THIS review loop entity (value = task index) so the
+	// verify station (group 8D) can fire on this review loop and inherit the run. The
+	// verdict (the substance) is written FIRST; the marker (the chaining signal) follows,
+	// so a marker-write failure surfaces only AFTER the verdict is durably recorded
+	// (measure_task's discipline). It is stamped regardless of approved/changes_requested —
+	// a changes_requested verdict must still chain forward so the coherence gate can block
+	// on it; only a submit_review ERROR (no marker) stalls the chain. Failure posture: a
+	// marker error returns errResult WITHOUT StopLoop, so the forced loop re-runs
+	// (re-stamping idempotently) until it lands or MaxIterations trips — never a silent
+	// green. A missing LoopID (unit-test-only) skips the marker with a loud warn.
+	if call.LoopID == "" {
+		e.logger.Warn("submit_review: no loop_id on the tool call — skipping the reviewed marker; the verify station will not trigger",
+			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
+	} else {
+		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
+		if lerr != nil {
+			return errResult(call, agentic.ToolErrorInternal, "submit_review: construct review loop entity id: %v", lerr)
+		}
+		marker := []message.Triple{{
+			Subject:    loopEntityID,
+			Predicate:  ReviewedPredicate,
+			Object:     idxStr,
+			Source:     Source,
+			Timestamp:  time.Now().UTC(),
+			Confidence: 1.0,
+		}}
+		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{ReviewedPredicate}); merr != nil {
+			return errResult(call, writeErrKind(merr), "submit_review: stamp %s on %s: %v", ReviewedPredicate, loopEntityID, merr)
+		}
+	}
 
 	summary, _ := json.Marshal(map[string]any{
 		"task_index":       idx,

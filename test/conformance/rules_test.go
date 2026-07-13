@@ -662,6 +662,49 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 	}
 }
 
+// The review station (dev-from-task/09, group 8C): on the gate loop's ADVANCE decision,
+// Quinn reviews the cleared task. Like every publish_agent spawn rule it MUST be
+// self-extinguishing — LOOP-scoped: a fired-once dev.review_dispatched marker stamped
+// BEFORE the publish, guarded by length_eq 0. It must fire on the advance decision (a
+// literal eq loop marker), force submit_review, and spawn a role=reviewer loop (Quinn's
+// D16 gate). Red-first: drop any and this fails.
+func TestReviewTriggerIsSelfExtinguishing(t *testing.T) {
+	r, ok := runLifecycleRules(t)["dev_from_task_review_cleared"]
+	if !ok {
+		t.Fatal("missing dev_from_task_review_cleared rule")
+	}
+	const marker = "dev.review_dispatched"
+	if !r.hasAbsenceGuard(marker) {
+		t.Errorf("review trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate review loop (publish_agent is not idempotent)", marker)
+	}
+	if !r.hasTriple(marker) {
+		t.Errorf("review trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !r.markerBeforePublish(marker) {
+		t.Errorf("review trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
+	}
+	if !r.forcesFunction("submit_review") {
+		t.Error("review trigger must force the submit_review call (tool_choice mode=function, function_name=submit_review)")
+	}
+	// It fires on the gate loop's ADVANCE decision (only a cleared task is reviewed).
+	if c, ok := r.condition("dev.gate_decision"); !ok || c.Operator != "eq" || c.Value != "advance" {
+		t.Errorf("review trigger must fire on dev.gate_decision eq advance (a cleared task), got %+v", c)
+	}
+	if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
+		t.Error("review trigger must fire on the coordinator gate loop (agent.loop.role == coordinator)")
+	}
+	// It spawns a role=reviewer loop — Quinn's D16 gate, the one non-coordinator role.
+	spawnsReviewer := false
+	for _, a := range r.OnEnter {
+		if a.Type == "publish_agent" && a.Role == "reviewer" {
+			spawnsReviewer = true
+		}
+	}
+	if !spawnsReviewer {
+		t.Error("review trigger must spawn a role=reviewer loop (Quinn reviews, D16)")
+	}
+}
+
 // The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
 // sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
 // posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once

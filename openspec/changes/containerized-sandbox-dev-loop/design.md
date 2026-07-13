@@ -505,6 +505,25 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   to a network-kind tool error) rather than an operator park like `ProveBaseline` — unreachable in the live flow
   (`ResolveManifest` guarantees `TestCmd`, and the baseline already proved `ResolveCmd`+`CacheHomeEnvs`). Defense-in-depth
   only; if verify ever parks the operator on a declaration fault, split this branch.
+- **[8B script-indirection close — the tripwire is the SOLE static control] (semstreams-reviewer 8B HIGH, fixed)** → the
+  cold-verify container runs WITH network (its job is to resolve declared deps), so a smuggled build-time fetch (`RUN
+  ./setup.sh` where the script curls a raw URL) would ALSO succeed cold — the cold proof is blind to it by design. The
+  `forbidden` scan is therefore the only control for the class, so it scans the build files AND the scripts they invoke
+  (`*.sh`/`*.bash`/`gradlew`), skips vendor/testdata, and is framed as an HONEST denylist (it catches the known vectors,
+  does not claim to prove self-containment). A build ecosystem not yet in the scan set is a fail-open residual to close
+  as new profiles land (the JVM wrapper `distributionUrl` files are stubbed for the OSH M2 target).
+- **[8C review station — the first role=reviewer loop; role choice confirmed] (8C, semstreams-reviewer APPROVE)** → D16's
+  per-task review is realized by `dev-from-task/09`, co-firing on the gate loop's `dev.gate_decision eq advance` (distinct
+  `dev.review_dispatched` marker from 08a's `dev.routed`) and spawning Quinn (`role=reviewer` — the seeded reviewer
+  persona/model; the ONE non-coordinator forced-tool loop, since submit_review is Quinn's D16 gate). The verdict stays
+  harness-DERIVED (floored by the measurement, G3), so role=coordinator would be functionally identical — role=reviewer is
+  the roster-honest choice AND provably re-triggers no rule (no rule keys on role=reviewer; the verify station keys on the
+  `dev.reviewed` loop marker). submit_review stamps `dev.reviewed` on its own loop (value = task index) after the verdict,
+  even for `changes_requested` (a blocking review must still reach the coherence gate). **⚠ 8D FORWARD CHECK (reviewer
+  note):** the verify-trigger will fire on `dev.reviewed` on the REVIEW loop and use `run_scope=inherit` to reach the run —
+  verify explicitly that a `role=reviewer`, `run_scope=inherit` loop carries the `agent.run` anchor (it is inert in 8C, so
+  8C did not exercise the run-binding of a reviewer loop). The gate/floors/measure loops (role=coordinator) all bind
+  correctly; a reviewer loop is the first of its role to be depended on for chaining.
 
 ## Migration Plan
 

@@ -93,6 +93,10 @@ const journeyFloorsMarker = "run the structural floors"
 // prompt threads no slug/ref, so this stable phrase keys the positional cursor.
 const journeyGateMarker = "gate the attempt"
 
+// journeyReviewMarker is a distinctive substring of Quinn's review prompt
+// (dev-from-task/09-review-cleared-task.json) the mock's submit_review turn guards on.
+const journeyReviewMarker = "SEMDEV REVIEWER"
+
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -142,18 +146,20 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   9. M1 measure coordinator    → measure_task(index 0)    [in-container go test, real]
 	//  10. F1 floors coordinator     → check_floors(index 0)    [structural floors on the diff]
 	//  11. G1 gate coordinator       → check_gate(index 0)      [advance/retry/escalate route]
+	//  12. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–11 thread the run entity id, so they mark on a stable
-	// phrase of their prompts (provision, dev re-wake, developer, measure, floors, gate).
-	// The cursor — not the marker — distinguishes the turns: projection → provision → dev
-	// re-wake → dispatch → measure → floors → gate is serialized by the rule gates
-	// (sandbox/01 gates on task.spec presence, the dev re-wake gates on sandbox.ready,
-	// dispatch fires on the dev_from_task decision, measure fires on the developer loop's
-	// success, floors chains off the measure loop's dev.measure_done marker, the gate
-	// chains off the floors loop's dev.floors_done marker), so no two forced turns race.
-	// An unscripted turn returns mockllm.UnmatchedSentinel, failing loudly not green.
+	// mark on the slug; turns 6–12 thread the run entity id, so they mark on a stable
+	// phrase of their prompts (provision, dev re-wake, developer, measure, floors, gate,
+	// review). The cursor — not the marker — distinguishes the turns: projection →
+	// provision → dev re-wake → dispatch → measure → floors → gate → review is serialized by
+	// the rule gates (sandbox/01 gates on task.spec presence, the dev re-wake gates on
+	// sandbox.ready, dispatch fires on the dev_from_task decision, measure fires on the
+	// developer loop's success, floors chains off the measure loop's dev.measure_done
+	// marker, the gate chains off the floors loop's dev.floors_done marker, review co-fires
+	// on the gate loop's advance decision), so no two forced turns race. An unscripted turn
+	// returns mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -207,6 +213,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyGateMarker,
 			Tool:   &mockllm.ToolCall{Name: "check_gate", Args: map[string]any{"task_index": 0}},
+		},
+		mockllm.Fixture{
+			Marker: journeyReviewMarker,
+			Tool:   &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -396,16 +406,26 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireGateAdvanced(ctx, t, runEntityID)
 	t.Logf("station 13: the gate routed advance — dev.gate.0.decision=advance, task cleared for verify (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly eleven model turns drove the arc through the gate station: …, D1
-	// apply_patch, M1 measure_task, F1 check_floors, G1 check_gate. The resume + anchor +
-	// attempt-append + the three loop markers + the advance router's fact-stamp are
-	// rule/tool-owned (no extra model call — the advance route is add_triple only, not a
-	// spawn). The one new turn since station 12 is the forced gate loop (G1). A spurious
-	// re-spawn (the gate loop re-triggering a rule, a router re-firing, a retry
-	// re-dispatch on a clean attempt), a double dispatch, or an unscripted turn would push
-	// this past 11.
-	if got := mock.RequestCount(); got != 11 {
-		t.Fatalf("expected exactly 11 model turns (…, F1 check_floors, G1 check_gate), got %d — extra turns indicate a re-spawn/loop, an errant router re-dispatch, or an unscripted turn", got)
+	// Station 14 — Quinn reviews the cleared task (D16 per-task review). The review-trigger
+	// (dev-from-task/09) co-fires on the gate loop's advance decision and spawns a forced
+	// submit_review loop (role=reviewer, run_scope=inherit), which reads the task's
+	// task.spec + measurement.result and DERIVES the floored verdict (G3 — no model
+	// outcome). Because the task measured green (measurement.result.0.passed=true) and the
+	// mock raises no findings, the verdict is approved: assert review.verdict.0 == approved
+	// — the per-task signal the open_pr coherence gate (8D) rolls up. Red-first: disable
+	// dev-from-task/09 and this station times out; break the measurement and the verdict
+	// comes back changes_requested.
+	requireReviewApproved(ctx, t, runEntityID)
+	t.Logf("station 14: Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly twelve model turns drove the arc through the review station: …, G1
+	// check_gate, R1 submit_review. The advance router's fact-stamp + the review loop's
+	// dev.reviewed marker are rule/tool-owned (no extra model call). The one new turn since
+	// station 13 is the forced review loop (R1). A spurious re-spawn (the review loop
+	// re-triggering a rule, the gate loop double-firing review/advance), a double dispatch,
+	// or an unscripted turn would push this past 12.
+	if got := mock.RequestCount(); got != 12 {
+		t.Fatalf("expected exactly 12 model turns (…, G1 check_gate, R1 submit_review), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
 	}
 }
 
@@ -633,6 +653,31 @@ func requireGateAdvanced(ctx context.Context, t *testing.T, runEntityID string) 
 	}, "run entity "+runEntityID+" never gained "+decision+"=advance with "+cleared+" present — the gate-trigger (dev-from-task/07) did not fire, "+
 		"check_gate could not read the verdicts, or the advance router (dev-from-task/08a) did not fire: check check_floors stamped dev.floors_done on its loop, "+
 		"the gate rule fires on that marker, check_gate is advertised/scripted, and the router matches dev.gate_decision eq advance")
+}
+
+// requireReviewApproved polls the run entity until review.verdict.0 == "approved" — the
+// proof the review-trigger (dev-from-task/09) fired on the gate loop's advance, the forced
+// submit_review loop (Quinn, role=reviewer) ran, and it DERIVED an approving verdict from
+// the task's passing measurement with no findings. A stamped changes_requested is a hard
+// failure (the measurement floor blocked, or a finding was raised), surfaced immediately.
+func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const verdict = "review.verdict.0"
+	requireEventually(t, 45*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if got := tripleString(e, verdict); got == "changes_requested" {
+			t.Fatalf("submit_review stamped %s=changes_requested — the measurement floor blocked approval (measurement.result.0 not passing) or Quinn raised a finding: check the gate advanced on a green measurement and the mock submit_review fixture supplies no findings", verdict)
+		}
+		return tripleString(e, verdict) == "approved"
+	}, "run entity "+runEntityID+" never gained "+verdict+"=approved — the review-trigger (dev-from-task/09) did not fire, "+
+		"or submit_review could not derive the verdict: check check_gate advanced (dev.gate.0.decision=advance), the review rule fires on that gate-loop marker, "+
+		"submit_review is advertised/scripted as a role=reviewer loop, and the task's measurement.result.0 is passing")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for

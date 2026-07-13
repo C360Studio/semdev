@@ -223,7 +223,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// via the shared OwnedFactWriter (its own Source, reviewer-quinn — G5-safe). Takes
 	// no runner/workspace (it runs nothing). Both nil in the census (schema-only);
 	// Execute fails loudly if either is missing.
-	if err := reg.RegisterExecutor(submitreview.New(factReader, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(submitreview.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}
 
