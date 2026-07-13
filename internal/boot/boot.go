@@ -22,12 +22,14 @@ import (
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
+	"github.com/c360studio/semdev/internal/tools/checkcoherence"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/checkgate"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
+	"github.com/c360studio/semdev/internal/tools/openpr"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
@@ -264,6 +266,26 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// entity id for the marker. Each nil dep makes Execute fail loudly.
 	if err := reg.RegisterExecutor(checkgate.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", checkgate.ToolName, err)
+	}
+
+	// check_coherence (dev-from-task, group 8D) is the open_pr coherence gate: it rolls up
+	// verify.result + openspec.validated + every projected task's review.verdict (all off
+	// the run via the shared changefacts.Reader) and derives coherent/blocked in Go — the
+	// model supplies nothing (G3), and it fails CLOSED (any non-pass/absent signal blocks).
+	// It fires no transition (G2): it stamps pr.coherence.* evidence + a dev.coherence_decided
+	// loop marker (its own Source, coherence-tools — G5-safe), and two router rules act on
+	// the marker. deps.Platform builds the coherence loop's entity id. Each nil dep fails loud.
+	if err := reg.RegisterExecutor(checkcoherence.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", checkcoherence.ToolName, err)
+	}
+
+	// open_pr (forge-io, group 8D) is the run's delivery step: on a coherent run a router
+	// rule forces it to record pr.ref. At M0 pr.ref is a deterministic LOCAL delivery stub
+	// (the real forge-io PR is M2); the coherence gate that got here genuinely passed, only
+	// the delivery target is stubbed (NOT semspec's placeholder-pass). G3 (no args), G2 (no
+	// transition), single writer pr.ref (open-pr). Nil writer fails loud.
+	if err := reg.RegisterExecutor(openpr.New(changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", openpr.ToolName, err)
 	}
 
 	// provision_sandbox (sandbox) is the provision-and-prove-cold station: on an

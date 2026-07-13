@@ -3,10 +3,12 @@ package conformance
 import (
 	"testing"
 
+	"github.com/c360studio/semdev/internal/tools/checkcoherence"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/checkgate"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
+	"github.com/c360studio/semdev/internal/tools/openpr"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
@@ -58,6 +60,9 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"check_floors", checkfloors.Source, checkfloors.FloorsDonePredicate},
 		{"check_gate", checkgate.Source, "dev.gate.0.decision"},
 		{"check_gate", checkgate.Source, checkgate.GateDecisionMarker},
+		{"check_coherence", checkcoherence.Source, "pr.coherence.decision"},
+		{"check_coherence", checkcoherence.Source, checkcoherence.DecidedMarker},
+		{"open_pr", openpr.Source, openpr.RefPredicate},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 	}
 	for _, c := range cases {

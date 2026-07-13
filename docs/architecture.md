@@ -22,7 +22,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `run.awaiting_human` | park-rule | run-lifecycle |
 | `run.dev_kickoff` | dev-rewake-rule | dev-from-task |
 | `run.projection_kickoff` | dev-projection-rule | dev-from-task |
-| `pr.ref` | pr-delivery-adapter | forge-io |
+| `pr.ref` | open-pr | forge-io |
 | `openspec.change.*` | create-change-author-tool | openspec-io |
 | `openspec.spec.*` | brownfield-spec-projector | openspec-io |
 | `openspec.validated` | openspec-validate-harness | openspec-io |
@@ -52,6 +52,10 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `dev.reviewed` | reviewer-quinn | dev-from-task |
 | `dev.verify_dispatched` | dev-verify-rule | dev-from-task |
 | `dev.verified` | verify-harness | dev-from-task |
+| `pr.coherence.*` | coherence-tools | forge-io |
+| `dev.coherence_decided` | coherence-tools | dev-from-task |
+| `dev.coherence_dispatched` | dev-coherence-rule | dev-from-task |
+| `dev.pr_routed` | dev-pr-route-rule | dev-from-task |
 
 ## Components
 
@@ -73,6 +77,8 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
 | `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
 | `check_gate` | tool | dev-from-task | `check-gate-tool` |
+| `check_coherence` | tool | dev-from-task | `check-coherence-tool` |
+| `open_pr` | tool | forge-io | `open-pr-tool` |
 | `provision_sandbox` | tool | sandbox | `provision-sandbox-tool` |
 | `apply_patch` | tool | sandbox | `apply-patch-tool` |
 

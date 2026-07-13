@@ -41,7 +41,11 @@ var Predicates = []Predicate{
 	{"run.awaiting_human", "park-rule", "run-lifecycle", m0},
 	{"run.dev_kickoff", "dev-rewake-rule", "dev-from-task", m0},
 	{"run.projection_kickoff", "dev-projection-rule", "dev-from-task", m0},
-	{"pr.ref", "pr-delivery-adapter", "forge-io", m0},
+	// pr.ref is the delivered PR reference. Its writer was reconciled at 8D from the
+	// placeholder pr-delivery-adapter (which never existed) to open-pr, the tool that
+	// actually stamps it (an M0 local-delivery stub; the M2 forge-io adapter replaces it
+	// with a live PR URL — same predicate, same single writer role).
+	{"pr.ref", "open-pr", "forge-io", m0},
 	{"openspec.change.*", "create-change-author-tool", "openspec-io", m0},
 	{"openspec.spec.*", "brownfield-spec-projector", "openspec-io", m0},
 	{"openspec.validated", "openspec-validate-harness", "openspec-io", m0},
@@ -152,6 +156,22 @@ var Predicates = []Predicate{
 	// (value = the cold-verify outcome) — the signal the coherence station (group 8D) fires
 	// on to spawn check_coherence. Tool-owned (writer verify-harness, verify_artifact's Source).
 	{"dev.verified", "verify-harness", "dev-from-task", sandbox},
+
+	// the COHERENCE GATE + delivery (group 8D). check_coherence rolls up verify.result +
+	// openspec.validated + every review.verdict and derives coherent/blocked — the harness
+	// owns the roll-up (G3). pr.coherence.* is the decision EVIDENCE on the run (the human
+	// who gets parked reads it); dev.coherence_decided is the loop marker the router rules
+	// act on. Both tool-owned (writer coherence-tools).
+	{"pr.coherence.*", "coherence-tools", "forge-io", sandbox},
+	{"dev.coherence_decided", "coherence-tools", "dev-from-task", sandbox},
+	// dev.coherence_dispatched is the fired-once marker the coherence-trigger (dev-from-task/11)
+	// stamps on the verify loop before spawning check_coherence (self-extinguishing, loop-scoped).
+	{"dev.coherence_dispatched", "dev-coherence-rule", "dev-from-task", sandbox},
+	// dev.pr_routed is the fired-once marker the two delivery routers (dev-from-task/12a/b)
+	// stamp on the coherence loop before acting, so a graph replay cannot re-fire a router
+	// (critical for the coherent router, whose publish_agent open_pr is not idempotent). One
+	// logical writer (dev-pr-route-rule) realized by two mutually-exclusive rule files.
+	{"dev.pr_routed", "dev-pr-route-rule", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

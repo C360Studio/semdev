@@ -1,0 +1,42 @@
+{
+  "id": "dev_from_task_route_incoherent",
+  "type": "expression",
+  "name": "Coherence → BLOCKED: park the incoherent run toward the human",
+  "description": "The blocked router (design D16/SB5, group 8D). When check_coherence derives BLOCKED — the clean-room verify did not pass, the change did not validate, or a projected task lacks an approved review verdict — the run CANNOT deliver a coherent PR. This PARKS the run toward the human: it records run.awaiting_human on the run and posts to the channel-agnostic user-response bus. No Go reconciler, backstop ticker, or app-side state machine opens a PR for a run whose delivery signals do not cohere (G2/B3/B7); the human sees the detailed pr.coherence.reason check_coherence stamped. This is the honest terminal of an incoherent run — the semspec disease inverted: a run that cannot prove its delivery signals NEVER ships a PR, it parks.\n\nWRITER: run.awaiting_human's writer is the park-rule subsystem (G5) — the FOURTH realization of that single logical writer, alongside run-lifecycle/03 (ask_human), sandbox/02 (unprovable sandbox), and dev-from-task/08c (dev-loop budget exhausted). All mean the identical thing (this run awaits a human, here is why) and upsert the one park marker the whole system reads (the D15 park-exclusion forward-contract keys on run.awaiting_human); they differ only in TRIGGER. Rule add_triple carries no Source, so the vocab keeps the single run.awaiting_human entry with no runtime writer drift.\n\nTRIGGER = the check_coherence LOOP terminal via the dev.coherence_decided marker. Fires on agent.loop.role=coordinator AND dev.coherence_decided eq \"blocked\" — a single LITERAL eq (#519-immune), mutually exclusive with the coherent router (12a).\n\nRUN BINDING: the park marker goes on the RUN (subject-override $entity.triple.agent.run.entity_id — the coherence loop carries the run anchor), like dev-from-task/08c.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps dev.pr_routed=$entity.instance on the coherence loop, guarded by dev.pr_routed length_eq 0. This LOOP-scoped guard is required (not a run.awaiting_human guard) because this rule fires on the coherence loop, which does NOT carry the run-scoped run.awaiting_human — a run-scoped guard would read absent on the loop and re-post to the user bus every rescan (the same reasoning as dev-from-task/08c escalate).",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "dev.coherence_decided", "operator": "eq", "value": "blocked", "required": true },
+    { "field": "dev.pr_routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.pr_routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity_id",
+      "predicate": "run.awaiting_human",
+      "object": "the run's delivery signals do not cohere (a non-pass verify, an unvalidated change, or an unapproved task); see pr.coherence.reason"
+    },
+    {
+      "type": "publish",
+      "subject": "user.response.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "park",
+    "station": "route incoherent — park the un-deliverable run toward the human (D16/SB5, 8D)",
+    "trigger_rationale": "fires on the check_coherence loop's dev.coherence_decided marker with a LITERAL eq \"blocked\" — #519-immune, mutually exclusive with the coherent router (12a).",
+    "writer_note": "run.awaiting_human is written by the park-rule subsystem (G5) — this is the FOURTH realization of that single logical writer, sharing it with run-lifecycle/03, sandbox/02, and dev-from-task/08c. Rule add_triple carries no Source, so the vocab's single run.awaiting_human entry is not drifted.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.pr_routed marker + length_eq 0 guard. A LOOP guard (not run.awaiting_human) is REQUIRED because the rule fires on the coherence loop, which does not carry the run-scoped park marker.",
+    "fail_closed": "an incoherent run never opens a PR (the class both predecessors faked). check_coherence fails closed (a missing signal blocks), and this surfaces the park honestly with the reason."
+  }
+}

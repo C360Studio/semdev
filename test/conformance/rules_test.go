@@ -662,6 +662,62 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 	}
 }
 
+// open_pr is NON-IDEMPOTENT (a second spawn = a duplicate PR), so — like the developer
+// spawners — ONLY the coherent router (dev-from-task/12a) may force it. This pin catches a
+// future second open_pr spawner that the shared dev.pr_routed guard would not (a distinct
+// rule with its own guard could still open a second PR). Red-first: force open_pr from any
+// other rule and this fails.
+func TestOnlySanctionedOpenPRSpawners(t *testing.T) {
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	var spawners []string
+	for _, r := range rules {
+		if r.forcesFunction("open_pr") {
+			spawners = append(spawners, r.ID)
+			if r.ID != "dev_from_task_route_open_pr" {
+				t.Errorf("rule %q forces open_pr but is not the sanctioned spawner — open_pr is non-idempotent (a re-spawn opens a duplicate PR); ONLY the coherent router (dev-from-task/12a) may force it", r.ID)
+			}
+		}
+	}
+	if !slices.Contains(spawners, "dev_from_task_route_open_pr") {
+		t.Error("the coherent router (dev-from-task/12a) does not force open_pr — the delivery path is broken")
+	}
+}
+
+// run.awaiting_human is ONE logical park writer (G5) realized by a SANCTIONED SET of rule
+// files (rules carry no Source, so the tool-Source cross-check can't see them — this pin is
+// what keeps the four realizations from silently growing a fifth that means something
+// subtly different). Every rule that stamps run.awaiting_human must be in the set. Red-first:
+// add an add_triple run.awaiting_human to any other rule and this fails.
+func TestOnlySanctionedParkWriters(t *testing.T) {
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	sanctioned := map[string]bool{
+		"run_park_awaiting_human":        true, // run-lifecycle/03 — a coordinator ask_human decision
+		"sandbox_park_unprovable":        true, // sandbox/02 — an unprovable sandbox
+		"dev_from_task_route_escalate":   true, // 08c — the dev-loop budget exhausted
+		"dev_from_task_route_incoherent": true, // 12b — the delivery signals do not cohere
+	}
+	var writers []string
+	for _, r := range rules {
+		if r.hasTriple("run.awaiting_human") {
+			writers = append(writers, r.ID)
+			if !sanctioned[r.ID] {
+				t.Errorf("rule %q stamps run.awaiting_human but is not a sanctioned park writer — run.awaiting_human is ONE logical writer (G5); a new park realization must be added to the sanctioned set deliberately (and mean the identical thing: this run awaits a human)", r.ID)
+			}
+		}
+	}
+	for id := range sanctioned {
+		if !slices.Contains(writers, id) {
+			t.Errorf("sanctioned park writer %q does not stamp run.awaiting_human — a park path was silently dropped", id)
+		}
+	}
+}
+
 // The review station (dev-from-task/09, group 8C): on the gate loop's ADVANCE decision,
 // Quinn reviews the cleared task. Like every publish_agent spawn rule it MUST be
 // self-extinguishing — LOOP-scoped: a fired-once dev.review_dispatched marker stamped
@@ -739,6 +795,80 @@ func TestVerifyTriggerIsSelfExtinguishing(t *testing.T) {
 	if c, ok := v.condition("dev.reviewed"); ok {
 		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
 			t.Errorf("verify trigger condition on dev.reviewed uses the warn-flooding $entity.triple form (#519)")
+		}
+	}
+}
+
+// The coherence gate (dev-from-task/11, group 8D): on the verify loop terminal, roll up
+// the delivery gate. Self-extinguishing (dev.coherence_dispatched before publish), forces
+// check_coherence, fires on the dev.verified marker.
+func TestCoherenceTriggerIsSelfExtinguishing(t *testing.T) {
+	r, ok := runLifecycleRules(t)["dev_from_task_coherence_gate"]
+	if !ok {
+		t.Fatal("missing dev_from_task_coherence_gate rule")
+	}
+	const marker = "dev.coherence_dispatched"
+	if !r.hasAbsenceGuard(marker) || !r.hasTriple(marker) || !r.markerBeforePublish(marker) {
+		t.Errorf("coherence trigger must be self-extinguishing (%s guard + add_triple + marker-before-publish)", marker)
+	}
+	if !r.forcesFunction("check_coherence") {
+		t.Error("coherence trigger must force the check_coherence call")
+	}
+	if c, ok := r.condition("dev.verified"); !ok || c.Operator != "ne" {
+		t.Error("coherence trigger must fire on the verify loop's dev.verified marker (ne \"\")")
+	}
+	if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
+		t.Error("coherence trigger must fire on the coordinator verify loop")
+	}
+}
+
+// The delivery routers (dev-from-task/12a/b, group 8D): fire on the coherence loop's
+// dev.coherence_decided marker (literal eq, mutually exclusive), self-extinguishing via the
+// shared dev.pr_routed marker. 12a (coherent) spawns open_pr (a publish_agent — the marker is
+// load-bearing since open_pr is not idempotent); 12b (blocked) parks run.awaiting_human (the
+// fourth park realization) with NO transition (G2).
+func TestDeliveryRoutersAreSelfExtinguishing(t *testing.T) {
+	rules := runLifecycleRules(t)
+	const marker = "dev.pr_routed"
+	routers := []struct {
+		id       string
+		decision string
+	}{
+		{"dev_from_task_route_open_pr", "coherent"},
+		{"dev_from_task_route_incoherent", "blocked"},
+	}
+	for _, rt := range routers {
+		r, ok := rules[rt.id]
+		if !ok {
+			t.Fatalf("missing %s rule", rt.id)
+		}
+		if !r.hasAbsenceGuard(marker) || !r.hasTriple(marker) {
+			t.Errorf("%s must self-extinguish via %s (guard + add_triple)", rt.id, marker)
+		}
+		c, ok := r.condition("dev.coherence_decided")
+		if !ok || c.Operator != "eq" || c.Value != rt.decision {
+			t.Errorf("%s must fire on dev.coherence_decided eq %q (literal), got %+v", rt.id, rt.decision, c)
+		}
+		if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
+			t.Errorf("%s must fire on the coordinator coherence loop", rt.id)
+		}
+	}
+	// 12a coherent → open_pr (marker before the non-idempotent publish).
+	if openpr, ok := rules["dev_from_task_route_open_pr"]; ok {
+		if !openpr.forcesFunction("open_pr") {
+			t.Error("coherent router must force open_pr")
+		}
+		if !openpr.markerBeforePublish(marker) {
+			t.Errorf("coherent router must stamp %s BEFORE its publish (open_pr is not idempotent — a re-fire opens a duplicate PR)", marker)
+		}
+	}
+	// 12b blocked → park, no transition.
+	if park, ok := rules["dev_from_task_route_incoherent"]; ok {
+		if !park.hasTriple("run.awaiting_human") {
+			t.Error("blocked router must stamp run.awaiting_human (the fourth park realization)")
+		}
+		if park.firesTransition() {
+			t.Error("blocked router must fire NO lifecycle transition (G2)")
 		}
 	}
 }

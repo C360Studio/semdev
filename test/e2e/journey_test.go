@@ -101,6 +101,14 @@ const journeyReviewMarker = "SEMDEV REVIEWER"
 // (dev-from-task/10-verify-reviewed-task.json) the mock's verify_artifact turn guards on.
 const journeyVerifyMarker = "clean-room COLD verify"
 
+// journeyCoherenceMarker is a distinctive substring of the coherence-gate prompt
+// (dev-from-task/11-coherence-gate.json) the mock's check_coherence turn guards on.
+const journeyCoherenceMarker = "roll up the delivery coherence gate"
+
+// journeyOpenPRMarker is a distinctive substring of the open_pr prompt
+// (dev-from-task/12a-open-pr.json) the mock's open_pr turn guards on.
+const journeyOpenPRMarker = "Open the pull request"
+
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -152,20 +160,21 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//  11. G1 gate coordinator       → check_gate(index 0)      [advance/retry/escalate route]
 	//  12. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
 	//  13. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
+	//  14. CO1 coherence coordinator → check_coherence()        [roll up verify+validate+review]
+	//  15. PR1 delivery coordinator  → open_pr()                [record pr.ref — the PR]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–13 thread the run entity id, so they mark on a stable
+	// mark on the slug; turns 6–15 thread the run entity id, so they mark on a stable
 	// phrase of their prompts (provision, dev re-wake, developer, measure, floors, gate,
-	// review, verify). The cursor — not the marker — distinguishes the turns: projection →
-	// provision → dev re-wake → dispatch → measure → floors → gate → review → verify is
-	// serialized by the rule gates (sandbox/01 gates on task.spec presence, the dev re-wake
-	// gates on sandbox.ready, dispatch fires on the dev_from_task decision, measure fires on
-	// the developer loop's success, floors chains off the measure loop's dev.measure_done
-	// marker, the gate chains off the floors loop's dev.floors_done marker, review co-fires
-	// on the gate loop's advance decision, verify chains off the review loop's dev.reviewed
-	// marker), so no two forced turns race. An unscripted turn returns
-	// mockllm.UnmatchedSentinel, failing loudly not green.
+	// review, verify, coherence, open_pr). The cursor — not the marker — distinguishes the
+	// turns: projection → provision → dev re-wake → dispatch → measure → floors → gate →
+	// review → verify → coherence → open_pr is serialized by the rule gates (each forced
+	// turn chains off the prior loop's terminal marker — dev.measure_done → dev.floors_done →
+	// dev.gate_decision(advance) → dev.reviewed → dev.verified → dev.coherence_decided —
+	// with review co-firing on the gate advance and open_pr on the coherent decision), so no
+	// two forced turns race. An unscripted turn returns mockllm.UnmatchedSentinel, failing
+	// loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -227,6 +236,14 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyVerifyMarker,
 			Tool:   &mockllm.ToolCall{Name: "verify_artifact", Args: map[string]any{}},
+		},
+		mockllm.Fixture{
+			Marker: journeyCoherenceMarker,
+			Tool:   &mockllm.ToolCall{Name: "check_coherence", Args: map[string]any{}},
+		},
+		mockllm.Fixture{
+			Marker: journeyOpenPRMarker,
+			Tool:   &mockllm.ToolCall{Name: "open_pr", Args: map[string]any{}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -443,13 +460,26 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireVerifyPassed(ctx, t, runEntityID)
 	t.Logf("station 15: clean-room COLD verify of the committed artifact — verify.result=pass (the fix is self-contained + reproducible) (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly thirteen model turns drove the arc through the verify station: …, R1
-	// submit_review, V1 verify_artifact. The review loop's dev.reviewed marker + the verify
-	// loop's dev.verified marker are tool-owned (no extra model call). The one new turn since
-	// station 14 is the forced verify loop (V1). A spurious re-spawn or an unscripted turn
-	// would push this past 13.
-	if got := mock.RequestCount(); got != 13 {
-		t.Fatalf("expected exactly 13 model turns (…, R1 submit_review, V1 verify_artifact), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
+	// Station 16 — the ISSUE→PR ARC COMPLETES. The coherence gate (dev-from-task/11) fires
+	// on the verify loop's dev.verified marker and rolls up the three delivery signals —
+	// verify.result=pass ∧ openspec.validated ∧ every review.verdict=approved — deriving
+	// coherent; the coherent router (dev-from-task/12a) then forces open_pr, which records
+	// pr.ref. This is the full arc's terminal: an issue became a reviewed, clean-room-verified
+	// PR. Assert pr.ref is present (an M0 local-delivery stub — the forge-io PR is M2; the
+	// gate genuinely passed, only the delivery target is stubbed). Red-first: disable
+	// dev-from-task/11 or 12a and this times out; break any signal (verify/validate/review)
+	// and the gate blocks (parks) instead of delivering.
+	requirePRDelivered(ctx, t, runEntityID)
+	t.Logf("station 16: ISSUE→PR ARC COMPLETE — the run cohered and open_pr recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly fifteen model turns drove the FULL arc: …, V1 verify_artifact, CO1
+	// check_coherence, PR1 open_pr. The verify loop's dev.verified marker + the coherence
+	// loop's dev.coherence_decided marker are tool-owned (no extra model call). The two new
+	// turns since station 15 are the forced coherence loop (CO1) and the forced open_pr loop
+	// (PR1). A spurious re-spawn (a router re-firing, a second open_pr) or an unscripted turn
+	// would push this past 15.
+	if got := mock.RequestCount(); got != 15 {
+		t.Fatalf("expected exactly 15 model turns (…, V1 verify_artifact, CO1 check_coherence, PR1 open_pr), got %d — extra turns indicate a re-spawn/loop, an errant router, or an unscripted turn", got)
 	}
 }
 
@@ -731,6 +761,33 @@ func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) 
 		"(a role=reviewer inherit loop may not have propagated the run anchor), or the cold clean-room proof did not run: "+
 		"check submit_review stamped dev.reviewed on its loop, the verify rule fires on that marker, verify_artifact is advertised/scripted, "+
 		"and docker is available (the journey builds the fixture image and runs go test in a fresh container)")
+}
+
+// requirePRDelivered polls the run entity until pr.ref is present — the proof the
+// coherence gate (dev-from-task/11) rolled up the delivery signals as coherent, the
+// coherent router (dev-from-task/12a) fired, and open_pr recorded the delivery reference:
+// the full issue→PR arc's terminal. A stamped run.awaiting_human (the incoherent park)
+// alongside no pr.ref is the blocked path; here we require delivery. Also asserts the
+// coherence decision was "coherent" so a partial state can't false-green.
+func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const prRef = "pr.ref"
+	const decision = "pr.coherence.decision"
+	requireEventually(t, 45*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if got := tripleString(e, decision); got == "blocked" {
+			t.Fatalf("check_coherence BLOCKED delivery (%s=blocked) — a delivery signal did not cohere (verify not pass, change unvalidated, or a task unapproved); see pr.coherence.reason. The happy-path journey expects all three green", decision)
+		}
+		return tripleString(e, prRef) != "" && tripleString(e, decision) == "coherent"
+	}, "run entity "+runEntityID+" never gained "+prRef+" with a coherent decision — the coherence gate (dev-from-task/11) did not fire, "+
+		"check_coherence did not derive coherent, or the coherent router (dev-from-task/12a) did not force open_pr: check verify_artifact stamped dev.verified on its loop, "+
+		"the coherence rule fires on that marker, check_coherence + open_pr are advertised/scripted, and all three signals (verify.result=pass, openspec.validated, review.verdict.0=approved) are on the run")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for

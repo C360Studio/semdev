@@ -473,3 +473,45 @@ Template:
   fires no transition (G2) — the routers act on the recorded marker.
 - **Registry entry:** `check_gate` (`tool`)
 - **Change:** containerized-sandbox-dev-loop
+
+## check-coherence-tool
+
+- **Primitive considered:** a rule that gates open_pr on the three delivery signals as
+  conditions (`verify.result eq pass` ∧ `openspec.validated ne ""` ∧ every
+  `review.verdict.* eq approved`).
+- **Why it cannot express this (same three blockers as check_gate):** the gate chains off a
+  LOOP terminal (the verify loop's `dev.verified` marker) but must read RUN facts; the review
+  roll-up counts PROJECTED TASKS vs APPROVED VERDICTS (an absent verdict blocks — not a
+  `length_*` on one predicate); and a wildcard `review.verdict.*` field-to-field compare
+  floods the semstreams #519 WARN. All three force the roll-up into Go (`checkcoherence.Decide`,
+  a pure fail-closed function pinned exhaustively offline). It FAILS CLOSED (D16/SB5): a
+  non-pass/absent verify, an unvalidated change, no projected task, or ANY projected task
+  without an approved verdict blocks — a missing signal never opens a PR (semspec encoded
+  "couldn't prove" as a pass; this inverts that). G3: the schema takes no arguments — every
+  input is a fact the harness stamped.
+- **Fact shape:** `pr.coherence.{decision,reason}` is the decision EVIDENCE on the run (the
+  human who gets parked reads it, G7); `dev.coherence_decided` is the loop marker the two
+  delivery routers (`12a` coherent → open_pr; `12b` blocked → the fourth `run.awaiting_human`
+  park) act on. Both the single G5 writer `coherence-tools`. Fires no transition (G2).
+- **Registry entry:** `check_coherence` (`tool`)
+- **Change:** containerized-sandbox-dev-loop
+
+## open-pr-tool
+
+- **Primitive considered:** a rule stamping `pr.ref` directly, or the (nonexistent)
+  `pr-delivery-adapter` writer the vocab reserved.
+- **Why it cannot express this:** delivery is an OUTWARD action — at M2 it opens a live
+  forge PR (a network call to GitHub/GitLab, a real URL), which no rule can perform. The tool
+  is the seam that action lives behind; at M0 it records a deterministic LOCAL delivery stub
+  so the arc has an honest terminal, and the forge-io adapter swaps in the live PR at M2
+  (same predicate, same single writer role). **M0 honesty (not a placeholder-pass):** the
+  coherence gate that reaches open_pr GENUINELY passed — a real cold-container verify=pass, a
+  real approved verdict, a real `openspec.validated`; only the delivery TARGET is a stub, a
+  declared M0 non-goal. semspec faked the verify OUTCOME (a placeholder that WAS the pass);
+  here the outcome is real and only the transport is stubbed. G3: the schema takes no
+  arguments — the harness forms the ref, the model only triggers delivery.
+- **Fact shape:** the single `pr.ref` scalar on the run (G2 — no transition; a run-closing
+  rule reads it). Its vocab writer was reconciled from the placeholder `pr-delivery-adapter`
+  to `open-pr`, the tool that actually stamps it (G5/G10).
+- **Registry entry:** `open_pr` (`tool`)
+- **Change:** containerized-sandbox-dev-loop

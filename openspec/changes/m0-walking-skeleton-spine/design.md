@@ -208,7 +208,7 @@ is the checked-in artifact the G5/G9 pins compare against.
 | `run.change_approved` | approval adapter (from human signal) | forge-io |
 | `human.signal` | comment adapter (from human reply) | forge-io |
 | `run.awaiting_human` | park rule | run-lifecycle |
-| `pr.ref` | PR-delivery adapter | forge-io |
+| `pr.ref` | open_pr tool (M0 local-delivery stub; forge-io adapter at M2) | forge-io |
 | `openspec.change.*` | create_change author tool | openspec-io |
 | `openspec.validated` | harness running `openspec validate` | openspec-io |
 | `openspec.archived` | harness running `openspec archive` | openspec-io |
