@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
+	"github.com/c360studio/semdev/internal/tools/checkgate"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
@@ -52,6 +53,9 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"submit_review", submitreview.Source, "review.verdict.0"},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
+		{"check_floors", checkfloors.Source, checkfloors.FloorsDonePredicate},
+		{"check_gate", checkgate.Source, "dev.gate.0.decision"},
+		{"check_gate", checkgate.Source, checkgate.GateDecisionMarker},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 	}
 	for _, c := range cases {

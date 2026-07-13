@@ -24,6 +24,7 @@ import (
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
+	"github.com/c360studio/semdev/internal/tools/checkgate"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
@@ -244,8 +245,21 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// declared target files from the run's checkout). It writes via the shared
 	// OwnedFactWriter (its own Source, floor-tools — G5-safe). Execute fails loudly if
 	// either seam is missing.
-	if err := reg.RegisterExecutor(checkfloors.New(attempts, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(checkfloors.New(attempts, changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", checkfloors.ToolName, err)
+	}
+
+	// check_gate (dev-from-task, group 7D) is the dev loop's budget-and-route gate: it
+	// reads the recorded measurement.result/floor.finding verdicts and the distinct
+	// attempt count against task.spec.<i>.budget (all off the run via the shared
+	// changefacts.Reader) and derives advance/retry/escalate in Go — the model supplies
+	// only the task index (G3), and it fails CLOSED (escalate) on a missing judgment
+	// fact. It fires no lifecycle transition (G2): it stamps the decision as dev.gate.*
+	// evidence + a dev.gate_decision loop marker (its own Source, gate-tools — G5-safe),
+	// and three router rules act on the marker. deps.Platform builds the gate loop's
+	// entity id for the marker. Each nil dep makes Execute fail loudly.
+	if err := reg.RegisterExecutor(checkgate.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", checkgate.ToolName, err)
 	}
 
 	// provision_sandbox (sandbox) is the provision-and-prove-cold station: on an

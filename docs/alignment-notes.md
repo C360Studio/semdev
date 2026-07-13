@@ -434,3 +434,42 @@ Template:
   (g7). No G5 writer (it writes no fact).
 - **Registry entry:** `apply_patch` (`tool`)
 - **Change:** containerized-sandbox-dev-loop
+
+## check-gate-tool
+
+- **Primitive considered:** a rule (or set of rules) that reads the recorded
+  measurement/floor verdicts and the attempt count against the budget and branches to
+  advance/retry/escalate — the "fully rule-owned gate, no tool" the original blueprint
+  proposed.
+- **Why it cannot express this (three independent blockers, the architect's 7D ruling):**
+  (1) the gate chains off a LOOP terminal (the floors loop's `dev.floors_done` marker) but
+  must read RUN facts (`measurement.result.<i>.passed`, `floor.finding.<i>.rejected`,
+  `task.spec.<i>.budget`) — a rule firing on a loop entity sees only that entity, so it
+  cannot read the run. (2) the budget test counts DISTINCT OBJECTS of the appended
+  multi-valued `task.attempt.<i>` (the at-least-once append double-counts a lost-ack
+  re-append, so raw cardinality over-counts) — not something a rule's `length_*` operator
+  expresses. (3) a scalar field-to-field compare (attempt count vs budget) in a rule
+  condition is the `$entity.triple.<pred>` value form that floods the semstreams #519 WARN
+  (guarded by `TestChangeApprovalGateFreshnessForwardContract`). All three force the
+  comparison into Go. This ALSO retired the blueprint's per-attempt TOKEN HANDSHAKE
+  (measure stamps an attempt token, floors echoes it, the gate compares them): field-to-
+  field #519-unbuildable AND unnecessary — the chain is strictly serial (one developer
+  loop in flight per task; only dispatch-developer and this gate's retry branch spawn a
+  `role=developer` loop, a load-bearing conformance-pinned invariant), so measure and
+  floors provably evaluated the same frozen checkout by construction.
+- **G3 (the load-bearing property):** the schema takes ONLY `task_index` — no decision,
+  pass/fail, count, or budget field. Every input is a fact the harness stamped; the route
+  is DERIVED in Go (`checkgate.Decide`), never a model claim. It fails CLOSED: a missing
+  judgment fact escalates toward the human rather than retrying blind (an unbounded loop or
+  a verification skipped over absent evidence is the dangerous direction). A read fault is a
+  retryable tool error, not a stamped decision.
+- **Fact shape:** `dev.gate.<i>.{decision,reason}` is the per-task decision EVIDENCE on the
+  run (the human who gets parked and the downstream verify/PR steps read it, G7);
+  `dev.gate_decision` is the loop marker on the gate loop the three router rules act on
+  (`08a` advance → `dev.task_cleared.<i>` hands off to clean-room verify; `08b` retry →
+  re-dispatch the developer, re-arming the whole chain; `08c` escalate → `run.awaiting_human`
+  park, the third park realization). Both fact families are the single G5 writer `gate-tools`;
+  the router-stamped `dev.task_cleared.*`/`dev.routed` are the `dev-route-rule` subsystem. It
+  fires no transition (G2) — the routers act on the recorded marker.
+- **Registry entry:** `check_gate` (`tool`)
+- **Change:** containerized-sandbox-dev-loop

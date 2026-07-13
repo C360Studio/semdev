@@ -42,6 +42,12 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `dev.measured` | dev-measure-rule | dev-from-task |
 | `dev.measure_done` | measurement-harness | dev-from-task |
 | `dev.floors_dispatched` | dev-floors-rule | dev-from-task |
+| `dev.floors_done` | floor-tools | dev-from-task |
+| `dev.gate.*` | gate-tools | dev-from-task |
+| `dev.gate_decision` | gate-tools | dev-from-task |
+| `dev.gate_dispatched` | dev-gate-rule | dev-from-task |
+| `dev.routed` | dev-route-rule | dev-from-task |
+| `dev.task_cleared.*` | dev-route-rule | dev-from-task |
 
 ## Components
 
@@ -62,6 +68,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `submit_review` | tool | harness-measurement | `submit-review-tool` |
 | `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
 | `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
+| `check_gate` | tool | dev-from-task | `check-gate-tool` |
 | `provision_sandbox` | tool | sandbox | `provision-sandbox-tool` |
 | `apply_patch` | tool | sandbox | `apply-patch-tool` |
 

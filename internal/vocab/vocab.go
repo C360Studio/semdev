@@ -100,6 +100,37 @@ var Predicates = []Predicate{
 	// stamps on the measure loop before spawning check_floors, so a graph replay cannot
 	// re-spawn a duplicate floors loop (self-extinguishing, loop-scoped like dev.dispatched).
 	{"dev.floors_dispatched", "dev-floors-rule", "dev-from-task", sandbox},
+	// dev.floors_done is the CHAINING marker check_floors stamps on ITS OWN floors loop
+	// (value = task index) once it has recorded the findings — the slug-independent "this
+	// coordinator loop just ran the floors" signal the gate-trigger (dev-from-task/07)
+	// fires on to spawn check_gate and inherit the run. Tool-owned (writer floor-tools,
+	// check_floors' Source — the measure→floors precedent, dev.measure_done); distinguishes
+	// the floors loop from the other coordinator loops that also reach outcome=success.
+	{"dev.floors_done", "floor-tools", "dev-from-task", sandbox},
+
+	// the dev-loop GATE (group 7D). check_gate reads the recorded measurement/floor
+	// verdicts and the attempt count vs budget and derives advance/retry/escalate — the
+	// harness owns the route (G3). dev.gate.* is the per-task decision EVIDENCE on the
+	// run (the human who gets parked, and the verify/PR steps, read it); dev.gate_decision
+	// is the loop marker the router rules act on. Both tool-owned (writer gate-tools).
+	{"dev.gate.*", "gate-tools", "dev-from-task", sandbox},
+	{"dev.gate_decision", "gate-tools", "dev-from-task", sandbox},
+	// dev.gate_dispatched is the fired-once marker the gate-trigger (dev-from-task/07)
+	// stamps on the floors loop before spawning check_gate, so a graph replay cannot
+	// re-spawn a duplicate gate loop (self-extinguishing, loop-scoped like dev.dispatched).
+	{"dev.gate_dispatched", "dev-gate-rule", "dev-from-task", sandbox},
+	// dev.routed is the fired-once marker the three router rules (dev-from-task/08a/b/c)
+	// stamp on the gate loop before acting, so a graph replay cannot re-fire a router
+	// (critical for the retry router, whose publish_agent is not idempotent — a re-fire
+	// would spawn a duplicate developer, breaking the one-in-flight serialization
+	// invariant). One logical writer (dev-route-rule) realized by three mutually-exclusive
+	// rule files (like run.awaiting_human's two park realizations); rule add_triple carries
+	// no Source, so the single vocab entry is not drifted.
+	{"dev.routed", "dev-route-rule", "dev-from-task", sandbox},
+	// dev.task_cleared.<i> is the ADVANCE router's output: the per-task signal that its
+	// dev loop converged (measured green, no floor rejected, gate advanced). The clean-room
+	// verify station (group 8) chains on it. Rule-owned (writer dev-route-rule).
+	{"dev.task_cleared.*", "dev-route-rule", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

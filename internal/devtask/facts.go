@@ -39,3 +39,21 @@ const TaskSpecPrefix = "task.spec."
 func TaskSpecKeyPrefix(i int) string {
 	return TaskSpecPrefix + strconv.Itoa(i) + "."
 }
+
+// TaskAttemptPrefix is the owned namespace the PER-TASK attempt counter lives under
+// on the run entity: task.attempt.<i>. It anchors to the task.attempt.* vocab
+// namespace (writer dev-measure-rule, G5). The measure-trigger rule (dev-from-task/05)
+// APPENDS one triple here per attempt with a distinct object (the developer loop
+// instance); the budget gate (check_gate, group 7D) counts the DISTINCT OBJECTS under
+// task.attempt.<i> against task.spec.<i>.budget. The rule writes the predicate as a
+// JSON literal (task.attempt.0), so this const is the read-side anchor the gate shares
+// — a conformance pin cross-checks the two do not drift.
+const TaskAttemptPrefix = "task.attempt."
+
+// TaskAttemptKey returns the per-task attempt-counter predicate "task.attempt.<i>"
+// for the task at index i — the multi-valued predicate whose distinct objects the
+// budget gate counts. Unlike TaskSpecKeyPrefix this is a whole predicate, not a
+// prefix: the counter is a bare per-task key (not a sub-key package).
+func TaskAttemptKey(i int) string {
+	return TaskAttemptPrefix + strconv.Itoa(i)
+}

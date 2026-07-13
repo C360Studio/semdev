@@ -448,6 +448,38 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   measurement (run) then `dev.measure_done` (loop) are two non-atomic writes; a persistent marker-write failure
   trips MaxIterations with no `run.awaiting_human` (marker-less measure loop chains nothing). Same posture as the
   reviewed `create_change` two-write; the escalate/park lands in 7D. Ordering (substance-first) is correct.
+- **[The gate is a TOOL, not rule conditions] (7D, as built — the architect's ruling made executable)** →
+  `check_gate` (`internal/tools/checkgate`) reads `measurement.result.<i>.passed` + `floor.finding.<i>.rejected` +
+  the DISTINCT-object count of `task.attempt.<i>` vs `task.spec.<i>.budget` and derives advance/retry/escalate in
+  Go. Three blockers force this out of rule conditions: a loop-fired rule cannot read run facts; distinct-object
+  counting is not a `length_*`; a scalar field-to-field compare floods #519. The route is still G3-derived (schema
+  is `task_index` only) and it fires no transition (G2) — it stamps `dev.gate.<i>.{decision,reason}` evidence + the
+  `dev.gate_decision` loop marker; three router rules (`08a/b/c`) act on the marker. It FAILS CLOSED: a missing
+  judgment fact escalates (never a false retry); a read fault is a retryable tool error, not a stamped decision.
+  The policy is a pure `Decide` pinned exhaustively offline (the live loop only drives the advance path). The
+  chain extends the loop-marker pattern one more link (`dev.floors_done` on the floors loop → gate).
+- **[The serialization invariant is now pinned] (7D, as built)** → `TestOnlySanctionedDeveloperSpawners` asserts
+  ONLY dispatch-developer (04) and the gate's retry router (08b) spawn a `role=developer` loop — the load-bearing
+  guarantee (replacing the dropped token handshake) that measure and floors evaluated the same frozen checkout,
+  because exactly one developer loop is ever in flight per task. A third developer-spawner would race the shared
+  checkout and mis-count the budget; the pin fails the build if one is added.
+- **[Escalate is the THIRD park realization] (7D, as built)** → `dev-from-task/08c` stamps `run.awaiting_human`
+  on budget exhaustion / fail-closed, joining run-lifecycle/03 (ask_human) and sandbox/02 (unprovable sandbox) as
+  the single logical park writer realized by three rule files. It fires on the gate LOOP (not the run), so its
+  self-extinguish guard MUST be loop-scoped (`dev.routed`), not `run.awaiting_human length_eq 0` — a run-scoped
+  guard would read absent on the loop every rescan and re-post to the user bus. (sandbox/02 fires on the run, so
+  it correctly uses the run-scoped guard; the two are not interchangeable.)
+- **[The retry path is offline-only; station 13 is the advance bridge] (7D carry-forward, semstreams-reviewer MEDIUM)** →
+  the live journey proves the gate ADVANCES a clean attempt; retry (re-dispatch → re-measure → re-gate) and escalate
+  (park) are pinned offline (`checkgate` decision table + the router structure pins), not driven end-to-end. A
+  retry/escalate journey needs a fixture whose first attempt fails then a second passes (retry), or never passes
+  (escalate) — add it alongside the rejecting-fixture floors station when a fabrication variant drives the loop
+  (g10/g11). **Load-bearing mechanism the e2e should protect:** the retry chain is a series of `run_scope=inherit`
+  CROSS-loop spawns, so a per-loop `MaxIterations` cap does NOT bound it — the ONLY runtime bound is `check_gate`'s
+  distinct-count-vs-`budget`, which itself depends on `dev-from-task/05` appending a distinct `task.attempt.<i>` per
+  attempt. If that append silently regressed, the loop would exceed budget with nothing to catch it. The gate counts
+  correctly today (pinned), but an integration test that forces ≥1 retry and ≥1 budget-exhaust escalate is the
+  missing guard on the gate's core purpose. Deferred like the sandbox blocked-park e2e.
 
 ## Migration Plan
 

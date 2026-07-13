@@ -30,14 +30,26 @@ import (
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	"github.com/c360studio/semstreams/types"
 )
 
 // ToolName is the registered tool name and the dev loop's floor-check handler.
 const ToolName = "check_floors"
 
-// Source is stamped on every floor.finding triple. It MUST equal the writer declared
-// for floor.finding.* in internal/vocab (G5) — a conformance pin cross-checks it.
+// Source is stamped on every floor.finding triple AND the dev.floors_done loop marker.
+// It MUST equal the writer declared for floor.finding.* and dev.floors_done in
+// internal/vocab (G5) — a conformance pin cross-checks it.
 const Source = "floor-tools"
+
+// FloorsDonePredicate is the chaining marker check_floors stamps on ITS OWN loop entity
+// (not the run) once it has recorded the findings — the slug-independent "this
+// coordinator loop just ran the floors" signal the gate-trigger rule (dev-from-task/07)
+// fires on to spawn check_gate. It rides the floors loop (which carries agent.run) so the
+// gate-trigger's run_scope=inherit binds to the same run; it distinguishes the floors loop
+// from the other coordinator loops that also reach outcome=success (provision/measure/
+// create_change/validate/project_tasks) — none carry it. Mirrors measure_task's
+// dev.measure_done marker → the floors station.
+const FloorsDonePredicate = "dev.floors_done"
 
 // Attempts resolves a task's current dev-loop attempt — the files it authored (with
 // contents) and the task's declared target files — from the run's checkout, into the
@@ -53,17 +65,19 @@ type Attempts interface {
 type Executor struct {
 	attempts Attempts
 	writer   agentictools.OwnedFactWriter
+	platform types.PlatformMeta // builds the floors loop's entity id for the chaining marker
 	logger   *slog.Logger
 }
 
 // New builds the check_floors executor. attempts/writer may be nil for schema-only
 // registration (the censuses inspect ListTools without a live checkout or NATS
-// client); Execute fails loudly if either is nil.
-func New(attempts Attempts, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// client); Execute fails loudly if either is nil. platform builds the floors loop's
+// entity id for the dev.floors_done chaining marker.
+func New(attempts Attempts, writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{attempts: attempts, writer: writer, logger: logger}
+	return &Executor{attempts: attempts, writer: writer, platform: platform, logger: logger}
 }
 
 type payload struct {
@@ -125,6 +139,38 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.String("run_entity_id", runEntityID),
 		slog.Int("task_index", idx),
 		slog.Bool("rejected", rejected))
+
+	// Stamp the chaining marker on THIS loop entity (value = task index) so the
+	// gate-trigger (dev-from-task/07) can fire on this floors loop and inherit the run.
+	// The findings (the substance) are written FIRST; the marker (the chaining signal)
+	// follows, so a marker-write failure surfaces only AFTER the findings are durably
+	// recorded (measure_task's discipline). It is stamped regardless of rejected — a
+	// REJECTING floors run must still chain to the gate (which decides retry); only a
+	// check_floors ERROR (couldn't evaluate) stalls the chain toward the human. Failure
+	// posture: a marker error returns errResult WITHOUT StopLoop, so the forced loop
+	// re-runs check_floors (re-stamping idempotently) until it lands or MaxIterations
+	// trips — never a silent green. LoopID is always present at runtime; a missing one
+	// (unit-test-only) skips the marker with a loud warn rather than failing the findings.
+	if call.LoopID == "" {
+		e.logger.Warn("check_floors: no loop_id on the tool call — skipping the floors-done marker; the gate station will not trigger",
+			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
+	} else {
+		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
+		if lerr != nil {
+			return errResult(call, agentic.ToolErrorInternal, "check_floors: construct floors loop entity id: %v", lerr)
+		}
+		marker := []message.Triple{{
+			Subject:    loopEntityID,
+			Predicate:  FloorsDonePredicate,
+			Object:     strconv.Itoa(idx),
+			Source:     Source,
+			Timestamp:  time.Now().UTC(),
+			Confidence: 1.0,
+		}}
+		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{FloorsDonePredicate}); merr != nil {
+			return errResult(call, changefacts.ReadErrorKind(merr), "check_floors: stamp %s on %s: %v", FloorsDonePredicate, loopEntityID, merr)
+		}
+	}
 
 	summary, _ := json.Marshal(map[string]any{
 		"task_index": idx,

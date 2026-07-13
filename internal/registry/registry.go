@@ -44,6 +44,7 @@ var Entries = []Entry{
 	{Name: "submit_review", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "submit-review-tool"},
 	{Name: "verify_artifact", Kind: KindTool, Capability: "clean-room-verify", AlignmentNote: "verify-artifact-tool"},
 	{Name: "check_floors", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "floor-tools-wrapper"},
+	{Name: "check_gate", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "check-gate-tool"},
 	{Name: "provision_sandbox", Kind: KindTool, Capability: "sandbox", AlignmentNote: "provision-sandbox-tool"},
 	{Name: "apply_patch", Kind: KindTool, Capability: "sandbox", AlignmentNote: "apply-patch-tool"},
 }

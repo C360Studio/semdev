@@ -10,6 +10,7 @@ import (
 	"github.com/c360studio/semdev/internal/floors"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/types"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -73,7 +74,7 @@ func vacuousAttempt() floors.Attempt {
 
 func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[string]string, agentic.ToolResult) {
 	t.Helper()
-	res, err := New(fakeAttempts{attempt: attempt}, w, nil).Execute(context.Background(), callFor(idx))
+	res, err := New(fakeAttempts{attempt: attempt}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(idx))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 		floors.FindingPrefix + "0." + floors.FloorVacuousTest + "." + floors.FactPassed,
 	}
 	w := &fakeWriter{owned: stale}
-	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, nil).Execute(context.Background(), callFor(0))
+	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 // A negative task index is rejected before any resolve or stamp.
 func TestCheckFloorsRejectsNegativeIndex(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(fakeAttempts{attempt: passingAttempt()}, w, nil).Execute(context.Background(), callFor(-1))
+	res, err := New(fakeAttempts{attempt: passingAttempt()}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(-1))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestCheckFloorsRejectsNegativeIndex(t *testing.T) {
 // silent pass.
 func TestCheckFloorsResolveErrorFails(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, nil).Execute(context.Background(), callFor(0))
+	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestCheckFloorsResolveErrorFails(t *testing.T) {
 
 // Schema-only registration (nil attempts/writer) fails loudly if executed.
 func TestCheckFloorsFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil).Execute(context.Background(), callFor(0))
+	res, err := New(nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -286,6 +287,66 @@ func TestCheckFloorsSchemaTakesOnlyTaskSelector(t *testing.T) {
 		if _, present := props[banned]; present {
 			t.Errorf("schema accepts a floor-outcome field %q (G3): floors are computed, not supplied", banned)
 		}
+	}
+}
+
+// The chaining marker: check_floors stamps dev.floors_done on ITS OWN loop entity
+// (value = the task index) after recording the findings, so the gate-trigger
+// (dev-from-task/07) fires on the floors loop. It is stamped for a REJECTING run too
+// (the gate decides retry), so a fabrication finding still chains to the gate.
+func TestCheckFloorsStampsFloorsDoneMarkerOnLoopEvenWhenRejecting(t *testing.T) {
+	w := &fakeWriter{}
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	call := callFor(0)
+	call.LoopID = "floors-loop-abc"
+	// A vacuous test → the floors REJECT; the marker must still land.
+	res, err := New(fakeAttempts{attempt: vacuousAttempt()}, w, platform, nil).Execute(context.Background(), call)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("a rejecting floors run is data, not a tool error: %s", res.Error)
+	}
+	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, call.LoopID)
+	if err != nil {
+		t.Fatalf("loop entity id: %v", err)
+	}
+	var found bool
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate != FloorsDonePredicate {
+				continue
+			}
+			found = true
+			if tr.Subject != loopEntityID {
+				t.Errorf("%s stamped on %q, want the floors LOOP entity %q (not the run)", FloorsDonePredicate, tr.Subject, loopEntityID)
+			}
+			if tr.Source != Source {
+				t.Errorf("%s Source = %q, want %q (G5)", FloorsDonePredicate, tr.Source, Source)
+			}
+			if tr.Object.(string) != "0" {
+				t.Errorf("%s object = %q, want the task index \"0\"", FloorsDonePredicate, tr.Object)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("check_floors must stamp %s on its loop (even for a rejecting run) so the gate-trigger fires", FloorsDonePredicate)
+	}
+}
+
+// Without a LoopID (unit/registration path) the findings still land but the marker is
+// skipped — a missing marker never fails a recorded findings write.
+func TestCheckFloorsWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
+	w := &fakeWriter{}
+	facts, res := run(t, passingAttempt(), w, 0) // callFor sets no LoopID
+	if res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	if _, ok := facts[FloorsDonePredicate]; ok {
+		t.Errorf("no LoopID → the floors-done marker must be skipped, but %s was stamped", FloorsDonePredicate)
+	}
+	if facts[floors.FindingPrefix+"0."+floors.FactRejected] != "false" {
+		t.Error("the findings must still be recorded when the marker is skipped")
 	}
 }
 

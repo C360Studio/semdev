@@ -85,6 +85,7 @@ type ruleAction struct {
 	Subject    string   `json:"subject"`
 	Predicate  string   `json:"predicate"`
 	Object     string   `json:"object"`
+	Role       string   `json:"role"`
 	Tools      []string `json:"tools"`
 	RunScope   string   `json:"run_scope"`
 	ToolChoice struct {

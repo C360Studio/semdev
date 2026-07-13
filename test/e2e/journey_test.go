@@ -88,6 +88,11 @@ const journeyMeasureMarker = "measure the developed task"
 // (dev-from-task/06-check-floors.json) the mock's check_floors turn guards on.
 const journeyFloorsMarker = "run the structural floors"
 
+// journeyGateMarker is a distinctive substring of the gate prompt
+// (dev-from-task/07-gate-decision.json) the mock's check_gate turn guards on — the
+// prompt threads no slug/ref, so this stable phrase keys the positional cursor.
+const journeyGateMarker = "gate the attempt"
+
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -136,18 +141,19 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//   8. D1 developer (Amelia)     → apply_patch(fix diff)    [authors the fix in-checkout]
 	//   9. M1 measure coordinator    → measure_task(index 0)    [in-container go test, real]
 	//  10. F1 floors coordinator     → check_floors(index 0)    [structural floors on the diff]
+	//  11. G1 gate coordinator       → check_gate(index 0)      [advance/retry/escalate route]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–10 thread the run entity id, so they mark on a stable
-	// phrase of their prompts (provision, dev re-wake, developer, measure, floors). The
-	// cursor — not the marker — distinguishes the turns: projection → provision → dev
-	// re-wake → dispatch → measure → floors is serialized by the rule gates (sandbox/01
-	// gates on task.spec presence, the dev re-wake gates on sandbox.ready, dispatch
-	// fires on the dev_from_task decision, measure fires on the developer loop's success,
-	// floors chains off the measure loop's dev.measure_done marker), so no two forced
-	// turns race. An unscripted turn returns mockllm.UnmatchedSentinel, failing loudly
-	// not green.
+	// mark on the slug; turns 6–11 thread the run entity id, so they mark on a stable
+	// phrase of their prompts (provision, dev re-wake, developer, measure, floors, gate).
+	// The cursor — not the marker — distinguishes the turns: projection → provision → dev
+	// re-wake → dispatch → measure → floors → gate is serialized by the rule gates
+	// (sandbox/01 gates on task.spec presence, the dev re-wake gates on sandbox.ready,
+	// dispatch fires on the dev_from_task decision, measure fires on the developer loop's
+	// success, floors chains off the measure loop's dev.measure_done marker, the gate
+	// chains off the floors loop's dev.floors_done marker), so no two forced turns race.
+	// An unscripted turn returns mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -197,6 +203,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyFloorsMarker,
 			Tool:   &mockllm.ToolCall{Name: "check_floors", Args: map[string]any{"task_index": 0}},
+		},
+		mockllm.Fixture{
+			Marker: journeyGateMarker,
+			Tool:   &mockllm.ToolCall{Name: "check_gate", Args: map[string]any{"task_index": 0}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -372,14 +382,30 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireFloorsPassed(ctx, t, runEntityID)
 	t.Logf("station 12: structural floors ran on the diff — floor.finding.0.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly ten model turns drove the arc through the floors station: …, D1
-	// apply_patch, M1 measure_task, F1 check_floors. The resume + anchor + attempt-append
-	// + the two loop markers are rule/tool-owned (no extra model call). The one new turn
-	// since station 11 is the forced floors loop (F1). A spurious re-spawn (e.g. the
-	// floors loop re-triggering the floors rule, or measure re-triggering itself), a
-	// double dispatch, or an unscripted turn would push this past 10.
-	if got := mock.RequestCount(); got != 10 {
-		t.Fatalf("expected exactly 10 model turns (…, M1 measure_task, F1 check_floors), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
+	// Station 13 — the dev-loop GATE routes the attempt. The gate-trigger
+	// (dev-from-task/07) fires on the floors loop's dev.floors_done marker and spawns a
+	// forced check_gate loop (run_scope=inherit), which reads the recorded
+	// measurement.result.0.passed (true) + floor.finding.0.rejected (false) + the distinct
+	// task.attempt.0 count against task.spec.0.budget and DERIVES the route in Go (G3 — no
+	// model verdict). Because the attempt measured green and no floor rejected, the gate
+	// decides ADVANCE: it stamps dev.gate.0.decision=advance on the run, and the advance
+	// router (dev-from-task/08a) fires on the gate loop's dev.gate_decision marker and
+	// stamps dev.task_cleared.0 (the signal the clean-room verify station chains on).
+	// Assert BOTH — the harness-derived decision and the router's handoff fact. Red-first:
+	// disable dev-from-task/07 (no gate) or 08a (no cleared fact) and this station times out.
+	requireGateAdvanced(ctx, t, runEntityID)
+	t.Logf("station 13: the gate routed advance — dev.gate.0.decision=advance, task cleared for verify (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly eleven model turns drove the arc through the gate station: …, D1
+	// apply_patch, M1 measure_task, F1 check_floors, G1 check_gate. The resume + anchor +
+	// attempt-append + the three loop markers + the advance router's fact-stamp are
+	// rule/tool-owned (no extra model call — the advance route is add_triple only, not a
+	// spawn). The one new turn since station 12 is the forced gate loop (G1). A spurious
+	// re-spawn (the gate loop re-triggering a rule, a router re-firing, a retry
+	// re-dispatch on a clean attempt), a double dispatch, or an unscripted turn would push
+	// this past 11.
+	if got := mock.RequestCount(); got != 11 {
+		t.Fatalf("expected exactly 11 model turns (…, F1 check_floors, G1 check_gate), got %d — extra turns indicate a re-spawn/loop, an errant router re-dispatch, or an unscripted turn", got)
 	}
 }
 
@@ -577,6 +603,36 @@ func requireFloorsPassed(ctx context.Context, t *testing.T, runEntityID string) 
 	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set — the floors-trigger (dev-from-task/06) did not fire, "+
 		"or check_floors could not resolve the attempt: check measure_task stamped dev.measure_done on its loop, the floors rule fires on that marker, "+
 		"check_floors is advertised/scripted, and the Attempts seam resolves the target files from the checkout")
+}
+
+// requireGateAdvanced polls the run entity until dev.gate.0.decision == "advance" AND
+// dev.task_cleared.0 is present — the proof the gate-trigger (dev-from-task/07) fired on
+// the floors loop, check_gate read the recorded verdicts and derived ADVANCE (the fix
+// measured green and no floor rejected), and the advance router (dev-from-task/08a)
+// handed the cleared task off to the verify station. A stamped retry/escalate is a hard
+// failure (the gate misjudged a clean attempt, or the facts it read were wrong), surfaced
+// immediately rather than by timeout.
+func requireGateAdvanced(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const decision = "dev.gate.0.decision"
+	const cleared = "dev.task_cleared.0"
+	requireEventually(t, 45*time.Second, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if got := tripleString(e, decision); got == "retry" || got == "escalate" {
+			t.Fatalf("check_gate routed %s=%q on a CLEAN attempt (measured green, no floor rejected) — the gate misread the recorded facts, or the measurement/floor facts it read were wrong: check that measurement.result.0.passed=true and floor.finding.0.rejected=false are on the run and that check_gate reads the right task index", decision, got)
+		}
+		// Require the advance decision AND the router's cleared fact, so a partial state
+		// (gate ran but the router did not fire) cannot false-green.
+		return tripleString(e, decision) == "advance" && tripleString(e, cleared) != ""
+	}, "run entity "+runEntityID+" never gained "+decision+"=advance with "+cleared+" present — the gate-trigger (dev-from-task/07) did not fire, "+
+		"check_gate could not read the verdicts, or the advance router (dev-from-task/08a) did not fire: check check_floors stamped dev.floors_done on its loop, "+
+		"the gate rule fires on that marker, check_gate is advertised/scripted, and the router matches dev.gate_decision eq advance")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for
