@@ -46,6 +46,18 @@ shape. **Read these three documents before changing anything:**
 
 ## Status
 
-Foundational. No product code yet — the M0 walking-skeleton spine is the
-first OpenSpec change. Donor checkouts for reference:
+M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers). Two
+sibling OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
+`m0-walking-skeleton-spine` (the arc + evidence spine) and
+`containerized-sandbox-dev-loop` (the real sandbox + cold clean-room verify).
+The full arc runs against real docker: front door → issue_intake → create_change
+→ validate → **human approval** → project task.spec → provision + prove-cold
+sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → structural
+floors → gate (advance/retry/escalate) → review (Quinn) → **cold clean-room
+verify** of the committed artifact → coherence gate → open_pr → `pr.ref`. Proven
+by `test/e2e/journey_test.go` (16 stations, zero paid tokens) plus docker-gated
+cold-proof pins. Remaining before a first real-LLM token: the pre-real-LLM
+carry-forwards (bootstrap `allowed_tools` scoping; the retry/escalate + blocked-
+park e2e stations; the `target_files`-includes-test contract) tracked in
+`containerized-sandbox-dev-loop`'s design.md. Donor checkouts for reference:
 `~/Code/c360/semteams` (shape), `~/Code/c360/semspec` (floors + audits).

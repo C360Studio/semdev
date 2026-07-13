@@ -104,6 +104,17 @@ claim, and issues an additive-only per-task `review.verdict.<i>`. No persona own
 
 ### D5 — Clean room = a thin swappable Runner seam; isolation is product-supplied
 
+> **SUPERSEDED (M0) by `containerized-sandbox-dev-loop`.** The sibling change moved
+> CONTAINER isolation to M0 (not M2): the clean room is now a real per-run `docker`
+> container built from an OPERATOR-DECLARED image, and `cleanroom.ContainerRunner` is the
+> production `Runner`; `LocalRunner` demoted to a test shim. The "A/B `docker run` at M2"
+> deferral and the local-`ExecIsolated` production path below are RETIRED. What still
+> holds verbatim: the thin `Runner` seam (`Up`/`Exec`), cache-home freshness as the one
+> universal G4 control, the ported pure `verify.Decide` + resolution proof, and leaving
+> semspec's `execution-bridge` reconciler (B3) behind. See that change's design SB1–SB8 +
+> its Migration Plan for the as-built shape (the dev loop + cold verify run in containers
+> end-to-end). This note keeps the two changes coherent (task 9.1).
+
 semstreams ships only an HTTP client to an external sandbox (`SANDBOX_URL`) and a
 git-diff *tripwire* (ADR-067, detection not containment); `pkg/sandbox` is
 proposal-only. So semdev owns a thin `Runner` seam (`Up`/`Exec`, mirroring
