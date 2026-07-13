@@ -27,6 +27,7 @@ const (
 	FloorStub           = "stub"
 	FloorSourceBuild    = "source-build"
 	FloorAntiMock       = "anti-mock"
+	FloorCleanTree      = "clean-tree"
 )
 
 // File is one file an attempt authored or changed, with its full contents. Floors
@@ -38,12 +39,19 @@ type File struct {
 }
 
 // Attempt is the deterministic input to the floors: the files this dev-loop
-// iteration authored (with contents) and the task's declared target files (from
-// the projected task.spec). Everything a floor needs to reach a verdict is in
-// here — no working directory, no exec, no network.
+// iteration authored (with contents), the task's declared target files (from
+// the projected task.spec), and the working tree's dirty paths as of resolution.
+// Everything a floor needs to reach a verdict is in here — no working directory,
+// no exec, no network; the impure git/filesystem reads happen in the resolver.
 type Attempt struct {
 	Files       []File
 	TargetFiles []string
+	// DirtyPaths is `git status --porcelain` over the checkout at resolution time —
+	// one entry per path that differs from the committed attempt. Non-empty means the
+	// working tree diverged from the commit the harness recorded (test-time residue or
+	// tampering), so what floors evaluate and what the cold verify clones would differ.
+	// The clean-tree floor rejects on it (G7). Empty for a clean tree.
+	DirtyPaths []string
 }
 
 // Finding is one floor's verdict. A rejecting finding (Passed == false) is a hard
@@ -77,6 +85,7 @@ func CheckAll(a Attempt) []Finding {
 		StubArtifact(a),
 		SourceBuild(a),
 		AntiMock(a),
+		CleanTree(a),
 	}
 }
 

@@ -37,26 +37,29 @@ func NewPatcher(checkouts *Checkouts, runner cliexec.Runner) *Patcher {
 	return &Patcher{checkouts: checkouts, runner: runner}
 }
 
-// Apply path-guards and applies diff to runEntityID's checkout, returning the
-// repo-relative files it touched. It FAILS CLOSED at every step: no checkout for the
-// run (park), an empty/target-less/rename diff, a path that escapes the checkout, a
-// git-apply failure — none silently succeed. The returned error is the reason the
-// developer's authored change did not land; the measured pass/fail of the change is
-// a SEPARATE harness measurement (G3), not derived here.
-func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) ([]string, error) {
+// Apply path-guards and applies diff to runEntityID's checkout, COMMITS the result under
+// the harness identity, and returns the repo-relative files it touched plus the new commit
+// SHA. Committing per attempt is what makes the checkout snapshot-able: the cold verify
+// clones this exact commit and read_diff (group 4) diffs base..commit, so what is reviewed
+// and proven is an immutable tree, never the mutable warm working copy (G4/G7). It FAILS
+// CLOSED at every step: no checkout for the run (park), an empty/target-less/rename diff, a
+// path that escapes the checkout, a git-apply or commit failure — none silently succeed. The
+// returned error is the reason the developer's authored change did not land; the measured
+// pass/fail of the change is a SEPARATE harness measurement (G3), not derived here.
+func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) (touched []string, commitSHA string, err error) {
 	if strings.TrimSpace(diff) == "" {
-		return nil, fmt.Errorf("runspace: apply_patch got an empty diff")
+		return nil, "", fmt.Errorf("runspace: apply_patch got an empty diff")
 	}
 	root, err := p.checkouts.Root(ctx, runEntityID)
 	if err != nil {
-		return nil, err // fail-closed: no checkout materialized (park toward the human)
+		return nil, "", err // fail-closed: no checkout materialized (park toward the human)
 	}
 	targets, err := parseDiffTargets(diff)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("runspace: diff declares no file targets (no --- / +++ headers)")
+		return nil, "", fmt.Errorf("runspace: diff declares no file targets (no --- / +++ headers)")
 	}
 	// PATH-GUARD every target to inside the checkout BEFORE touching the filesystem —
 	// the primary containment. `git apply` also rejects escapes (belt), but a rule
@@ -64,7 +67,7 @@ func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) ([]string
 	// bars; safeJoin is the explicit fail-closed guard.
 	for _, t := range targets {
 		if _, err := safeJoin(root, t); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
@@ -73,25 +76,64 @@ func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) ([]string
 	// root (dir), stripping the a/ b/ prefix (-p1).
 	tmp, err := os.CreateTemp("", "semdev-patch-*.diff")
 	if err != nil {
-		return nil, fmt.Errorf("runspace: create patch temp file: %w", err)
+		return nil, "", fmt.Errorf("runspace: create patch temp file: %w", err)
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.WriteString(diff); err != nil {
 		_ = tmp.Close()
-		return nil, fmt.Errorf("runspace: write patch temp file: %w", err)
+		return nil, "", fmt.Errorf("runspace: write patch temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("runspace: close patch temp file: %w", err)
+		return nil, "", fmt.Errorf("runspace: close patch temp file: %w", err)
 	}
 
 	res, err := p.runner.Run(ctx, root, gitBin, "apply", "-p1", tmp.Name())
 	if err != nil {
-		return nil, fmt.Errorf("runspace: run git apply: %w", err)
+		return nil, "", fmt.Errorf("runspace: run git apply: %w", err)
 	}
 	if res.ExitCode != 0 {
-		return nil, fmt.Errorf("runspace: git apply did not apply the diff (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		return nil, "", fmt.Errorf("runspace: git apply did not apply the diff (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	return targets, nil
+
+	// Commit the applied attempt under the harness identity Materialize configured
+	// repo-local, so the checkout carries an immutable snapshot the cold verify clones and
+	// read_diff diffs against base. Commit failure is fail-closed (the developer re-authors):
+	// a change that applied but could not be committed is not a landed attempt.
+	sha, err := p.commit(ctx, root)
+	if err != nil {
+		return nil, "", err
+	}
+	return targets, sha, nil
+}
+
+// commit stages the whole checkout and commits it, returning the new commit SHA. The
+// harness identity is the repo-local config Materialize set at init, so no per-commit
+// identity is needed. --no-gpg-sign: a run never blocks on an operator signing key.
+func (p *Patcher) commit(ctx context.Context, root string) (string, error) {
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "--no-gpg-sign", "-m", "attempt: apply_patch"}} {
+		res, err := p.runner.Run(ctx, root, gitBin, args...)
+		if err != nil {
+			return "", fmt.Errorf("runspace: run git %v: %w", args, err)
+		}
+		if res.ExitCode != 0 {
+			// git reports "nothing to commit" on STDOUT (a diff that applied but changed no
+			// TRACKED path — e.g. it touched only gitignored files), so surface both streams
+			// or the caller gets an empty reason. A no-op attempt fails closed here.
+			return "", fmt.Errorf("runspace: git %v failed (exit %d): %s", args, res.ExitCode, strings.TrimSpace(res.Stdout+" "+res.Stderr))
+		}
+	}
+	res, err := p.runner.Run(ctx, root, gitBin, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("runspace: run git rev-parse: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("runspace: git rev-parse HEAD failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	sha := strings.TrimSpace(res.Stdout)
+	if sha == "" {
+		return "", fmt.Errorf("runspace: git rev-parse HEAD returned empty SHA")
+	}
+	return sha, nil
 }
 
 // parseDiffTargets extracts the repo-relative files a unified diff touches from its

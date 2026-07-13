@@ -20,26 +20,46 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+
+	"github.com/c360studio/semdev/internal/cliexec"
+)
+
+// Harness git identity — the fixed author every base + attempt commit is made under, set
+// repo-local at init so the run path never depends on the operator's global git config
+// (CI machines often have none) and every commit is attributable to the harness, not a
+// person (G7). A checkout is a throwaway working copy, so a shared identity is correct.
+const (
+	harnessGitName  = "semdev harness"
+	harnessGitEmail = "harness@semdev.local"
 )
 
 // Checkouts materializes and tracks per-run target-repo checkouts. It implements the
 // Workspace seam (Root) that measure_task and verify_artifact resolve the checkout root
-// through. Safe for concurrent use.
+// through. Each checkout is a real git repository (git-init at materialize, one commit per
+// applied attempt) so the cold verify proves an IMMUTABLE committed snapshot, never the
+// mutable warm working tree (G4/G7). Safe for concurrent use.
 type Checkouts struct {
-	mu    sync.Mutex
-	base  string
-	roots map[string]string // runEntityID → absolute checkout root (the warm checkout)
-	// verifyRoots holds the cold-verify CLONES — a SEPARATE fresh copy of a run's warm
-	// checkout the clean-room final verify proves cold (SB4.3), keyed distinctly so it
-	// never collides with the warm checkout. A clone is a throwaway per verify (a re-run
-	// overwrites the run's entry); the prior clone dir is reaped so verifies do not leak.
+	mu     sync.Mutex
+	base   string
+	runner cliexec.Runner    // shells git for init/commit/clone (OSRunner in prod)
+	roots  map[string]string // runEntityID → absolute checkout root (the warm checkout)
+	// verifyRoots holds the cold-verify CLONES — a SEPARATE git clone of a run's warm
+	// checkout AT ITS COMMITTED HEAD that the clean-room final verify proves cold (SB4.3),
+	// keyed distinctly so it never collides with the warm checkout. A clone is a throwaway
+	// per verify (a re-run overwrites the run's entry); the prior clone dir is reaped so
+	// verifies do not leak.
 	verifyRoots map[string]string // runEntityID → absolute cold-verify clone root
 }
 
-// NewCheckouts builds a Checkouts that materializes runs' checkouts under base. If base
-// is empty, a process-scoped temp directory is created. base is created if absent.
-func NewCheckouts(base string) (*Checkouts, error) {
+// NewCheckouts builds a Checkouts that materializes runs' checkouts under base, shelling
+// git through runner (cliexec.OSRunner in production). If base is empty, a process-scoped
+// temp directory is created. base is created if absent.
+func NewCheckouts(base string, runner cliexec.Runner) (*Checkouts, error) {
+	if runner == nil {
+		return nil, fmt.Errorf("runspace: NewCheckouts needs a git runner")
+	}
 	if base == "" {
 		dir, err := os.MkdirTemp("", "semdev-checkouts-*")
 		if err != nil {
@@ -49,7 +69,66 @@ func NewCheckouts(base string) (*Checkouts, error) {
 	} else if err := os.MkdirAll(base, 0o755); err != nil {
 		return nil, fmt.Errorf("runspace: create checkouts base %s: %w", base, err)
 	}
-	return &Checkouts{base: base, roots: map[string]string{}, verifyRoots: map[string]string{}}, nil
+	return &Checkouts{base: base, runner: runner, roots: map[string]string{}, verifyRoots: map[string]string{}}, nil
+}
+
+// git runs a git subcommand in dir and returns its trimmed stdout, failing closed on any
+// non-zero exit (the stderr travels in the error so the caller can surface the real cause).
+func (c *Checkouts) git(ctx context.Context, dir string, args ...string) (string, error) {
+	res, err := c.runner.Run(ctx, dir, gitBin, args...)
+	if err != nil {
+		return "", fmt.Errorf("runspace: run git %v: %w", args, err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("runspace: git %v failed (exit %d): %s", args, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return strings.TrimSpace(res.Stdout), nil
+}
+
+// gitStatusPorcelain returns one entry per path in `git status --porcelain` over dir's
+// checkout — empty when the working tree matches HEAD. Each line is the porcelain status
+// (e.g. " M health.go", "?? residue.txt"); the clean-tree floor only needs their presence
+// and count, so the raw lines are returned verbatim.
+func (c *Checkouts) gitStatusPorcelain(ctx context.Context, dir string) ([]string, error) {
+	out, err := c.git(ctx, dir, "status", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	var dirty []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			dirty = append(dirty, line)
+		}
+	}
+	return dirty, nil
+}
+
+// initCommit turns a freshly-copied checkout dir into a git repository with the harness
+// identity and one base commit of the pristine source, so every later attempt commit has a
+// parent and `git diff base..HEAD` is the cumulative authored change. It is the immutable-
+// snapshot foundation: what verify clones is a commit, not a mutable tree.
+func (c *Checkouts) initCommit(ctx context.Context, dir string) error {
+	if _, err := c.git(ctx, dir, "init", "-q"); err != nil {
+		return err
+	}
+	if _, err := c.git(ctx, dir, "config", "user.email", harnessGitEmail); err != nil {
+		return err
+	}
+	if _, err := c.git(ctx, dir, "config", "user.name", harnessGitName); err != nil {
+		return err
+	}
+	if _, err := c.git(ctx, dir, "add", "-A"); err != nil {
+		return err
+	}
+	// --no-gpg-sign: a run must never block on an operator's signing key; the harness
+	// identity is the attribution (G7), not a cryptographic signature.
+	if _, err := c.git(ctx, dir, "commit", "-q", "--no-gpg-sign", "-m", "base: pristine checkout"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Materialize creates a fresh working copy of sourceDir for the run and records it,
@@ -79,6 +158,14 @@ func (c *Checkouts) Materialize(ctx context.Context, runEntityID, sourceDir stri
 	if err := copyTree(ctx, absSource, dest); err != nil {
 		_ = os.RemoveAll(dest)
 		return "", fmt.Errorf("runspace: materialize checkout for %s: %w", runEntityID, err)
+	}
+	// Make the fresh copy a git repository with a pristine base commit BEFORE recording it,
+	// so a run's checkout is always a snapshot-able repo (never a mutable tree the verify
+	// could copy). A failed init leaves no half-repo recorded — the prior good checkout, if
+	// any, stays intact (the copy-before-record discipline).
+	if err := c.initCommit(ctx, dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return "", fmt.Errorf("runspace: git-init checkout for %s: %w", runEntityID, err)
 	}
 
 	// Only now that the new copy is complete: record it and remove any prior copy.
@@ -128,13 +215,22 @@ func (c *Checkouts) CloneForVerify(ctx context.Context, runEntityID string) (str
 		return "", fmt.Errorf("runspace: no checkout materialized for run %s — cannot clone for cold verify (park toward the human)", runEntityID)
 	}
 
-	// Copy into a fresh dir fully BEFORE recording it (and outside the map mutation), so a
-	// failed copy leaves any prior good clone intact — the Materialize discipline.
+	// git-clone the warm repo into a fresh dir fully BEFORE recording it (and outside the
+	// map mutation), so a failed clone leaves any prior good clone intact — the Materialize
+	// discipline. `git clone` copies only COMMITTED objects and checks out HEAD, so the
+	// clone's working tree is exactly the latest committed attempt (attempt.commit in the
+	// strictly-serial M0 chain) — an uncommitted warm-tree change (test residue, tampering)
+	// is structurally excluded. This is what makes verify prove an immutable snapshot, not a
+	// copy of the mutable tree (G4/G7, the semspec grave). --no-hardlinks keeps the clone's
+	// object store physically independent of the warm repo's.
 	dest, err := os.MkdirTemp(c.base, "verify-*")
 	if err != nil {
 		return "", fmt.Errorf("runspace: create verify clone dir: %w", err)
 	}
-	if err := copyTree(ctx, warm, dest); err != nil {
+	// git permits cloning into an existing EMPTY directory (which MkdirTemp guarantees), and
+	// dest becomes the clone's worktree root. warm/dest are absolute, so the runner's cwd
+	// (dir="") is irrelevant.
+	if _, err := c.git(ctx, "", "clone", "-q", "--no-hardlinks", warm, dest); err != nil {
 		_ = os.RemoveAll(dest)
 		return "", fmt.Errorf("runspace: clone checkout for verify of %s: %w", runEntityID, err)
 	}

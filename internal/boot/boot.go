@@ -181,7 +181,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		patcher applypatch.Patcher
 	)
 	if deps.NATSClient != nil {
-		checkouts, cerr := runspace.NewCheckouts("")
+		checkouts, cerr := runspace.NewCheckouts("", cliexec.OSRunner{})
 		if cerr != nil {
 			return fmt.Errorf("create run checkouts: %w", cerr)
 		}
@@ -303,11 +303,13 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	}
 
 	// apply_patch (sandbox, SB6) is the developer's code-authoring tool: it applies a
-	// unified diff to the run's checkout path-guarded to inside it (never the host) and
-	// reports the touched files. It measures no outcome (G3) and stamps no fact (G2) —
-	// the dev loop's measure_task/floors read the mutated checkout. Nil patcher (the
-	// census) makes Execute fail loudly.
-	if err := reg.RegisterExecutor(applypatch.New(patcher, deps.Logger)); err != nil {
+	// unified diff to the run's checkout path-guarded to inside it (never the host),
+	// COMMITS the applied attempt under the harness identity, and reports the touched
+	// files. It measures no outcome (G3) and fires no transition (G2); it stamps exactly
+	// the commit SHA the harness created as attempt.commit via the shared OwnedFactWriter
+	// (its own Source, patch-committer — G5-safe), the immutable-snapshot pointer the cold
+	// verify + read_diff target. Nil patcher/writer (the census) makes Execute fail loudly.
+	if err := reg.RegisterExecutor(applypatch.New(patcher, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", applypatch.ToolName, err)
 	}
 

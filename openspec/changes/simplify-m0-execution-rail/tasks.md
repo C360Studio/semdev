@@ -6,11 +6,11 @@
 
 ## 2. Immutable snapshot: git-backed runspace
 
-- [ ] 2.1 Red-first pin: cold verify currently consumes bytes absent from any commit (reproduce the mutable-tree leak on the fixture)
-- [ ] 2.2 `Materialize` runs `git init` + pristine base commit with a fixed harness author identity
-- [ ] 2.3 `apply_patch` commits the checkout after each successful apply and stamps `attempt.commit` (latest-wins) on the run; add `attempt.commit` to the vocabulary (G9) with its single writer (G5)
-- [ ] 2.4 Replace `CloneForVerify`'s tree copy with clone-at-`attempt.commit`; delete the mutable-copy path
-- [ ] 2.5 Post-measure dirty-tree floor: `git status --porcelain` non-empty after measurement stamps a rejecting `floor.finding` (red-first pin with a test that mutates the tree during measure)
+- [x] 2.1 Red-first pin: cold verify currently consumes bytes absent from any commit (reproduce the mutable-tree leak on the fixture)
+- [x] 2.2 `Materialize` runs `git init` + pristine base commit with a fixed harness author identity
+- [x] 2.3 `apply_patch` commits the checkout after each successful apply and stamps `attempt.commit` (latest-wins) on the run; add `attempt.commit` to the vocabulary (G9) with its single writer (G5)
+- [x] 2.4 Replace `CloneForVerify`'s tree copy with clone-at-`attempt.commit`; delete the mutable-copy path
+- [x] 2.5 Post-measure dirty-tree floor: `git status --porcelain` non-empty after measurement stamps a rejecting `floor.finding` (red-first pin with a test that mutates the tree during measure)
 
 ## 3. Patch scope: target_files enforcement
 

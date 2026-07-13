@@ -29,6 +29,10 @@ const m0 = "m0-walking-skeleton-spine"
 // and-prove-cold vocabulary (the sandbox capability).
 const sandbox = "containerized-sandbox-dev-loop"
 
+// reshape is the change slug that reshapes the M0 execution rail (immutable git-backed
+// snapshot, rule-native routing, restart-safe provisioning).
+const reshape = "simplify-m0-execution-rail"
+
 // Predicates is the complete fact vocabulary. See design.md D12 — this table is
 // that decision made executable. Order is presentational only; the pins treat it
 // as a set keyed by Name.
@@ -65,6 +69,11 @@ var Predicates = []Predicate{
 	// the sandbox change's dev loop (group 7B); the NAME was reserved in m0's founding
 	// dev-loop vocabulary.
 	{"task.attempt.*", "dev-measure-rule", "dev-from-task", m0},
+	// attempt.commit is the immutable-snapshot pointer: the SHA apply_patch commits after
+	// each successful apply (latest-wins, one writer patch-committer). The cold verify
+	// clones this commit and read_diff diffs base..this — so what is verified and reviewed
+	// is a committed tree, never the mutable warm checkout (G4/G7, the reshape's P1 fix).
+	{"attempt.commit", "patch-committer", "sandbox", reshape},
 	{"floor.finding.*", "floor-tools", "dev-from-task", m0},
 	{"measurement.result.*", "measurement-harness", "harness-measurement", m0},
 	{"review.verdict.*", "reviewer-quinn", "harness-measurement", m0},

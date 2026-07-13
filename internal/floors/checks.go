@@ -715,3 +715,29 @@ func sortedKeys(m map[string]struct{}) []string {
 	sort.Strings(out)
 	return out
 }
+
+// CleanTree rejects an attempt whose working tree diverged from the committed attempt at
+// resolution time (a non-empty `git status --porcelain`, captured into DirtyPaths by the
+// resolver). Because floors evaluate the working-tree file contents but the cold verify
+// clones the COMMITTED tree, a dirty tree means the two would prove DIFFERENT bytes — the
+// floors' green would not describe what verify proves. A dirty tree after measurement is
+// also evidence tampering (the container mutated the artifact post-commit). Either way it
+// fails closed (G4/G7): the divergence must be committed (a fresh attempt) or is a park.
+// Its verdict is deterministic from the Attempt shape alone (no parse), so it holds for
+// any ecosystem, not just Go.
+//
+// KNOWN CONSTRAINT (system-level, not this pure function): DirtyPaths is `git status
+// --porcelain` over the warm checkout AFTER measure_task ran its test_command in-container
+// over that same bind-mounted tree. So the signal assumes the operator repo gitignores its
+// build/test output — the current Go fixture is clean because go's caches live under
+// GOCACHE/$HOME, never the module dir. A test that writes a NON-gitignored artifact into
+// the working tree (golden-file regen, an in-tree lockfile update) would false-reject a
+// legitimately-passing attempt. Acceptable for M0-Go; revisit for tree-writing ecosystems.
+func CleanTree(a Attempt) Finding {
+	if len(a.DirtyPaths) == 0 {
+		return pass(FloorCleanTree, "the working tree matches the committed attempt (git status clean) — floors and cold verify evaluate the same bytes")
+	}
+	return reject(FloorCleanTree, fmt.Sprintf(
+		"the working tree diverged from the committed attempt in %d path(s) (e.g. %s) — floors evaluate the working tree but cold verify clones the commit, so their bytes differ; commit the change as a fresh attempt or park (evidence tampering, G7)",
+		len(a.DirtyPaths), a.DirtyPaths[0]))
+}

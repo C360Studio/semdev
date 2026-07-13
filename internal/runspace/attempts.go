@@ -71,7 +71,16 @@ func (a *Attempts) Resolve(ctx context.Context, runEntityID string, taskIndex in
 		}
 		files = append(files, floors.File{Path: rel, Content: string(content)})
 	}
-	return floors.Attempt{Files: files, TargetFiles: targets}, nil
+
+	// Capture the working tree's divergence from the committed attempt — the clean-tree
+	// floor rejects on it (floors read the working tree; cold verify clones the commit, so
+	// a dirty tree means they would prove different bytes — evidence tampering, G7). git
+	// status is the impure read that belongs here in the resolver, not in the pure floors.
+	dirty, err := a.checkouts.gitStatusPorcelain(ctx, root)
+	if err != nil {
+		return floors.Attempt{}, err
+	}
+	return floors.Attempt{Files: files, TargetFiles: targets, DirtyPaths: dirty}, nil
 }
 
 // readTargetFiles reads the JSON-array task.spec.<idx>.target_files fact off the run

@@ -20,6 +20,7 @@ func TestCheckAllReturnsFixedFloorSet(t *testing.T) {
 		FloorStub:           true,
 		FloorSourceBuild:    true,
 		FloorAntiMock:       true,
+		FloorCleanTree:      true,
 	}
 	// Attempts that pass, that don't apply, and that fail to parse — the RETURNED
 	// floor set must be identical each time: never shorter, never duplicated.
@@ -49,7 +50,7 @@ func TestCheckAllReturnsFixedFloorSet(t *testing.T) {
 // <field>, so a dot inside a floor name would fracture the predicate segments and
 // mis-key the finding.
 func TestFloorNamesAreDotFree(t *testing.T) {
-	for _, name := range []string{FloorPresence, FloorTestsMustExist, FloorVacuousTest, FloorStub, FloorSourceBuild, FloorAntiMock} {
+	for _, name := range []string{FloorPresence, FloorTestsMustExist, FloorVacuousTest, FloorStub, FloorSourceBuild, FloorAntiMock, FloorCleanTree} {
 		if strings.Contains(name, ".") {
 			t.Errorf("floor name %q contains a dot — it must be a single predicate segment", name)
 		}

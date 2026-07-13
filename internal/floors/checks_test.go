@@ -625,3 +625,19 @@ func TestAnyRejected(t *testing.T) {
 		t.Error("AnyRejected false when one rejects")
 	}
 }
+
+// The clean-tree floor (group 2, task 2.5) rejects a working tree that diverged from the
+// committed attempt (non-empty DirtyPaths) — floors read the working tree, cold verify
+// clones the commit, so a dirty tree means they prove different bytes (G7 tampering). A
+// clean tree passes.
+func TestCleanTreeFloor(t *testing.T) {
+	if f := CleanTree(Attempt{}); !f.Passed {
+		t.Errorf("clean tree (no dirty paths) must pass: %s", f.Detail)
+	}
+	dirty := Attempt{DirtyPaths: []string{" M health.go", "?? residue.txt"}}
+	if f := CleanTree(dirty); f.Passed {
+		t.Error("a dirty working tree must REJECT — floors and cold verify would prove different bytes")
+	} else if !strings.Contains(f.Detail, "health.go") {
+		t.Errorf("clean-tree rejection should name a diverged path, got: %s", f.Detail)
+	}
+}

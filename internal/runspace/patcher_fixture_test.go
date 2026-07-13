@@ -42,7 +42,7 @@ func TestPatcherFixesFixtureRedToGreen(t *testing.T) {
 	ctx := context.Background()
 	runner := cliexec.OSRunner{}
 
-	checkouts, err := NewCheckouts(t.TempDir())
+	checkouts, err := NewCheckouts(t.TempDir(), runner)
 	if err != nil {
 		t.Fatalf("new checkouts: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestPatcherFixesFixtureRedToGreen(t *testing.T) {
 	}
 
 	// Author the fix through the real apply_patch seam.
-	touched, err := NewPatcher(checkouts, runner).Apply(ctx, run, fixtureFixDiff)
+	touched, _, err := NewPatcher(checkouts, runner).Apply(ctx, run, fixtureFixDiff)
 	if err != nil {
 		t.Fatalf("apply fix diff: %v", err)
 	}

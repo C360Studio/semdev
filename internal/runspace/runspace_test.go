@@ -3,13 +3,16 @@ package runspace
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/floors"
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semstreams/message"
 )
@@ -41,11 +44,28 @@ func (f fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.Tr
 
 func newCheckouts(t *testing.T) *Checkouts {
 	t.Helper()
-	c, err := NewCheckouts(t.TempDir())
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	c, err := NewCheckouts(t.TempDir(), cliexec.OSRunner{})
 	if err != nil {
 		t.Fatalf("NewCheckouts: %v", err)
 	}
 	return c
+}
+
+// commitWarm stages and commits everything in a git-backed checkout under the harness
+// identity Materialize configured repo-local — the test stand-in for apply_patch's
+// commit-per-attempt, so CloneForVerify has a committed tree to clone.
+func commitWarm(t *testing.T, dir, msg string) {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "--no-gpg-sign", "-m", msg}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
 }
 
 // Materialize copies the fixture into a fresh per-run checkout; Root resolves it, and
@@ -136,11 +156,13 @@ func TestCloneForVerifyIsFreshAndNonDestructive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
-	// Simulate apply_patch mutating the warm checkout (the "committed" bytes).
+	// Simulate apply_patch mutating AND COMMITTING the warm checkout (the committed
+	// attempt). CloneForVerify clones the committed tree, so only committed bytes appear.
 	patched := filepath.Join(warm, "health.go")
 	if err := os.WriteFile(patched, []byte("package health\n// PATCHED\n"), 0o644); err != nil {
 		t.Fatalf("mutate warm checkout: %v", err)
 	}
+	commitWarm(t, warm, "attempt: patch health.go")
 
 	clone, err := c.CloneForVerify(ctx, runID)
 	if err != nil {
@@ -162,6 +184,43 @@ func TestCloneForVerifyIsFreshAndNonDestructive(t *testing.T) {
 	}
 	if _, err := os.Stat(patched); err != nil {
 		t.Errorf("warm checkout's patched file was destroyed by CloneForVerify: %v", err)
+	}
+}
+
+// RED-FIRST PIN (group 2, task 2.1): the mutable-tree leak. Cold verify must prove an
+// IMMUTABLE snapshot — the bytes at a commit — never the mutable warm working tree. A
+// file written into the warm checkout but NEVER committed (post-measure `go test`
+// residue, or outright tampering) must not reach the cold-verify clone; if it does,
+// verify proves bytes that exist in no commit (G4/G7 — the semspec grave). Against the
+// pre-git copyTree implementation this FAILS (the uncommitted file is copied into the
+// clone); once Materialize git-inits + apply_patch commits + CloneForVerify clones at the
+// committed tree, it passes.
+func TestCloneForVerifyExcludesUncommittedWarmTreeMutation(t *testing.T) {
+	c := newCheckouts(t)
+	ctx := context.Background()
+	warm, err := c.Materialize(ctx, runID, fixture(t, "go-health-class"))
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	// A file in the warm tree that was NEVER committed — the leak. In the real flow this
+	// is what a container-side `go test` or a tampering step leaves behind after the
+	// committed attempt was measured.
+	leak := filepath.Join(warm, "UNCOMMITTED_LEAK.txt")
+	if err := os.WriteFile(leak, []byte("bytes that are in no commit\n"), 0o644); err != nil {
+		t.Fatalf("write leak file: %v", err)
+	}
+
+	clone, err := c.CloneForVerify(ctx, runID)
+	if err != nil {
+		t.Fatalf("CloneForVerify: %v", err)
+	}
+	// The committed baseline IS present — the clone is the real artifact, not an empty dir.
+	if _, err := os.Stat(filepath.Join(clone, "health.go")); err != nil {
+		t.Errorf("cold-verify clone missing the committed health.go: %v", err)
+	}
+	// The uncommitted leak is ABSENT — verify proves the immutable commit, not the warm tree.
+	if _, err := os.Stat(filepath.Join(clone, "UNCOMMITTED_LEAK.txt")); !os.IsNotExist(err) {
+		t.Errorf("cold-verify clone carried an UNCOMMITTED warm-tree file (stat err=%v) — the mutable-tree leak: verify would prove bytes absent from any commit", err)
 	}
 }
 
@@ -269,7 +328,40 @@ func TestAttemptsResolve(t *testing.T) {
 			t.Errorf("file %s has empty content — the checkout copy was not read", f.Path)
 		}
 	}
+	// A freshly materialized checkout is committed pristine, so the working tree is CLEAN.
+	if len(att.DirtyPaths) != 0 {
+		t.Errorf("fresh checkout has dirty paths %v — Materialize's base commit should leave a clean tree", att.DirtyPaths)
+	}
 	_ = root
+}
+
+// RED-FIRST PIN (task 2.5): a working-tree mutation AFTER the committed attempt (the shape
+// of container-side test residue or tampering during measure) is captured as DirtyPaths, so
+// the clean-tree floor rejects. Without the git-status capture DirtyPaths is always empty
+// and the floor never fires — floors would green a tree that diverges from what verify proves.
+func TestAttemptsResolveCapturesDirtyTree(t *testing.T) {
+	c := newCheckouts(t)
+	root, err := c.Materialize(context.Background(), runID, fixture(t, "go-health-class"))
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	// Mutate a committed file WITHOUT committing — the post-measure divergence.
+	if err := os.WriteFile(filepath.Join(root, "health.go"), []byte("package health\n// TAMPERED POST-COMMIT\n"), 0o644); err != nil {
+		t.Fatalf("mutate checkout: %v", err)
+	}
+	reader := fakeReader{triples: []message.Triple{
+		{Predicate: devtask.TaskSpecKeyPrefix(0) + devtask.FactTargetFiles, Object: `["health.go","health_test.go"]`},
+	}}
+	att, err := NewAttempts(reader, c).Resolve(context.Background(), runID, 0)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(att.DirtyPaths) == 0 {
+		t.Fatal("Resolve did not capture the dirty working tree — the clean-tree floor cannot fire")
+	}
+	if f := floors.CleanTree(att); f.Passed {
+		t.Error("the clean-tree floor must REJECT a checkout mutated after its commit")
+	}
 }
 
 // A declared-but-absent target file is listed in TargetFiles but absent from Files (a

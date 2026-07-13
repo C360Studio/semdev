@@ -29,6 +29,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `openspec.archived` | openspec-archive-harness | openspec-io |
 | `task.spec.*` | task-projector | dev-from-task |
 | `task.attempt.*` | dev-measure-rule | dev-from-task |
+| `attempt.commit` | patch-committer | sandbox |
 | `floor.finding.*` | floor-tools | dev-from-task |
 | `measurement.result.*` | measurement-harness | harness-measurement |
 | `review.verdict.*` | reviewer-quinn | harness-measurement |

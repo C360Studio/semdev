@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/coldproof"
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/runspace"
@@ -444,7 +445,7 @@ func TestProvisionRealFixtureReady(t *testing.T) {
 	if err := cleanroom.DockerAvailable(ctx, "docker"); err != nil {
 		t.Skipf("docker unavailable: %v", err)
 	}
-	checkouts, err := runspace.NewCheckouts("")
+	checkouts, err := runspace.NewCheckouts("", cliexec.OSRunner{})
 	if err != nil {
 		t.Fatalf("new checkouts: %v", err)
 	}

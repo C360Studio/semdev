@@ -3,6 +3,7 @@ package conformance
 import (
 	"testing"
 
+	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkcoherence"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/checkgate"
@@ -64,6 +65,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"check_coherence", checkcoherence.Source, checkcoherence.DecidedMarker},
 		{"open_pr", openpr.Source, openpr.RefPredicate},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
+		{"apply_patch", applypatch.Source, applypatch.CommitPredicate},
 	}
 	for _, c := range cases {
 		writer, ok := vocab.WriterOf(c.predicate)
