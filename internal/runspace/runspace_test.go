@@ -126,6 +126,80 @@ func TestMaterializeFailureKeepsPriorCheckout(t *testing.T) {
 	}
 }
 
+// CloneForVerify makes a FRESH copy of the warm checkout for the cold verify, WITHOUT
+// touching the warm checkout (the applied-diff bytes the loop measured must survive) —
+// the SB4.3 third-instance clone.
+func TestCloneForVerifyIsFreshAndNonDestructive(t *testing.T) {
+	c := newCheckouts(t)
+	ctx := context.Background()
+	warm, err := c.Materialize(ctx, runID, fixture(t, "go-health-class"))
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	// Simulate apply_patch mutating the warm checkout (the "committed" bytes).
+	patched := filepath.Join(warm, "health.go")
+	if err := os.WriteFile(patched, []byte("package health\n// PATCHED\n"), 0o644); err != nil {
+		t.Fatalf("mutate warm checkout: %v", err)
+	}
+
+	clone, err := c.CloneForVerify(ctx, runID)
+	if err != nil {
+		t.Fatalf("CloneForVerify: %v", err)
+	}
+	// The clone is a DISTINCT dir, not the warm checkout.
+	if clone == warm {
+		t.Fatal("clone is the warm checkout itself — must be a fresh copy")
+	}
+	// The clone carries the PATCHED bytes (it copies the committed artifact, not the source).
+	got, err := os.ReadFile(filepath.Join(clone, "health.go"))
+	if err != nil || string(got) != "package health\n// PATCHED\n" {
+		t.Errorf("clone health.go = %q (err %v), want the patched bytes", got, err)
+	}
+	// The warm checkout is UNTOUCHED and still resolvable (CloneForVerify never
+	// re-materializes — the applied diff survives for a retry).
+	if root, err := c.Root(ctx, runID); err != nil || root != warm {
+		t.Errorf("warm checkout Root = (%q, %v), want the intact warm root %q — CloneForVerify must not touch it", root, err, warm)
+	}
+	if _, err := os.Stat(patched); err != nil {
+		t.Errorf("warm checkout's patched file was destroyed by CloneForVerify: %v", err)
+	}
+}
+
+// CloneForVerify fails CLOSED when the run has no warm checkout — nothing to prove, so
+// the run parks rather than verifying over a guessed path (SB5). And a re-clone reaps the
+// prior clone (no leak).
+func TestCloneForVerifyFailsClosedAndReaps(t *testing.T) {
+	c := newCheckouts(t)
+	ctx := context.Background()
+	if _, err := c.CloneForVerify(ctx, runID); err == nil {
+		t.Fatal("CloneForVerify with no warm checkout should fail closed")
+	}
+	if _, err := c.Materialize(ctx, runID, fixture(t, "go-health-class")); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	first, err := c.CloneForVerify(ctx, runID)
+	if err != nil {
+		t.Fatalf("clone 1: %v", err)
+	}
+	second, err := c.CloneForVerify(ctx, runID)
+	if err != nil {
+		t.Fatalf("clone 2: %v", err)
+	}
+	if first == second {
+		t.Error("re-clone returned the same dir; want a fresh clone")
+	}
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Errorf("prior verify clone %s not reaped on re-clone", first)
+	}
+	// Remove reaps the outstanding clone too.
+	if err := c.Remove(runID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(second); !os.IsNotExist(err) {
+		t.Errorf("Remove did not reap the verify clone %s", second)
+	}
+}
+
 // Manifests resolves the fixture's declared image + customizations run fields.
 func TestManifestsResolve(t *testing.T) {
 	c := newCheckouts(t)

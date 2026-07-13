@@ -3,11 +3,10 @@ package verifyartifact
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 
-	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/harness"
+	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -15,12 +14,15 @@ import (
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
 
-type fakeWorkspace struct {
+// fakeClones stands in for runspace.Checkouts.CloneForVerify.
+type fakeClones struct {
 	root string
 	err  error
 }
 
-func (w fakeWorkspace) Root(_ context.Context, _ string) (string, error) { return w.root, w.err }
+func (f fakeClones) CloneForVerify(_ context.Context, _ string) (string, error) {
+	return f.root, f.err
+}
 
 type fakeManifests struct {
 	m   harness.Manifest
@@ -29,6 +31,20 @@ type fakeManifests struct {
 
 func (f fakeManifests) Resolve(_ context.Context, _ string) (harness.Manifest, error) {
 	return f.m, f.err
+}
+
+// fakeProver returns a canned verdict/err — the cold proof itself is exercised
+// docker-gated in internal/coldproof; here we pin the tool's fact-stamping and
+// fail-closed wiring without docker.
+type fakeProver struct {
+	verdict verify.Verdict
+	err     error
+	gotRoot string // records the artifact root it was asked to prove
+}
+
+func (p *fakeProver) ProveArtifact(_ context.Context, _, artifactRoot string, _ harness.Manifest, _ secrets.Store) (verify.Verdict, error) {
+	p.gotRoot = artifactRoot
+	return p.verdict, p.err
 }
 
 type fakeWriter struct {
@@ -51,42 +67,45 @@ func callVerify() agentic.ToolCall {
 	}
 }
 
-// exec runs the tool with a scripted runner and returns the stamped verify.result
-// (or "") plus the runner (for argv assertions).
-func exec(t *testing.T, runner *cleanroom.MockRunner, w *fakeWriter) string {
+func verdictOf(o verify.Outcome) verify.Verdict { return verify.Verdict{Outcome: o} }
+
+// execWith runs the tool with the given clones/prover and returns the stamped
+// verify.result (or "") plus the tool result.
+func execWith(t *testing.T, clones VerifyClones, prover Prover, w *fakeWriter) (string, agentic.ToolResult) {
 	t.Helper()
-	e := New(runner, fakeWorkspace{root: "/checkout"}, fakeManifests{m: harness.GoProfile()}, w, nil)
+	e := New(clones, fakeManifests{m: harness.GoProfile()}, prover, nil, w, nil)
 	res, err := e.Execute(context.Background(), callVerify())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
-	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			if tr.Predicate == ResultPredicate {
-				return tr.Object.(string)
+				return tr.Object.(string), res
 			}
 		}
 	}
-	return ""
+	return "", res
 }
 
-// Happy path: resolve cold + tests pass in fresh isolation → verify.result = pass,
-// stamped with the harness Source on the run entity. And the harness ran the
-// MANIFEST's own commands (not a model-supplied command).
+// Happy path: the cold proof passes → verify.result = pass, stamped with the harness
+// Source on the run entity, and the tool proved the CLONE root (the committed artifact),
+// not the warm checkout.
 func TestVerifyPassStampsResult(t *testing.T) {
-	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
-		{Result: cleanroom.Result{ExitCode: 0}}, // go mod download
-		{Result: cleanroom.Result{ExitCode: 0}}, // go test ./...
-	}}
 	w := &fakeWriter{}
-	if got := exec(t, runner, w); got != string(verify.OutcomePass) {
+	prover := &fakeProver{verdict: verdictOf(verify.OutcomePass)}
+	got, res := execWith(t, fakeClones{root: "/verify-clone"}, prover, w)
+	if res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	if got != string(verify.OutcomePass) {
 		t.Fatalf("verify.result = %q, want pass", got)
 	}
-	if want := [][]string{{"go", "mod", "download"}, {"go", "test", "./..."}}; !reflect.DeepEqual(runner.ExecArgv, want) {
-		t.Errorf("ran %v, want the manifest's own resolve+test commands %v", runner.ExecArgv, want)
+	if !res.StopLoop {
+		t.Error("verify_artifact must StopLoop (single forced turn)")
+	}
+	if prover.gotRoot != "/verify-clone" {
+		t.Errorf("prover proved %q, want the fresh clone root /verify-clone (the committed artifact, not the warm checkout)", prover.gotRoot)
 	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -98,94 +117,61 @@ func TestVerifyPassStampsResult(t *testing.T) {
 			}
 		}
 	}
-	if runner.DownCalls != 1 {
-		t.Errorf("Down called %d times, want 1 (sandbox torn down)", runner.DownCalls)
+}
+
+// A genuine cold failure (fabrication / non-self-contained fix) → verify.result = fail.
+func TestVerifyFailStampsResult(t *testing.T) {
+	got, _ := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeFail)}, &fakeWriter{})
+	if got != string(verify.OutcomeFail) {
+		t.Fatalf("verify.result = %q, want fail", got)
 	}
 }
 
-// The cache-masked-fabrication reject (G4 / 8.7): a dependency that resolves only
-// against a warm cache does NOT resolve cold — the genuine resolve failure records a
-// terminal fail, and the test step is not even reached.
-func TestVerifyCacheMaskedFabricationFails(t *testing.T) {
-	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
-		{Result: cleanroom.Result{ExitCode: 1, Stderr: "go: example.com/fabricated@v9.9.9: no matching versions for query \"v9.9.9\""}},
-	}}
-	if got := exec(t, runner, &fakeWriter{}); got != string(verify.OutcomeFail) {
-		t.Fatalf("verify.result = %q, want fail (cache-masked fabrication rejected cold)", got)
-	}
-	if runner.ExecCalls != 1 {
-		t.Errorf("ran %d steps, want 1 — a genuine resolve failure short-circuits before tests", runner.ExecCalls)
+// A transport fault classified by the proof → verify.result = retry (never a terminal
+// reject of a good artifact).
+func TestVerifyRetryStampsResult(t *testing.T) {
+	got, _ := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, &fakeWriter{})
+	if got != string(verify.OutcomeRetry) {
+		t.Fatalf("verify.result = %q, want retry", got)
 	}
 }
 
-// A transport fault during resolve retries, it does NOT terminal-reject the artifact
-// (spec: transient infrastructure error retries).
-func TestVerifyResolveTransportRetries(t *testing.T) {
-	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
-		{Result: cleanroom.Result{ExitCode: 1, Stderr: "go: dial tcp: lookup proxy.golang.org: i/o timeout"}},
-	}}
-	if got := exec(t, runner, &fakeWriter{}); got != string(verify.OutcomeRetry) {
-		t.Fatalf("verify.result = %q, want retry (a transport fault must not terminal-reject)", got)
+// A proof that COULD NOT RUN (image build flake, incomplete manifest) is a retryable
+// TOOL error — it stamps NO verdict (never a false green), and does not StopLoop so the
+// forced loop re-runs.
+func TestVerifyProveErrorIsRetryableToolError(t *testing.T) {
+	w := &fakeWriter{}
+	_, res := execWith(t, fakeClones{root: "/c"}, &fakeProver{err: errors.New("docker build: daemon flake")}, w)
+	if res.Error == "" {
+		t.Error("a proof that could not run must surface as a tool error, not a stamped verdict")
+	}
+	if len(w.replaces) != 0 {
+		t.Error("a proof that could not run must stamp no verify.result")
+	}
+	if res.StopLoop {
+		t.Error("a prove-error must NOT StopLoop — the forced verify loop retries")
 	}
 }
 
-// A sandbox that will not provision is a transport fault → retry, no terminal reject.
-func TestVerifyProvisionFaultRetries(t *testing.T) {
-	runner := &cleanroom.MockRunner{UpErr: errors.New("sandbox backend unreachable")}
-	if got := exec(t, runner, &fakeWriter{}); got != string(verify.OutcomeRetry) {
-		t.Fatalf("verify.result = %q, want retry (provisioning fault is transport)", got)
+// The clone step fails closed (no warm checkout) → a tool error, no stamp — the run
+// parks rather than verifying over a guessed path (SB5).
+func TestVerifyCloneFailsClosed(t *testing.T) {
+	w := &fakeWriter{}
+	_, res := execWith(t, fakeClones{err: errors.New("no checkout materialized for run")}, &fakeProver{verdict: verdictOf(verify.OutcomePass)}, w)
+	if res.Error == "" {
+		t.Error("a failed clone must surface as a tool error")
 	}
-	if runner.ExecCalls != 0 {
-		t.Errorf("ran %d steps after a failed Up, want 0", runner.ExecCalls)
-	}
-}
-
-// A step that could not RUN (a transport fault, not an exit code) retries.
-func TestVerifyResolveRunErrorRetries(t *testing.T) {
-	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
-		{Err: errors.New("exec: \"go\": executable file not found in $PATH")},
-	}}
-	if got := exec(t, runner, &fakeWriter{}); got != string(verify.OutcomeRetry) {
-		t.Fatalf("verify.result = %q, want retry (resolve could not run)", got)
+	if len(w.replaces) != 0 {
+		t.Error("a failed clone must stamp nothing (no verify over a guessed path)")
 	}
 }
 
-// Resolve cold but the artifact's own tests fail → terminal fail (a genuine
-// artifact failure).
-func TestVerifyTestsFailFails(t *testing.T) {
-	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
-		{Result: cleanroom.Result{ExitCode: 0}},                     // resolve ok
-		{Result: cleanroom.Result{ExitCode: 1, Stdout: "--- FAIL"}}, // tests fail
-	}}
-	if got := exec(t, runner, &fakeWriter{}); got != string(verify.OutcomeFail) {
-		t.Fatalf("verify.result = %q, want fail (tests failed in isolation)", got)
-	}
-}
-
-// Tests that could not RUN (transport) retries, not a terminal reject.
-func TestVerifyTestRunErrorRetries(t *testing.T) {
-	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{
-		{Result: cleanroom.Result{ExitCode: 0}},    // resolve ok
-		{Err: errors.New("sandbox died mid-test")}, // tests couldn't run
-	}}
-	if got := exec(t, runner, &fakeWriter{}); got != string(verify.OutcomeRetry) {
-		t.Fatalf("verify.result = %q, want retry (tests could not run)", got)
-	}
-}
-
-// Re-verify upserts the verify.result (replace-by-predicate): a passing re-run
-// replaces a prior retry.
+// Re-verify upserts the verify.result (replace-by-predicate): a passing re-run replaces
+// a prior retry, and verify writes ONLY verify.result.
 func TestVerifyReVerifyUpserts(t *testing.T) {
 	w := &fakeWriter{}
-	// First: a transport retry.
-	exec(t, &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 1, Stderr: "connection refused"}}}}, w)
-	// Then: a clean pass on the same writer.
-	e := New(&cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 0}}, {Result: cleanroom.Result{ExitCode: 0}}}},
-		fakeWorkspace{root: "/checkout"}, fakeManifests{m: harness.GoProfile()}, w, nil)
-	res, err := e.Execute(context.Background(), callVerify())
-	if err != nil || res.Error != "" {
-		t.Fatalf("re-verify: err=%v toolErr=%s", err, res.Error)
-	}
+	execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, w)
+	execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomePass)}, w)
 	if len(w.replaces) != 2 {
 		t.Fatalf("want two verify.result upserts, got %d", len(w.replaces))
 	}
@@ -198,9 +184,9 @@ func TestVerifyReVerifyUpserts(t *testing.T) {
 	}
 }
 
-// Schema-only registration (nil workspace/manifests/writer) fails loudly.
+// Schema-only registration (nil clones/manifests/prover/writer) fails loudly.
 func TestVerifyFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(&cleanroom.MockRunner{}, nil, nil, nil, nil).Execute(context.Background(), callVerify())
+	res, err := New(nil, nil, nil, nil, nil, nil).Execute(context.Background(), callVerify())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

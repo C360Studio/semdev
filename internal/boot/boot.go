@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"github.com/c360studio/semdev/internal/changefacts"
-	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
@@ -154,9 +153,9 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// nil-checks); Execute fails loudly if a seam is missing, and each seam fails closed
 	// when a run has no checkout (park toward the human, never a silent host-path guess).
 	var (
-		checkout2 verifyartifact.Workspace // verify_artifact's checkout root
-		manifests verifyartifact.Manifests // verify_artifact's reproducibility manifest
-		attempts  checkfloors.Attempts     // check_floors' authored-attempt files
+		verifyClones verifyartifact.VerifyClones // verify_artifact's fresh cold clone of the committed artifact
+		manifests    verifyartifact.Manifests    // verify_artifact's reproducibility manifest
+		attempts     checkfloors.Attempts        // check_floors' authored-attempt files
 		// measure_task (group 7B) runs the frozen test command IN the run's WARM sandbox
 		// container — provision_sandbox stood it up over the checkout. The warm-sandbox
 		// registry is the SAME *runspace.Sandboxes instance provision writes to and
@@ -184,7 +183,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		if cerr != nil {
 			return fmt.Errorf("create run checkouts: %w", cerr)
 		}
-		checkout2 = checkouts
+		verifyClones = checkouts
 		manifests = runspace.Manifests{}
 		attempts = runspace.NewAttempts(factReader, checkouts)
 		// The warm-sandbox registry (created by the runtime and passed in so Stop can
@@ -228,14 +227,19 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}
 
-	// verify_artifact (clean-room-verify) is the G4 gate: it provisions fresh
-	// isolation via the cleanroom Runner, runs the artifact's own resolve+test cold,
-	// judges the evidence with verify.Decide, and stamps verify.result. The Runner is
-	// LocalRunner (M0 cache-home isolation; container execution lands in group 4B);
-	// WHERE the artifact lives (checkout2) and HOW to prove it (manifests) are the
-	// runspace seams wired above. It writes via the shared OwnedFactWriter (its own
-	// Source, verify-harness — G5-safe). Execute fails loudly if any nil seam is missing.
-	if err := reg.RegisterExecutor(verifyartifact.New(cleanroom.LocalRunner{}, checkout2, manifests, changeWriter, deps.Logger)); err != nil {
+	// verify_artifact (clean-room-verify) is the G4 gate — the THIRD sandbox instance
+	// (design SB4.3): it CLONES the run's committed artifact into a fresh dir
+	// (verifyClones = the same *runspace.Checkouts, non-destructive of the warm checkout),
+	// builds the declared image and runs resolve then the artifact's own tests cold (the
+	// test step compiles the artifact) in a fresh throwaway
+	// container with a fresh dependency cache (DefaultProver → coldproof.ProveArtifact),
+	// judges the evidence with verify.Decide, and stamps verify.result. The fresh clone +
+	// fresh cache is what makes a cache-masked fabrication or a harness-only fixup FAIL
+	// here (SB3, the semspec grave). HOW to prove it (manifests) is resolved from the
+	// clone. It writes via the shared OwnedFactWriter (its own Source, verify-harness —
+	// G5-safe). store is nil at M0 (no governed secrets). Execute fails loudly if any nil
+	// seam is missing; a proof that cannot run is retryable, never a silent green.
+	if err := reg.RegisterExecutor(verifyartifact.New(verifyClones, manifests, verifyartifact.DefaultProver(), nil, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
 	}
 

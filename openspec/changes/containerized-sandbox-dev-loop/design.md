@@ -481,6 +481,31 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   correctly today (pinned), but an integration test that forces ≥1 retry and ≥1 budget-exhaust escalate is the
   missing guard on the gate's core purpose. Deferred like the sandbox blocked-park e2e.
 
+### Group-8 clean-room cold-verify decisions + carry-forwards (as built; architect-ruled, semstreams-reviewer 8A)
+
+- **[The cold verify is the THIRD sandbox instance — a fresh CLONE + fresh cache, not the warm checkout] (8A, as built)** →
+  `verify_artifact` was rewired off `LocalRunner`+warm-checkout (a masking hole) onto `coldproof.ProveArtifact` (the
+  BuildImage→fresh throwaway container→Gather core, sharing the anti-masking prologue `proveCold` with the baseline so a
+  fabrication reads IDENTICALLY in both) over `runspace.Checkouts.CloneForVerify` — a fresh copy of the warm checkout's
+  bytes (the committed artifact at M0; apply_patch stores no durable diff, so the tree IS the commit) tracked in a
+  SEPARATE `verifyRoots` map. The masking defense is fresh cache + zero fixups, NOT the clone provenance: the cold
+  container mints fresh anonymous cache volumes, so a cache-masked fabrication or a harness-only fixup that never hit the
+  committed bytes FAILS here (docker-gated `TestProveArtifactReal{Pass,TestsFailIsFail,FabricationIsFail}`). verify uses
+  `TestCmd` (proves the artifact's own tests, which compile it), the baseline uses `BuildCmd`.
+- **[CloneForVerify must NEVER re-materialize] (8A trap, pinned)** → calling `Materialize` for verify would wipe the
+  applied diff (the group-4 destructive-re-materialize trap); `CloneForVerify` reads `roots[run]` and writes only
+  `verifyRoots[run]`, non-destructive of the warm checkout (`TestCloneForVerifyIsFreshAndNonDestructive`).
+- **[8D carry-forward: single-verify-per-run serialization] (semstreams-reviewer 8A L2)** → `CloneForVerify` reaps the
+  prior clone on re-clone; two concurrent verifies for one run would reap an in-flight clone out from under a
+  `ProveArtifact` bind-mount → the exec faults → Retry (fail-closed, never a false green). Not triggered in 8A (no rule
+  wires verify). The 8D verify-trigger MUST preserve one-verify-in-flight (the same serialization posture as the
+  one-developer-in-flight invariant) — the loop-marker chain (`dev.reviewed` → verify → `dev.verified`) gives this for
+  free as long as no second verify-spawner is added.
+- **[8A L3, unreachable]** → `ProveArtifact`'s incomplete-manifest branch is classed retryable (verify_artifact maps it
+  to a network-kind tool error) rather than an operator park like `ProveBaseline` — unreachable in the live flow
+  (`ResolveManifest` guarantees `TestCmd`, and the baseline already proved `ResolveCmd`+`CacheHomeEnvs`). Defense-in-depth
+  only; if verify ever parks the operator on a declaration fault, split this branch.
+
 ## Migration Plan
 
 Infra-first sequence (each rung proven before the next):

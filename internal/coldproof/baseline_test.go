@@ -168,6 +168,92 @@ func TestProveBaselineRealFabricationNotReady(t *testing.T) {
 	}
 }
 
+// Docker-gated: ProveArtifact builds a real golang image and proves a Go module
+// resolves + builds + PASSES ITS TESTS cold in a fresh throwaway container → Pass. This
+// is the clean-room final verify end-to-end (SB4.3) — the distinct-from-baseline proof:
+// verify runs the artifact's TESTS, not just the build.
+func TestProveArtifactRealPass(t *testing.T) {
+	ctx := context.Background()
+	if err := cleanroom.DockerAvailable(ctx, "docker"); err != nil {
+		t.Skipf("docker unavailable: %v", err)
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module semdev.test/app\n\ngo 1.26\n")
+	writeFile(t, filepath.Join(root, "app.go"), "package app\n\nfunc Add(a, b int) int { return a + b }\n")
+	writeFile(t, filepath.Join(root, "app_test.go"), "package app\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n")
+	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM golang:1.26\nWORKDIR /work\n")
+
+	v, err := ProveArtifact(ctx, "docker", root, goManifest(t, root), nil)
+	if err != nil {
+		t.Fatalf("ProveArtifact: %v", err)
+	}
+	cleanupImages(t, ctx, root)
+	if v.Outcome != verify.OutcomePass {
+		t.Errorf("verify outcome = %q, want pass; failed checks: %v", v.Outcome, v.FailedChecks())
+	}
+}
+
+// Docker-gated: the DISTINGUISHING proof — a module that BUILDS but whose TESTS FAIL
+// cold → verify FAIL (Fail, a genuine artifact failure), where the provision-time
+// baseline (which proves only build) would read Ready. This is why the final verify is a
+// separate instance running TESTS, not the baseline's build.
+func TestProveArtifactRealTestsFailIsFail(t *testing.T) {
+	ctx := context.Background()
+	if err := cleanroom.DockerAvailable(ctx, "docker"); err != nil {
+		t.Skipf("docker unavailable: %v", err)
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module semdev.test/app\n\ngo 1.26\n")
+	writeFile(t, filepath.Join(root, "app.go"), "package app\n\nfunc Add(a, b int) int { return a + b }\n")
+	// Compiles fine (baseline would be Ready) but the assertion is wrong → tests fail cold.
+	writeFile(t, filepath.Join(root, "app_test.go"), "package app\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 4 {\n\t\tt.Fatal(\"boundary\")\n\t}\n}\n")
+	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM golang:1.26\nWORKDIR /work\n")
+
+	v, err := ProveArtifact(ctx, "docker", root, goManifest(t, root), nil)
+	if err != nil {
+		t.Fatalf("ProveArtifact: %v", err)
+	}
+	cleanupImages(t, ctx, root)
+	if v.Outcome != verify.OutcomeFail {
+		t.Errorf("verify outcome = %q, want fail (tests failed cold — the artifact does not pass its own tests)", v.Outcome)
+	}
+}
+
+// Docker-gated: a fabricated dependency does NOT resolve cold → verify FAIL, identically
+// to the baseline (the shared cold-proof core). The final verify catches a cache-masked
+// fabrication a warm dev cache would have let survive to measure.
+func TestProveArtifactRealFabricationIsFail(t *testing.T) {
+	ctx := context.Background()
+	if err := cleanroom.DockerAvailable(ctx, "docker"); err != nil {
+		t.Skipf("docker unavailable: %v", err)
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module semdev.test/fab\n\ngo 1.26\n\nrequire example.com/definitely-not-real v1.2.3\n")
+	writeFile(t, filepath.Join(root, "app.go"), "package app\n\nimport _ \"example.com/definitely-not-real\"\n")
+	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM golang:1.26\nWORKDIR /work\n")
+
+	v, err := ProveArtifact(ctx, "docker", root, goManifest(t, root), nil)
+	if err != nil {
+		t.Fatalf("ProveArtifact: %v", err)
+	}
+	cleanupImages(t, ctx, root)
+	if v.Outcome != verify.OutcomeFail {
+		t.Errorf("verify outcome = %q, want fail (fabricated dependency does not resolve cold)", v.Outcome)
+	}
+}
+
+// cleanupImages removes the semdev-sandbox image built from root (best-effort), so the
+// docker-gated tests do not accumulate images. The image ref is deterministic from the
+// declared Dockerfile digest, so a fresh BuildImage recomputes it.
+func cleanupImages(t *testing.T, ctx context.Context, root string) {
+	t.Helper()
+	img, err := cleanroom.BuildImage(ctx, "docker", root, goManifest(t, root).Image)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { _ = exec.CommandContext(ctx, "docker", "image", "rm", "-f", img.Ref, img.Digest).Run() })
+}
+
 // goManifest resolves the Go convention manifest for a repo root that declares a
 // Dockerfile — the shape the provisioning station assembles.
 func goManifest(t *testing.T, root string) harness.Manifest {

@@ -54,7 +54,7 @@
 
 ## 8. Clean-room verify (the cold gate) + close-out
 
-- [ ] 8.1 Final verify: separate fresh cold container, `--recursive` clone of the fixed artifact, resolve+build+test cold, **no fixups** → `verify.result` (SB3); reuse `verify.Decide`
+- [x] 8.1 Final verify MECHANISM (8A): `coldproof.ProveArtifact` (BuildImage → fresh throwaway container → `Gather(ResolveCmd, TestCmd)` → `verify.Decide`) over `runspace.Checkouts.CloneForVerify` (a FRESH copy of the run's warm checkout = the committed artifact at M0, non-destructive of the warm checkout, separate `verifyRoots` map). `verify_artifact` REWIRED off `LocalRunner`+warm-Workspace onto a `Prover`+`VerifyClones` seam (fresh cold container + fresh cache = the SB3 masking defense; the shared `proveCold` prologue makes a fabrication read identically at baseline+verify). Docker-gated make-or-break proofs `TestProveArtifactReal{Pass,TestsFailIsFail,FabricationIsFail}` (verify runs the artifact's own TESTS cold — the distinct-from-baseline behavior) + offline `TestCloneForVerify*`, all in the G6 manifest. NO rule triggers verify yet (the verify station lands in 8D); mechanism-only increment. semstreams-reviewer APPROVE.
 - [ ] 8.2 Red-first: a non-self-contained fix (builds only via a would-be harness fixup) fails the cold verify; the `forbidden_patterns` build-file tripwire (SB3)
 - [ ] 8.3 open_pr coherence gate: `verify.result eq pass` ∧ every projected `review.verdict.* eq approved` ∧ `openspec.validated ne ""` (honors the m0 D16 roll-up)
 - [ ] 8.4 g11 journey: grow the mock-LLM e2e — approval → provision+prove-cold → dispatch → apply_patch → measure (real, in-container) → floors → verify (cold) → PR; RequestCount pinned; WARN-free

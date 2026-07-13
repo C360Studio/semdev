@@ -59,21 +59,63 @@ func ProveBaseline(ctx context.Context, docker, repoRoot string, m harness.Manif
 	if len(m.ResolveCmd) == 0 || len(m.BuildCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
 		return Baseline{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, build, and cache-home fields) — declare the run fields (SB2)", m.Profile)
 	}
-	// Fail closed on a missing required creds-ref BEFORE building anything (SB2c).
+	img, ev, err := proveCold(ctx, docker, repoRoot, m, store, m.BuildCmd)
+	if err != nil {
+		return Baseline{}, err
+	}
+	return baselineFromEvidence(img, ev), nil
+}
+
+// proveCold is the shared cold-proof prologue both proofs route through so a fabrication
+// reads IDENTICALLY at the provision-time baseline and the final verify — the anti-masking
+// property (SB3/SB4) is BY CONSTRUCTION, not a convention two copies must keep in sync. It
+// fails closed on a missing required creds-ref BEFORE building anything (SB2c), builds the
+// operator-declared image, and Gathers resolve+prove evidence in a fresh throwaway
+// container with a fresh cache home; Gather scrubs any echoed secret at the boundary (G7).
+// The ONLY thing that differs between the two proofs is proveCmd (the baseline's cold
+// BUILD vs the verify's cold TEST) and how the caller maps the evidence.
+func proveCold(ctx context.Context, docker, root string, m harness.Manifest, store secrets.Store, proveCmd []string) (cleanroom.BuiltImage, Evidence, error) {
 	secretEnv, err := secrets.ResolveAll(store, m.SecretRefs)
 	if err != nil {
-		return Baseline{}, fmt.Errorf("coldproof: resolve governed secrets: %w", err)
+		return cleanroom.BuiltImage{}, Evidence{}, fmt.Errorf("coldproof: resolve governed secrets: %w", err)
 	}
-
-	img, err := cleanroom.BuildImage(ctx, docker, repoRoot, m.Image)
+	img, err := cleanroom.BuildImage(ctx, docker, root, m.Image)
 	if err != nil {
-		return Baseline{}, fmt.Errorf("coldproof: build declared image: %w", err)
+		return cleanroom.BuiltImage{}, Evidence{}, fmt.Errorf("coldproof: build declared image: %w", err)
 	}
-
 	runner := cleanroom.NewContainerRunnerWithSecrets(img.Ref, secretEnv)
-	// Gather scrubs any echoed secret from the evidence at the boundary (G7).
-	ev := Gather(ctx, runner, repoRoot, m.CacheHomeEnvs, m.ResolveCmd, m.BuildCmd, secrets.NewScrubber(secretEnv))
-	return baselineFromEvidence(img, ev), nil
+	ev := Gather(ctx, runner, root, m.CacheHomeEnvs, m.ResolveCmd, proveCmd, secrets.NewScrubber(secretEnv))
+	return img, ev, nil
+}
+
+// ProveArtifact builds the operator-declared image (m.Image) from artifactRoot — a fresh
+// COLD clone of the COMMITTED artifact — and proves it resolves its base dependencies and
+// passes its own TESTS cold in a fresh throwaway container (SB4.3, the clean-room final
+// verify). It is ProveBaseline's sibling and shares the identical BuildImage → fresh
+// container → Gather core, so a cache-masked fabrication or a harness-only fixup reads the
+// same here as at the provision-time baseline — the structural "identical fabrication
+// reads" property. The ONLY differences from the baseline: the prove step is m.TestCmd,
+// not m.BuildCmd (verify proves resolve then the artifact's own TESTS, which compile it,
+// SB4.3), so the terminal check keeps its
+// honest "tests" label; and it returns the verify.Verdict directly (no Baseline wrapper —
+// there is no image to hand back to a warm loop). It fails closed exactly like the
+// baseline: a returned ERROR is an infra/declaration fault the caller parks on before any
+// verdict; a returned Verdict with a non-Pass Outcome is a definitive result (Fail =
+// genuine non-reproducibility → the dev loop's fix is not self-contained; Retry = transport
+// fault). Governed creds-refs (m.SecretRefs, SB2c) are resolved + injected + scrubbed as in
+// the baseline; the artifact MUST prove cold with only the ambient image + governed creds,
+// zero out-of-band harness fixups (SB3).
+func ProveArtifact(ctx context.Context, docker, artifactRoot string, m harness.Manifest, store secrets.Store) (verify.Verdict, error) {
+	// An incomplete manifest is a DECLARATION fault — error up front so it parks toward the
+	// operator rather than degrading into an infra-class Retry inside Gather.
+	if len(m.ResolveCmd) == 0 || len(m.TestCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
+		return verify.Verdict{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, test, and cache-home fields) — declare the run fields (SB2)", m.Profile)
+	}
+	_, ev, err := proveCold(ctx, docker, artifactRoot, m, store, m.TestCmd)
+	if err != nil {
+		return verify.Verdict{}, err
+	}
+	return verify.Decide(ev.ToVerifyInput()), nil
 }
 
 // verifyTestsCheckName is verify.Decide's terminal check name (its unexported

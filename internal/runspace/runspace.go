@@ -29,7 +29,12 @@ import (
 type Checkouts struct {
 	mu    sync.Mutex
 	base  string
-	roots map[string]string // runEntityID → absolute checkout root
+	roots map[string]string // runEntityID → absolute checkout root (the warm checkout)
+	// verifyRoots holds the cold-verify CLONES — a SEPARATE fresh copy of a run's warm
+	// checkout the clean-room final verify proves cold (SB4.3), keyed distinctly so it
+	// never collides with the warm checkout. A clone is a throwaway per verify (a re-run
+	// overwrites the run's entry); the prior clone dir is reaped so verifies do not leak.
+	verifyRoots map[string]string // runEntityID → absolute cold-verify clone root
 }
 
 // NewCheckouts builds a Checkouts that materializes runs' checkouts under base. If base
@@ -44,7 +49,7 @@ func NewCheckouts(base string) (*Checkouts, error) {
 	} else if err := os.MkdirAll(base, 0o755); err != nil {
 		return nil, fmt.Errorf("runspace: create checkouts base %s: %w", base, err)
 	}
-	return &Checkouts{base: base, roots: map[string]string{}}, nil
+	return &Checkouts{base: base, roots: map[string]string{}, verifyRoots: map[string]string{}}, nil
 }
 
 // Materialize creates a fresh working copy of sourceDir for the run and records it,
@@ -100,15 +105,65 @@ func (c *Checkouts) Root(_ context.Context, runEntityID string) (string, error) 
 	return root, nil
 }
 
-// Remove tears down a run's checkout (best-effort). A no-op when nothing is materialized.
+// CloneForVerify makes a fresh COPY of the run's warm checkout into a new dir and returns
+// it — the clean-room final verify's "--recursive clone of the committed artifact" at M0
+// (design SB4.3 / Open Questions: clone the fixture-with-the-applied-diff into a fresh
+// dir). It is deliberately NON-DESTRUCTIVE of the warm checkout (it never touches
+// roots[runEntityID]): calling Materialize for verify would wipe the applied diff the warm
+// container measured over (the group-4 carry-forward (b) trap). The clone is what the cold
+// verify builds the image and runs tests FROM, so the COMMITTED bytes — not the warm
+// container's environment — are what's proven; combined with a fresh cache home (the cold
+// container's own anonymous volumes) this is what makes a cache-masked fabrication or a
+// harness-only fixup FAIL here (SB3, the semspec grave). Fails CLOSED if no warm checkout
+// exists (nothing to prove → the run parks). A prior clone for the run is reaped so
+// re-verifies do not leak.
+func (c *Checkouts) CloneForVerify(ctx context.Context, runEntityID string) (string, error) {
+	if runEntityID == "" {
+		return "", fmt.Errorf("runspace: clone-for-verify needs a run entity id")
+	}
+	c.mu.Lock()
+	warm, ok := c.roots[runEntityID]
+	c.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("runspace: no checkout materialized for run %s — cannot clone for cold verify (park toward the human)", runEntityID)
+	}
+
+	// Copy into a fresh dir fully BEFORE recording it (and outside the map mutation), so a
+	// failed copy leaves any prior good clone intact — the Materialize discipline.
+	dest, err := os.MkdirTemp(c.base, "verify-*")
+	if err != nil {
+		return "", fmt.Errorf("runspace: create verify clone dir: %w", err)
+	}
+	if err := copyTree(ctx, warm, dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return "", fmt.Errorf("runspace: clone checkout for verify of %s: %w", runEntityID, err)
+	}
+
+	c.mu.Lock()
+	prior, hadPrior := c.verifyRoots[runEntityID]
+	c.verifyRoots[runEntityID] = dest
+	c.mu.Unlock()
+	if hadPrior {
+		_ = os.RemoveAll(prior)
+	}
+	return dest, nil
+}
+
+// Remove tears down a run's checkout AND any cold-verify clone (best-effort). A no-op when
+// nothing is materialized.
 func (c *Checkouts) Remove(runEntityID string) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	root, ok := c.roots[runEntityID]
+	delete(c.roots, runEntityID)
+	verifyRoot, hadVerify := c.verifyRoots[runEntityID]
+	delete(c.verifyRoots, runEntityID)
+	c.mu.Unlock()
+	if hadVerify {
+		_ = os.RemoveAll(verifyRoot)
+	}
 	if !ok {
 		return nil
 	}
-	delete(c.roots, runEntityID)
 	return os.RemoveAll(root)
 }
 

@@ -60,6 +60,10 @@ var regressionManifest = []struct {
 		"apply_patch authors the fixture's REAL fix and the previously-failing go test goes green — the author→measure loop proven against real code, not a claim (the non-theater proof)"},
 	{"SB4", "internal/tools/checkgate/checkgate_test.go", []string{"TestDecideRoutingTable", "TestDecideBudgetBoundaryIsExact", "TestExecuteFailsClosedOnMissingMeasurement", "TestExecuteCountsDistinctAttemptObjects"},
 		"the dev-loop gate routes advance/retry/escalate over the whole passed×rejected×count-vs-budget space (the live loop only drives the happy path); it fails CLOSED (escalate) on a missing judgment fact — never a false retry; the budget boundary is exact; and it counts DISTINCT attempt objects so the at-least-once append never over-counts toward premature escalation"},
+	{"SB3", "internal/coldproof/baseline_test.go", []string{"TestProveArtifactRealPass", "TestProveArtifactRealTestsFailIsFail", "TestProveArtifactRealFabricationIsFail"},
+		"the clean-room FINAL verify proves the COMMITTED artifact's own TESTS cold in a fresh throwaway container — a passing artifact verifies, an artifact that builds but whose tests FAIL cold rejects (the distinct-from-baseline behavior: verify runs tests, the baseline only builds), and a fabricated dependency a warm cache would mask fails cold; the make-or-break both predecessors faked (semspec's harness-fixup that 401'd on a clean checkout)"},
+	{"SB4", "internal/runspace/runspace_test.go", []string{"TestCloneForVerifyIsFreshAndNonDestructive", "TestCloneForVerifyFailsClosedAndReaps"},
+		"the cold-verify clone is a FRESH copy of the committed artifact that NEVER touches the warm checkout (the applied diff survives for a retry — the group-4 destructive-re-materialize trap), fails closed with no warm checkout, and reaps prior clones"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if

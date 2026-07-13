@@ -1,26 +1,34 @@
 // Package verifyartifact is the verify_artifact tool (clean-room-verify, G4 — the
-// make-or-break gate): it proves the delivered artifact COLD and stamps the terminal
+// make-or-break gate): it proves the COMMITTED artifact COLD, in a fresh throwaway
+// container over a fresh clone with a fresh dep cache, and stamps the terminal
 // verify.result. No run reaches open_pr until this records a pass. It is the outcome
-// half of the taxonomy's verify (the structural coherence half is openspec.validated
-// + review.verdict, group 7).
+// half of the taxonomy's verify (the structural coherence half is openspec.validated +
+// review.verdict, group 7/8).
 //
-// The tool GATHERS evidence; the pure verify.Decide judges it. It provisions a fresh
-// clean-room sandbox with a distinct build-cache home (the universal G4 control,
-// design D5), runs the artifact's OWN reproducibility-contract manifest —
-// resolve-from-declarations then the artifact's own tests — and folds the results
-// into an evidence-only verify.Input (G3: every field harness-measured, no model
-// outcome). Crucially it draws the one line Decide cannot (verify.go): ANY
-// transport/infrastructure fault — a sandbox that would not provision, a step that
-// could not run, or a resolve step whose failure the cleanroom classifier reads as
-// network-class — sets Completed=false so the verdict is Retry, never a terminal
-// reject of a good artifact. A GENUINE resolve failure (a missing/fabricated
-// coordinate a warm cache would have masked) is Resolved=false → Fail: the
-// cache-masked-fabrication reject.
+// This is the THIRD sandbox instance (design SB4): the cold baseline proved the image
+// builds the repo cold BEFORE the dev loop (provision_sandbox); the warm container ran
+// the apply_patch → measure → floors iterations; and THIS proof is a SEPARATE fresh cold
+// container over a fresh CLONE of the run's checkout — the committed artifact — with a
+// fresh dependency cache. That separation is the whole point (SB3): a fix that only
+// doctored the warm container's environment, or a fabricated coordinate a warm cache
+// masked, cannot survive a fresh clone + fresh cache. semspec's fatal bug was a harness
+// fixup that built in the harness and 401'd on a clean checkout; this proof is that clean
+// checkout.
 //
-// It stamps the single verify.result scalar (pass/fail/retry), upserted latest-wins
-// (a retry re-run replaces it). It fires no lifecycle transition (G2): the open_pr
-// gate is a rule reading verify.result. verify.result's sole writer is verify-harness
-// (G5).
+// The tool GATHERS evidence; the pure verify.Decide judges it (inside ProveArtifact,
+// shared with the provision-time baseline so a fabrication reads identically in both).
+// Crucially it draws the one line Decide cannot: ANY transport/infrastructure fault — a
+// container that would not provision, a step that could not run, a resolve failure the
+// cleanroom classifier reads as network-class — sets Completed=false so the verdict is
+// Retry, never a terminal reject of a good artifact. A GENUINE resolve/test failure (a
+// missing/fabricated coordinate a warm cache would have masked, or a non-self-contained
+// fix) is Resolved/TestsPassed=false → Fail: the make-or-break reject.
+//
+// It stamps the single verify.result scalar (pass/fail/retry), upserted latest-wins (a
+// retry re-run replaces it). It fires no lifecycle transition (G2): the open_pr gate is a
+// rule reading verify.result. verify.result's sole writer is verify-harness (G5). It
+// takes no arguments (G3 — the model may only trigger the proof, never supply its
+// outcome).
 package verifyartifact
 
 import (
@@ -31,9 +39,9 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/changefacts"
-	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/coldproof"
 	"github.com/c360studio/semdev/internal/harness"
+	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -51,63 +59,105 @@ const Source = "verify-harness"
 // entity. Exact predicate → latest-wins (a retry re-run upserts).
 const ResultPredicate = "verify.result"
 
-// Workspace resolves the on-disk checkout ROOT of a run's target-repo workspace —
-// the artifact the clean-room proof resolves/builds/tests. Narrow seam over the
-// checkout (production lands with forge-io / the Runner); nil at M0.
-type Workspace interface {
-	Root(ctx context.Context, runEntityID string) (string, error)
+// dockerBin is the docker CLI binary the cold proof shells (matches cleanroom's and
+// provision_sandbox's default). A package const keeps the surface small; a fake Prover
+// exercises the fact-stamping without docker.
+const dockerBin = "docker"
+
+// VerifyClones makes a fresh COLD clone of a run's checkout — the committed artifact the
+// final verify proves. It is runspace.Checkouts.CloneForVerify behind a narrow seam:
+// non-destructive of the warm checkout (never re-materializes it), so the applied diff is
+// preserved. nil at M0 schema-only registration; Execute fails loudly if absent.
+type VerifyClones interface {
+	CloneForVerify(ctx context.Context, runEntityID string) (string, error)
 }
 
 // Manifests resolves a checkout's reproducibility-contract manifest (how to prove it
-// cold — design D6: harvested by `semdev init` into .semdev/harness.yaml, else the
-// detected profile default). Narrow seam so the tool holds no harvest logic; nil at
-// M0 (the live harvest/read lands with semdev init).
+// cold — the operator-declared image + resolve/test commands + cache-home envs). Narrow
+// seam so the tool holds no harvest logic; nil at M0 schema-only registration.
 type Manifests interface {
 	Resolve(ctx context.Context, checkoutRoot string) (harness.Manifest, error)
 }
 
-// Executor runs the clean-room proof and stamps verify.result.
+// Prover builds the declared image from a clone and proves the artifact resolves+builds+
+// tests COLD, returning the verify verdict. It is coldproof.ProveArtifact behind an
+// interface so the fact-stamping is unit-testable without docker (a fake returns a canned
+// verdict); the real proof runs docker-gated. Always supplied (a pure adapter needing no
+// client).
+type Prover interface {
+	ProveArtifact(ctx context.Context, docker, artifactRoot string, m harness.Manifest, store secrets.Store) (verify.Verdict, error)
+}
+
+// coldProver is the production Prover: the real cold clean-room verify (design SB4.3).
+type coldProver struct{}
+
+func (coldProver) ProveArtifact(ctx context.Context, docker, artifactRoot string, m harness.Manifest, store secrets.Store) (verify.Verdict, error) {
+	return coldproof.ProveArtifact(ctx, docker, artifactRoot, m, store)
+}
+
+// DefaultProver returns the production cold-verify Prover for boot to wire.
+func DefaultProver() Prover { return coldProver{} }
+
+// Executor runs the clean-room cold proof and stamps verify.result.
 type Executor struct {
-	runner    cleanroom.Runner
-	workspace Workspace
+	clones    VerifyClones
 	manifests Manifests
+	prover    Prover
+	store     secrets.Store // governed creds-refs (SB2c); nil at M0 (no secrets)
 	writer    agentictools.OwnedFactWriter
 	logger    *slog.Logger
 }
 
-// New builds the verify_artifact executor. runner is always supplied (LocalRunner in
-// production); workspace/manifests/writer may be nil for schema-only registration
-// (the censuses inspect ListTools without a live checkout or NATS client). Execute
-// fails loudly if any dependency is missing.
-func New(runner cleanroom.Runner, workspace Workspace, manifests Manifests, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// New builds the verify_artifact executor. prover is always supplied (a pure adapter —
+// DefaultProver in production, a fake in tests); clones/manifests/writer are nil for
+// schema-only registration (the censuses inspect ListTools without a live checkout or
+// NATS client). store is nil at M0 (no governed secrets). Execute fails loudly if any
+// required dependency is missing.
+func New(clones VerifyClones, manifests Manifests, prover Prover, store secrets.Store, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{runner: runner, workspace: workspace, manifests: manifests, writer: writer, logger: logger}
+	return &Executor{clones: clones, manifests: manifests, prover: prover, store: store, writer: writer, logger: logger}
 }
 
-// Execute provisions fresh isolation, runs the artifact's own resolve+test cold,
-// judges the evidence with verify.Decide, and stamps verify.result.
+// Execute clones the run's committed artifact into a fresh dir, builds the declared image
+// and proves it resolves its deps and passes its own tests cold (the test step compiles
+// the artifact) in a fresh throwaway container, judges the
+// evidence with verify.Decide (inside ProveArtifact), and stamps verify.result. It stamps
+// no outcome from the caller (G3) and fires no transition (G2).
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.runner == nil || e.workspace == nil || e.manifests == nil || e.writer == nil {
-		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: harness not fully wired (runner/workspace/manifests/writer)")
+	if e.clones == nil || e.manifests == nil || e.prover == nil || e.writer == nil {
+		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: harness not fully wired (clones/manifests/prover/writer)")
 	}
 	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
 	if !ok || runEntityID == "" {
 		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
 	}
 
-	root, err := e.workspace.Root(ctx, runEntityID)
+	// Clone the committed artifact into a fresh dir (non-destructive of the warm checkout)
+	// — the "--recursive clone" at M0. Fails closed if no checkout was materialized (the
+	// run parks, never a verify over a guessed path, SB5).
+	cloneRoot, err := e.clones.CloneForVerify(ctx, runEntityID)
 	if err != nil {
-		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: resolve workspace root: %v", err)
+		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: clone artifact for cold verify: %v", err)
 	}
-	manifest, err := e.manifests.Resolve(ctx, root)
+	// Resolve the manifest from the CLONE, so the COMMITTED Dockerfile/deps are what's
+	// proven — not the warm checkout's environment.
+	manifest, err := e.manifests.Resolve(ctx, cloneRoot)
 	if err != nil {
 		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: resolve reproducibility manifest: %v", err)
 	}
 
-	input := e.gatherEvidence(ctx, root, manifest)
-	verdict := verify.Decide(input)
+	// Prove cold: build the image from the clone, run resolve+test in a fresh throwaway
+	// container with a fresh dep cache. A returned ERROR is a pre-proof infra/declaration
+	// fault (docker flake, unbuildable image) the tool surfaces as retryable — no verdict
+	// is stamped, so the forced verify loop re-runs (a persistent fault stalls toward the
+	// human, never a false green). A returned Verdict is a definitive result (pass/fail/
+	// retry) the tool stamps.
+	verdict, err := e.prover.ProveArtifact(ctx, dockerBin, cloneRoot, manifest, e.store)
+	if err != nil {
+		return errResult(call, agentic.ToolErrorNetwork, "verify_artifact: cold clean-room proof could not run: %v", err)
+	}
 
 	if err := e.stampResult(ctx, runEntityID, verdict.Outcome); err != nil {
 		return errResult(call, writeErrKind(err), "verify_artifact: stamp %s on %s: %v", ResultPredicate, runEntityID, err)
@@ -124,19 +174,11 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		"checks":        verdict.Checks,
 		"failed_checks": verdict.FailedChecks(),
 	})
+	// StopLoop: the verify-trigger rule forces a single-turn verify loop; ending the turn
+	// here keeps it one model call (mirrors measure/floors/gate). A fail/retry verdict is
+	// DATA, not a tool error — it ends the turn as a success too; the coherence gate reads
+	// the stamped verify.result, not this StopLoop.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
-}
-
-// gatherEvidence runs the clean-room proof (resolve + the artifact's own TESTS) in one
-// fresh-isolation sandbox via the shared cold-build core (coldproof), and folds the
-// neutral evidence into verify.Input. coldproof is where the harness draws the
-// transport-vs-genuine line — shared with the provision-time baseline so a fabrication
-// reads identically in both proofs.
-func (e *Executor) gatherEvidence(ctx context.Context, root string, m harness.Manifest) verify.Input {
-	// nil scrubber: at M0 the verify runner is wired with no governed secrets. When a
-	// secret-aware runner lands here, thread the matching secrets.NewScrubber(secretEnv)
-	// so any echoed secret is redacted from this tool's surfaced result (G7).
-	return coldproof.Gather(ctx, e.runner, root, m.CacheHomeEnvs, m.ResolveCmd, m.TestCmd, nil).ToVerifyInput()
 }
 
 // stampResult upserts verify.result on the run entity (replace-by-predicate, so a
