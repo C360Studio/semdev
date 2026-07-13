@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/forbidden"
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
@@ -111,6 +112,21 @@ func ProveArtifact(ctx context.Context, docker, artifactRoot string, m harness.M
 	if len(m.ResolveCmd) == 0 || len(m.TestCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
 		return verify.Verdict{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, test, and cache-home fields) — declare the run fields (SB2)", m.Profile)
 	}
+	// Build-file tripwire FIRST (SB3): scan the committed build files for a hidden
+	// runtime download (a raw-URL fetch, a semdev network tool) that would dodge the
+	// cold-resolution proof. A finding is a definitive non-self-contained Fail — don't
+	// waste a cold build+test proving an artifact that is defective by construction. The
+	// scan is pure/offline, so this short-circuits before any docker work. A SCAN fault
+	// (an unreadable build file) is returned as an error the caller retries (a build file
+	// we cannot read might hide a pattern — fail toward the human, never a silent pass).
+	findings, err := forbidden.Scan(artifactRoot)
+	if err != nil {
+		return verify.Verdict{}, fmt.Errorf("coldproof: scan build files for the self-containment tripwire: %w", err)
+	}
+	if len(findings) > 0 {
+		return verify.ForbiddenVerdict(forbidden.Detail(findings)), nil
+	}
+
 	_, ev, err := proveCold(ctx, docker, artifactRoot, m, store, m.TestCmd)
 	if err != nil {
 		return verify.Verdict{}, err

@@ -64,6 +64,10 @@ var regressionManifest = []struct {
 		"the clean-room FINAL verify proves the COMMITTED artifact's own TESTS cold in a fresh throwaway container — a passing artifact verifies, an artifact that builds but whose tests FAIL cold rejects (the distinct-from-baseline behavior: verify runs tests, the baseline only builds), and a fabricated dependency a warm cache would mask fails cold; the make-or-break both predecessors faked (semspec's harness-fixup that 401'd on a clean checkout)"},
 	{"SB4", "internal/runspace/runspace_test.go", []string{"TestCloneForVerifyIsFreshAndNonDestructive", "TestCloneForVerifyFailsClosedAndReaps"},
 		"the cold-verify clone is a FRESH copy of the committed artifact that NEVER touches the warm checkout (the applied diff survives for a retry — the group-4 destructive-re-materialize trap), fails closed with no warm checkout, and reaps prior clones"},
+	{"SB3", "internal/forbidden/forbidden_test.go", []string{"TestScanCatchesRawURLFetchInDockerfile", "TestScanCatchesNetworkToolsAndGradle", "TestScanCatchesFetchSmuggledIntoInvokedScript", "TestScanIgnoresNonBuildFiles"},
+		"the build-file tripwire catches a hidden runtime download (a raw-URL fetch, a semdev network tool) in a committed build file (Dockerfile/Gradle) AND in a script the build INVOKES (`RUN ./setup.sh` — the semspec init.d substitution vector, and the sole static control since the cold container is networked), while ignoring a URL in source/docs; a non-self-contained artifact that would dodge the cold-resolution proof is caught statically"},
+	{"SB3", "internal/coldproof/baseline_test.go", []string{"TestProveArtifactForbiddenPatternFailsWithoutBuilding"},
+		"a committed build file with a hidden runtime download fails the cold verify (Fail) via the tripwire short-circuit BEFORE any image build — the 'a fix that builds only via a would-be harness fixup fails cold' guard, honest (only the evaluated self-contained check is reported)"},
 }
 
 // G6 — a named regression pin cannot silently disappear. This manifest fails if

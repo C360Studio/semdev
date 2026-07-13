@@ -125,6 +125,26 @@ func TestDecideEmitsAllChecks(t *testing.T) {
 	}
 }
 
+// The build-file tripwire (SB3): ForbiddenVerdict is a definitive Fail whose SOLE check is
+// the self-containment violation — the cold-run checks are not reported because they never
+// ran (G7 honest evidence). detail is surfaced.
+func TestForbiddenVerdict(t *testing.T) {
+	v := ForbiddenVerdict("Dockerfile:2 references banned \"raw.githubusercontent.com\"")
+	if v.Outcome != OutcomeFail {
+		t.Fatalf("outcome = %q, want fail (a non-self-contained artifact)", v.Outcome)
+	}
+	if len(v.Checks) != 1 {
+		t.Fatalf("want exactly 1 check (only the tripwire was evaluated), got %d: %+v", len(v.Checks), v.Checks)
+	}
+	c := v.Checks[0]
+	if c.Name != checkSelfContained || c.Passed {
+		t.Errorf("check = %+v, want the failed self-contained check", c)
+	}
+	if c.Detail == "" {
+		t.Error("ForbiddenVerdict must carry the offending-file detail (G7)")
+	}
+}
+
 // FailedChecks lists exactly the non-passing checks, in stable name order.
 func TestFailedChecks(t *testing.T) {
 	in := passing()

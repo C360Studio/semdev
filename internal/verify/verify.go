@@ -41,12 +41,13 @@ const (
 	OutcomeRetry Outcome = "retry"
 )
 
-// Check names for the four ordered guards, in evaluation order.
+// Check names for the ordered guards, in evaluation order.
 const (
-	checkCompletion = "completion"
-	checkIsolation  = "isolation"
-	checkResolution = "resolution"
-	checkTests      = "tests"
+	checkSelfContained = "self-contained"
+	checkCompletion    = "completion"
+	checkIsolation     = "isolation"
+	checkResolution    = "resolution"
+	checkTests         = "tests"
 )
 
 // CheckResult is one guard's outcome, named for the operator.
@@ -110,6 +111,11 @@ type Verdict struct {
 // resolution or test failure classifies Fail. Completion and isolation are judged
 // first because until they hold, the resolution/test signals are not trustworthy
 // evidence about the artifact at all.
+//
+// The build-file self-containment tripwire (SB3) is a SEPARATE static entry point
+// (ForbiddenVerdict), NOT an Input field, because it is judged from the committed bytes
+// before (and instead of) the cold run — folding it here would force a dishonest verdict
+// reporting completion/resolution/tests checks that never ran (G7).
 func Decide(in Input) Verdict {
 	completion := completionCheck(in)
 	isolation := isolationCheck(in)
@@ -129,6 +135,24 @@ func Decide(in Input) Verdict {
 		return Verdict{Outcome: OutcomeFail, Checks: checks}
 	default:
 		return Verdict{Outcome: OutcomePass, Checks: checks}
+	}
+}
+
+// ForbiddenVerdict is the clean-room verdict for a build-file tripwire hit (SB3): a
+// definitive Fail whose SOLE check is the self-containment violation. It is a distinct
+// entry point from Decide because the tripwire is STATIC — evaluated from the committed
+// bytes before (and INSTEAD of) the cold run — so the cold run's completion/resolution/
+// tests checks genuinely did not run, and reporting them would be dishonest (G7). A
+// non-self-contained artifact is defective by construction and no re-run fixes it, so the
+// outcome is Fail (never Retry). detail names the offending build files/patterns.
+func ForbiddenVerdict(detail string) Verdict {
+	return Verdict{
+		Outcome: OutcomeFail,
+		Checks: []CheckResult{{
+			Name:   checkSelfContained,
+			Passed: false,
+			Detail: detailOr(detail, "a committed build file smuggles a hidden runtime download that dodges the cold-resolution proof"),
+		}},
 	}
 }
 

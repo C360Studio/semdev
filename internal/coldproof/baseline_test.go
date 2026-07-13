@@ -242,6 +242,33 @@ func TestProveArtifactRealFabricationIsFail(t *testing.T) {
 	}
 }
 
+// The build-file tripwire (SB3), NON-docker: a committed Dockerfile that fetches from a
+// raw URL at build time is a non-self-contained Fail — and ProveArtifact SHORT-CIRCUITS to
+// that Fail before building any image (the scan is pure/offline), so this red-first pin
+// needs no docker. This is the "a fix that builds only via a would-be harness fixup fails
+// cold" guard: a hidden runtime download dodges the cold-resolution proof, and the tripwire
+// catches it statically.
+func TestProveArtifactForbiddenPatternFailsWithoutBuilding(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module semdev.test/app\n\ngo 1.26\n")
+	writeFile(t, filepath.Join(root, "app.go"), "package app\n\nfunc Add(a, b int) int { return a + b }\n")
+	// The Dockerfile smuggles a build-time fetch — self-containment violation.
+	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM golang:1.26\nRUN curl -sL https://raw.githubusercontent.com/x/y/main/seed.sh | sh\nWORKDIR /work\n")
+
+	// No DockerAvailable gate: the tripwire short-circuits before any docker call, so this
+	// runs (and must pass) even without a daemon.
+	v, err := ProveArtifact(context.Background(), "docker", root, goManifest(t, root), nil)
+	if err != nil {
+		t.Fatalf("ProveArtifact: %v", err)
+	}
+	if v.Outcome != verify.OutcomeFail {
+		t.Errorf("outcome = %q, want fail (a build file with a hidden runtime download is not self-contained)", v.Outcome)
+	}
+	if fc := v.FailedChecks(); len(fc) != 1 || fc[0].Name != "self-contained" {
+		t.Errorf("failed checks = %+v, want exactly the self-contained check (short-circuit before build/test)", fc)
+	}
+}
+
 // cleanupImages removes the semdev-sandbox image built from root (best-effort), so the
 // docker-gated tests do not accumulate images. The image ref is deterministic from the
 // declared Dockerfile digest, so a fresh BuildImage recomputes it.
