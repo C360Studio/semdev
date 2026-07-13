@@ -101,8 +101,22 @@ func TestParseDiffTargets(t *testing.T) {
 }
 
 // materializedCheckout builds a Checkouts with one run's checkout seeded from a
-// source tree {relpath: content}, returning the patcher and the run id.
+// source tree {relpath: content}, returning the patcher and the run id. Every seeded
+// file is in the approved target_files contract (so a diff touching any of them passes
+// the apply-scope guard); use materializedCheckoutWithTargets to restrict the contract.
 func materializedCheckout(t *testing.T, files map[string]string) (*Patcher, string) {
+	t.Helper()
+	targets := make([]string, 0, len(files))
+	for rel := range files {
+		targets = append(targets, rel)
+	}
+	return materializedCheckoutWithTargets(t, files, targets)
+}
+
+// materializedCheckoutWithTargets is materializedCheckout with an explicit approved
+// target_files contract (which may be a SUBSET of the seeded files), so a test can prove
+// an out-of-contract path is rejected.
+func materializedCheckoutWithTargets(t *testing.T, files map[string]string, targets []string) (*Patcher, string) {
 	t.Helper()
 	requireGit(t) // Materialize now git-inits the checkout
 	src := t.TempDir()
@@ -123,7 +137,7 @@ func materializedCheckout(t *testing.T, files map[string]string) (*Patcher, stri
 	if _, err := checkouts.Materialize(context.Background(), run, src); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
-	return NewPatcher(checkouts, cliexec.OSRunner{}), run
+	return NewPatcher(checkouts, cliexec.OSRunner{}, targetFilesReader(targets)), run
 }
 
 func requireGit(t *testing.T) {
@@ -177,6 +191,80 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// RED-FIRST PIN (task 3.1): a diff touching a real file INSIDE the checkout but OUTSIDE the
+// approved task.spec.0.target_files is rejected — the unreviewed workflow/build/config
+// escape Codex flagged. The rejection is ATOMIC: it fires before git apply, so the
+// in-contract file the same diff touches is NOT partially applied either.
+func TestPatcherRejectsOutOfContractPath(t *testing.T) {
+	// Seed two real files; approve ONLY health.go. A diff touching the CI workflow (in the
+	// checkout, safeJoin-legal) must be rejected because it is outside the contract.
+	p, run := materializedCheckoutWithTargets(t,
+		map[string]string{
+			"health.go":                "package health\n\nfunc F() int { return 1 }\n",
+			".github/workflows/ci.yml": "on: push\njobs: {}\n",
+		},
+		[]string{"health.go"}, // approved contract: source only, NOT the workflow
+	)
+	// A well-formed diff that modifies the out-of-contract workflow file.
+	diff := "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1,2 +1,2 @@\n-on: push\n+on: [push, pull_request]\n jobs: {}\n"
+
+	_, _, err := p.Apply(context.Background(), run, diff)
+	if err == nil {
+		t.Fatal("a diff touching a file outside target_files must be rejected (the unreviewed config escape)")
+	}
+	if !strings.Contains(err.Error(), "out-of-contract") && !strings.Contains(err.Error(), "outside the approved") {
+		t.Errorf("want an out-of-contract rejection, got: %v", err)
+	}
+	// Atomic: the workflow file on disk is UNCHANGED (no partial application).
+	root, _ := p.checkouts.Root(context.Background(), run)
+	got, _ := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+	if string(got) != "on: push\njobs: {}\n" {
+		t.Errorf("out-of-contract file was modified despite rejection — apply was not atomic: %q", got)
+	}
+}
+
+// Atomicity under a MIXED diff: when one diff touches an in-contract file (health.go) AND
+// an out-of-contract file (the workflow), the WHOLE diff is rejected and the in-contract
+// file is left UNwritten too — the contract check fires before git apply, so there is no
+// partial application of the allowed hunk.
+func TestPatcherRejectsMixedDiffAtomically(t *testing.T) {
+	p, run := materializedCheckoutWithTargets(t,
+		map[string]string{
+			"health.go":                "package health\n\nfunc F() int { return 1 }\n",
+			".github/workflows/ci.yml": "on: push\njobs: {}\n",
+		},
+		[]string{"health.go"}, // only health.go is approved
+	)
+	// One diff, two files: an allowed edit to health.go AND a sneaky edit to the workflow.
+	mixed := "--- a/health.go\n+++ b/health.go\n@@ -1,3 +1,3 @@\n package health\n \n-func F() int { return 1 }\n+func F() int { return 2 }\n" +
+		"--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1,2 +1,2 @@\n-on: push\n+on: [push, pull_request]\n jobs: {}\n"
+
+	if _, _, err := p.Apply(context.Background(), run, mixed); err == nil {
+		t.Fatal("a mixed diff with any out-of-contract path must be rejected wholesale")
+	}
+	root, _ := p.checkouts.Root(context.Background(), run)
+	// The ALLOWED file is unchanged — the reject fired before git apply, so no hunk landed.
+	if got, _ := os.ReadFile(filepath.Join(root, "health.go")); string(got) != "package health\n\nfunc F() int { return 1 }\n" {
+		t.Errorf("in-contract file was partially applied despite a wholesale reject: %q", got)
+	}
+	// So is the out-of-contract file.
+	if got, _ := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml")); string(got) != "on: push\njobs: {}\n" {
+		t.Errorf("out-of-contract file was modified despite reject: %q", got)
+	}
+}
+
+// A diff whose EVERY path is in the contract applies (the enforcement doesn't over-block).
+func TestPatcherAllowsInContractPaths(t *testing.T) {
+	p, run := materializedCheckoutWithTargets(t,
+		map[string]string{"health.go": "package health\n\nfunc F() int { return 1 }\n"},
+		[]string{"health.go"},
+	)
+	diff := "--- a/health.go\n+++ b/health.go\n@@ -1,3 +1,3 @@\n package health\n \n-func F() int { return 1 }\n+func F() int { return 2 }\n"
+	if _, _, err := p.Apply(context.Background(), run, diff); err != nil {
+		t.Fatalf("an in-contract diff must apply, got: %v", err)
+	}
+}
+
 // Red-first (6.2): a diff targeting a path OUTSIDE the checkout is rejected — never a
 // host write. The guard fires before git runs, and nothing is created outside.
 func TestPatcherRejectsPathEscape(t *testing.T) {
@@ -212,7 +300,7 @@ func TestPatcherFailsClosedWithoutCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewPatcher(checkouts, cliexec.OSRunner{})
+	p := NewPatcher(checkouts, cliexec.OSRunner{}, targetFilesReader([]string{"f.txt"}))
 	diff := "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+y\n"
 	if _, _, err := p.Apply(context.Background(), "org.p.agent.chain.execution.no-such-run", diff); err == nil {
 		t.Error("apply on a run with no materialized checkout must fail closed")

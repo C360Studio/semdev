@@ -87,7 +87,7 @@ func changeFact(i int, field, obj string) message.Triple {
 func validTaskFacts(i int) []message.Triple {
 	return []message.Triple{
 		changeFact(i, "text", "add the guard"),
-		changeFact(i, "target_files", `["h.go"]`),
+		changeFact(i, "target_files", `["h.go","h_test.go"]`),
 		changeFact(i, "test_command", "go test ./..."),
 		changeFact(i, "assumptions", `["router wired"]`),
 		changeFact(i, "non_goals", "[]"),
@@ -131,6 +131,25 @@ func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string
 	return idx, res
 }
 
+// Task 3.3 red-first: a task whose test_command runs `go test` but whose target_files
+// include NO *_test.go would have the harness measure a test file the developer was never
+// given a writable contract to author — the vacuous-green route (measure over a test the
+// author couldn't touch). Projection must PARK toward the human and stamp NOTHING (atomic).
+func TestProjectParksWhenTargetFilesOmitTest(t *testing.T) {
+	w := &fakeWriter{}
+	facts := withField(validTaskFacts(0), 0, "target_files", `["h.go"]`) // source only, no *_test.go
+	_, res := run(t, facts, w)
+	if res.Error == "" {
+		t.Fatal("a go-test task whose target_files omit every *_test.go must park toward the human, not project")
+	}
+	if !strings.Contains(res.Error, "test") {
+		t.Errorf("the park reason should name the missing test-file contract, got: %s", res.Error)
+	}
+	if len(w.replaces) != 0 {
+		t.Error("projection must stamp NOTHING when the test-file contract is violated (atomic)")
+	}
+}
+
 // The happy path: an approved change's authored task facts project into
 // task.spec.<i>.<field> on the run entity, stamped with the task-projector Source.
 func TestProjectStampsTaskSpec(t *testing.T) {
@@ -147,7 +166,7 @@ func TestProjectStampsTaskSpec(t *testing.T) {
 	}
 	want := map[string]string{
 		"task.spec.0.goal":         "add the guard",
-		"task.spec.0.target_files": `["h.go"]`,
+		"task.spec.0.target_files": `["h.go","h_test.go"]`,
 		"task.spec.0.test_command": "go test ./...",
 		"task.spec.0.assumptions":  `["router wired"]`,
 		"task.spec.0.non_goals":    "[]",

@@ -2,6 +2,7 @@ package runspace
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,15 @@ import (
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semstreams/message"
 )
+
+// targetFilesReader returns a fakeReader whose task.spec.0.target_files fact declares the
+// given approved write contract — the shape the Patcher enforces apply scope against.
+func targetFilesReader(targets []string) fakeReader {
+	b, _ := json.Marshal(targets)
+	return fakeReader{triples: []message.Triple{
+		{Predicate: devtask.TaskSpecKeyPrefix(0) + devtask.FactTargetFiles, Object: string(b)},
+	}}
+}
 
 const runID = "org.plat.agent.chain.execution.run-1"
 

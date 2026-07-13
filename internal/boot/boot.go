@@ -201,7 +201,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		provManifests = runspace.Manifests{}
 		// git apply runs on the host checkout root (= the container's /work bind-mount),
 		// so the plain os/exec runner authors into the sandbox the loop measures.
-		patcher = runspace.NewPatcher(checkouts, cliexec.OSRunner{})
+		patcher = runspace.NewPatcher(checkouts, cliexec.OSRunner{}, factReader)
 	}
 
 	// measure_task (harness-measurement) runs a projected task's IMMUTABLE

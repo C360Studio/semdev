@@ -14,9 +14,9 @@
 
 ## 3. Patch scope: target_files enforcement
 
-- [ ] 3.1 Red-first pin: a diff touching a file outside `task.spec.target_files` currently applies (reproduce on the fixture)
-- [ ] 3.2 `Patcher.Apply` resolves the task's `target_files` and rejects any out-of-contract path atomically (no partial application)
-- [ ] 3.3 Projection enforces the `target_files`-includes-tests contract: a task whose `target_files` omits every test file its `test_command` measures parks toward the human
+- [x] 3.1 Red-first pin: a diff touching a file outside `task.spec.target_files` currently applies (reproduce on the fixture)
+- [x] 3.2 `Patcher.Apply` resolves the task's `target_files` and rejects any out-of-contract path atomically (no partial application)
+- [x] 3.3 Projection enforces the `target_files`-includes-tests contract: a task whose `target_files` omits every test file its `test_command` measures parks toward the human
 
 ## 4. One bounded multi-turn developer loop
 

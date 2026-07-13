@@ -153,6 +153,18 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInvalidArgs, "project_tasks: %v", err)
 	}
 
+	// target_files-includes-tests contract (task 3.3), M0 Go profile: a task whose
+	// test_command runs the Go test tool must list at least one *_test.go in its
+	// target_files — else the harness measures a test the developer was given no writable
+	// contract to author, the vacuous-green route (measure over an untouchable test). Fail
+	// TOWARD the human and stamp nothing (atomic, like the schema gaps above); the
+	// ecosystem-specific test-file profile lives here in the M0 projector, not the neutral
+	// devtask schema.
+	if bad := testFileContractViolations(specs); len(bad) > 0 {
+		return errResult(call, agentic.ToolErrorInvalidArgs,
+			"project_tasks: task(s) %v run `go test` but their target_files include no *_test.go the test would measure — the developer could not author the test that measures its own work (fails toward the human)", bad)
+	}
+
 	out := taskSpecTriples(runEntityID, specs, time.Now().UTC())
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
 		return errResult(call, writeErrKind(err), "project_tasks: stamp %d task.spec facts on %s: %v", len(out), runEntityID, err)
@@ -273,6 +285,40 @@ func optInt(f map[string]string, field string) (*int, error) {
 		return nil, fmt.Errorf("not an integer (%q): %w", v, err)
 	}
 	return &n, nil
+}
+
+// testFileContractViolations returns the indices of tasks whose test_command mentions the
+// literal `go test` but whose target_files declare no *_test.go — the M0-Go realization of
+// "target_files omits every test file its test_command measures" (task 3.3). Non-Go test
+// commands are not checked (M0 is Go-only; a broader ecosystem profile is future work).
+func testFileContractViolations(specs []devtask.TaskSpec) []int {
+	var bad []int
+	for _, s := range specs {
+		if mentionsGoTest(s.TestCommand) && !targetsIncludeGoTest(s.TargetFiles) {
+			bad = append(bad, s.Index)
+		}
+	}
+	return bad
+}
+
+// mentionsGoTest reports whether cmd literally contains "go test". This is a COARSE M0-Go
+// match, deliberately: it does NOT recognize go-test wrappers (`gotestsum`, `make test`),
+// and it errs toward parking on degenerate substrings (`echo go test`). Both directions are
+// safe — a false NEGATIVE (a wrapper slips) does not produce a vacuous green (the
+// TestsMustExist floor rejects an attempt that authored no test, and the patcher's
+// target_files guard forbids authoring a test outside the contract, so the case escalates
+// to the human); a false POSITIVE parks toward the human, the safe direction. A precise
+// per-ecosystem test-file profile is future work when non-Go repos land.
+func mentionsGoTest(cmd string) bool { return strings.Contains(cmd, "go test") }
+
+// targetsIncludeGoTest reports whether any target file is a Go test file (*_test.go).
+func targetsIncludeGoTest(targets []string) bool {
+	for _, t := range targets {
+		if strings.HasSuffix(strings.TrimSpace(t), "_test.go") {
+			return true
+		}
+	}
+	return false
 }
 
 // taskSpecTriples projects the immutable task.spec facts on the run entity:

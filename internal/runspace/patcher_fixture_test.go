@@ -59,8 +59,8 @@ func TestPatcherFixesFixtureRedToGreen(t *testing.T) {
 		t.Fatal("fixture tests unexpectedly PASSED before the fix — the seeded bug is gone, the red→green proof is vacuous")
 	}
 
-	// Author the fix through the real apply_patch seam.
-	touched, _, err := NewPatcher(checkouts, runner).Apply(ctx, run, fixtureFixDiff)
+	// Author the fix through the real apply_patch seam (health.go is in the contract).
+	touched, _, err := NewPatcher(checkouts, runner, targetFilesReader([]string{"health.go"})).Apply(ctx, run, fixtureFixDiff)
 	if err != nil {
 		t.Fatalf("apply fix diff: %v", err)
 	}

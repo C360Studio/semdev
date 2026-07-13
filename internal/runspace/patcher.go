@@ -6,8 +6,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 )
+
+// devTaskIndex is the single task the M0 rail develops (design R9: honestly single-task;
+// exactly one rule binds the rail to task.spec.0, and this is the apply-scope side of that
+// binding). The M1 multi-task walker threads the real index behind this constant.
+const devTaskIndex = 0
 
 // gitBin is the git CLI the patcher shells to apply the unified diff. git is a hard
 // dependency of the run path anyway (the g8 `--recursive` clone), and the operator
@@ -29,12 +35,14 @@ const gitBin = "git"
 type Patcher struct {
 	checkouts *Checkouts
 	runner    cliexec.Runner
+	reader    changefacts.Reader // reads the task's approved target_files contract
 }
 
-// NewPatcher builds the apply_patch seam over the run-checkout registry and a
-// local-command runner (cliexec.OSRunner in production; a scripted runner in tests).
-func NewPatcher(checkouts *Checkouts, runner cliexec.Runner) *Patcher {
-	return &Patcher{checkouts: checkouts, runner: runner}
+// NewPatcher builds the apply_patch seam over the run-checkout registry, a local-command
+// runner (cliexec.OSRunner in production; a scripted runner in tests), and the fact reader
+// it resolves the task's approved target_files contract through.
+func NewPatcher(checkouts *Checkouts, runner cliexec.Runner, reader changefacts.Reader) *Patcher {
+	return &Patcher{checkouts: checkouts, runner: runner, reader: reader}
 }
 
 // Apply path-guards and applies diff to runEntityID's checkout, COMMITS the result under
@@ -68,6 +76,29 @@ func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) (touched 
 	for _, t := range targets {
 		if _, err := safeJoin(root, t); err != nil {
 			return nil, "", err
+		}
+	}
+
+	// ENFORCE THE APPROVED TASK CONTRACT (task 3.2): every path the diff writes must be in
+	// task.spec.<idx>.target_files — the human-approved write scope. This closes the
+	// unreviewed workflow/build/config escape (a diff that applies cleanly to a real file
+	// inside the checkout that was never in the approved contract). Checked BEFORE git apply
+	// so a rejection is atomic (no partial application). Fail-closed on an absent contract:
+	// a task with no target_files was not properly projected (3.3 guards that at projection).
+	allowed, err := readTargetFiles(ctx, p.reader, runEntityID, devTaskIndex)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(allowed) == 0 {
+		return nil, "", fmt.Errorf("runspace: task.spec.%d has no target_files on %s — cannot enforce the apply contract (was the change projected?)", devTaskIndex, runEntityID)
+	}
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowedSet[a] = true
+	}
+	for _, t := range targets {
+		if !allowedSet[t] {
+			return nil, "", fmt.Errorf("runspace: diff touches %q, outside the approved task.spec.%d.target_files %v — apply_patch rejects out-of-contract paths (the unreviewed workflow/build/config escape)", t, devTaskIndex, allowed)
 		}
 	}
 

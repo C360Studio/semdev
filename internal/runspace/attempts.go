@@ -48,7 +48,7 @@ func (a *Attempts) Resolve(ctx context.Context, runEntityID string, taskIndex in
 	if err != nil {
 		return floors.Attempt{}, err
 	}
-	targets, err := a.readTargetFiles(ctx, runEntityID, taskIndex)
+	targets, err := readTargetFiles(ctx, a.reader, runEntityID, taskIndex)
 	if err != nil {
 		return floors.Attempt{}, err
 	}
@@ -84,10 +84,12 @@ func (a *Attempts) Resolve(ctx context.Context, runEntityID string, taskIndex in
 }
 
 // readTargetFiles reads the JSON-array task.spec.<idx>.target_files fact off the run
-// entity into the declared target paths.
-func (a *Attempts) readTargetFiles(ctx context.Context, runEntityID string, idx int) ([]string, error) {
+// entity into the declared target paths — the approved write contract for task idx. Shared
+// by the Attempts resolver (floor evaluation) and the Patcher (apply-scope enforcement) so
+// both read the SAME contract from the SAME single owner.
+func readTargetFiles(ctx context.Context, reader changefacts.Reader, runEntityID string, idx int) ([]string, error) {
 	prefix := devtask.TaskSpecKeyPrefix(idx)
-	triples, err := a.reader.ReadFacts(ctx, runEntityID, prefix)
+	triples, err := reader.ReadFacts(ctx, runEntityID, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("runspace: read %s on %s: %w", prefix, runEntityID, err)
 	}
