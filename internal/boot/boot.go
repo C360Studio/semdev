@@ -239,7 +239,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// clone. It writes via the shared OwnedFactWriter (its own Source, verify-harness —
 	// G5-safe). store is nil at M0 (no governed secrets). Execute fails loudly if any nil
 	// seam is missing; a proof that cannot run is retryable, never a silent green.
-	if err := reg.RegisterExecutor(verifyartifact.New(verifyClones, manifests, verifyartifact.DefaultProver(), nil, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(verifyartifact.New(verifyClones, manifests, verifyartifact.DefaultProver(), nil, deps.Platform, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
 	}
 

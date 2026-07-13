@@ -143,6 +143,15 @@ var Predicates = []Predicate{
 	// Tool-owned (writer reviewer-quinn, submit_review's Source — like measure_task's
 	// dev.measure_done); distinguishes the review loop from other loops.
 	{"dev.reviewed", "reviewer-quinn", "dev-from-task", sandbox},
+
+	// the VERIFY station (group 8D). dev.verify_dispatched is the fired-once marker the
+	// verify-trigger (dev-from-task/10) stamps on the review loop before spawning
+	// verify_artifact (self-extinguishing, loop-scoped).
+	{"dev.verify_dispatched", "dev-verify-rule", "dev-from-task", sandbox},
+	// dev.verified is the CHAINING marker verify_artifact stamps on ITS OWN verify loop
+	// (value = the cold-verify outcome) — the signal the coherence station (group 8D) fires
+	// on to spawn check_coherence. Tool-owned (writer verify-harness, verify_artifact's Source).
+	{"dev.verified", "verify-harness", "dev-from-task", sandbox},
 }
 
 // Names returns every predicate name in declaration order.

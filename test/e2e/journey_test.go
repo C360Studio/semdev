@@ -97,6 +97,10 @@ const journeyGateMarker = "gate the attempt"
 // (dev-from-task/09-review-cleared-task.json) the mock's submit_review turn guards on.
 const journeyReviewMarker = "SEMDEV REVIEWER"
 
+// journeyVerifyMarker is a distinctive substring of the verify prompt
+// (dev-from-task/10-verify-reviewed-task.json) the mock's verify_artifact turn guards on.
+const journeyVerifyMarker = "clean-room COLD verify"
+
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -147,19 +151,21 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	//  10. F1 floors coordinator     → check_floors(index 0)    [structural floors on the diff]
 	//  11. G1 gate coordinator       → check_gate(index 0)      [advance/retry/escalate route]
 	//  12. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
+	//  13. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
 	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
 	// which carries it); turns 4 and 5 thread the slug (validate via the authored
 	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–12 thread the run entity id, so they mark on a stable
+	// mark on the slug; turns 6–13 thread the run entity id, so they mark on a stable
 	// phrase of their prompts (provision, dev re-wake, developer, measure, floors, gate,
-	// review). The cursor — not the marker — distinguishes the turns: projection →
-	// provision → dev re-wake → dispatch → measure → floors → gate → review is serialized by
-	// the rule gates (sandbox/01 gates on task.spec presence, the dev re-wake gates on
-	// sandbox.ready, dispatch fires on the dev_from_task decision, measure fires on the
-	// developer loop's success, floors chains off the measure loop's dev.measure_done
+	// review, verify). The cursor — not the marker — distinguishes the turns: projection →
+	// provision → dev re-wake → dispatch → measure → floors → gate → review → verify is
+	// serialized by the rule gates (sandbox/01 gates on task.spec presence, the dev re-wake
+	// gates on sandbox.ready, dispatch fires on the dev_from_task decision, measure fires on
+	// the developer loop's success, floors chains off the measure loop's dev.measure_done
 	// marker, the gate chains off the floors loop's dev.floors_done marker, review co-fires
-	// on the gate loop's advance decision), so no two forced turns race. An unscripted turn
-	// returns mockllm.UnmatchedSentinel, failing loudly not green.
+	// on the gate loop's advance decision, verify chains off the review loop's dev.reviewed
+	// marker), so no two forced turns race. An unscripted turn returns
+	// mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -217,6 +223,10 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyReviewMarker,
 			Tool:   &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}},
+		},
+		mockllm.Fixture{
+			Marker: journeyVerifyMarker,
+			Tool:   &mockllm.ToolCall{Name: "verify_artifact", Args: map[string]any{}},
 		},
 	)
 	if err := mock.Start(); err != nil {
@@ -418,14 +428,28 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireReviewApproved(ctx, t, runEntityID)
 	t.Logf("station 14: Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly twelve model turns drove the arc through the review station: …, G1
-	// check_gate, R1 submit_review. The advance router's fact-stamp + the review loop's
-	// dev.reviewed marker are rule/tool-owned (no extra model call). The one new turn since
-	// station 13 is the forced review loop (R1). A spurious re-spawn (the review loop
-	// re-triggering a rule, the gate loop double-firing review/advance), a double dispatch,
-	// or an unscripted turn would push this past 12.
-	if got := mock.RequestCount(); got != 12 {
-		t.Fatalf("expected exactly 12 model turns (…, G1 check_gate, R1 submit_review), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
+	// Station 15 — the CLEAN-ROOM COLD VERIFY of the committed artifact (the make-or-break,
+	// now LIVE end-to-end). The verify-trigger (dev-from-task/10) fires on the review loop's
+	// dev.reviewed marker and spawns a forced verify_artifact loop (role=coordinator,
+	// run_scope=inherit — proving a role=reviewer inherit loop propagated the run anchor,
+	// the 8D forward-check). verify_artifact CLONES the run's checkout into a fresh dir,
+	// builds the operator-declared image, and proves the artifact resolves + passes its own
+	// tests COLD in a SEPARATE fresh container with a fresh dependency cache (the third
+	// sandbox instance) — the exact proof both predecessors faked. Because the fix is real
+	// and self-contained, the cold verify PASSES: assert verify.result == "pass". This runs
+	// the REAL docker cold proof on the committed fixture. Red-first: disable dev-from-task/10
+	// and this times out; a non-self-contained fix (or a warm-cache-masked fabrication) comes
+	// back "fail".
+	requireVerifyPassed(ctx, t, runEntityID)
+	t.Logf("station 15: clean-room COLD verify of the committed artifact — verify.result=pass (the fix is self-contained + reproducible) (mock RequestCount=%d)", mock.RequestCount())
+
+	// Exactly thirteen model turns drove the arc through the verify station: …, R1
+	// submit_review, V1 verify_artifact. The review loop's dev.reviewed marker + the verify
+	// loop's dev.verified marker are tool-owned (no extra model call). The one new turn since
+	// station 14 is the forced verify loop (V1). A spurious re-spawn or an unscripted turn
+	// would push this past 13.
+	if got := mock.RequestCount(); got != 13 {
+		t.Fatalf("expected exactly 13 model turns (…, R1 submit_review, V1 verify_artifact), got %d — extra turns indicate a re-spawn/loop, a double dispatch, or an unscripted turn", got)
 	}
 }
 
@@ -678,6 +702,35 @@ func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string
 	}, "run entity "+runEntityID+" never gained "+verdict+"=approved — the review-trigger (dev-from-task/09) did not fire, "+
 		"or submit_review could not derive the verdict: check check_gate advanced (dev.gate.0.decision=advance), the review rule fires on that gate-loop marker, "+
 		"submit_review is advertised/scripted as a role=reviewer loop, and the task's measurement.result.0 is passing")
+}
+
+// requireVerifyPassed polls the run entity until verify.result == "pass" — the proof the
+// verify-trigger (dev-from-task/10) fired on the review loop, the forced verify_artifact
+// loop cloned the committed artifact and proved it resolves + passes its own tests COLD in
+// a fresh throwaway container, and the artifact is self-contained + reproducible. A stamped
+// "fail" is a hard failure (the fix is not self-contained, a fabrication survived to verify,
+// or a forbidden build-file pattern), surfaced immediately rather than by timeout. The
+// clean-room cold proof runs REAL docker on the committed fixture, so this allows a wide
+// window.
+func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const result = "verify.result"
+	requireEventually(t, 3*time.Minute, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if got := tripleString(e, result); got == "fail" {
+			t.Fatalf("verify_artifact stamped %s=fail — the committed artifact did NOT prove cold: the fix is not self-contained, a warm-cache-masked fabrication survived to the cold verify, or a build file carries a forbidden runtime download; check the clone carries the patched bytes and the fixture's build files are clean", result)
+		}
+		return tripleString(e, result) == "pass"
+	}, "run entity "+runEntityID+" never gained "+result+"=pass — the verify-trigger (dev-from-task/10) did not fire "+
+		"(a role=reviewer inherit loop may not have propagated the run anchor), or the cold clean-room proof did not run: "+
+		"check submit_review stamped dev.reviewed on its loop, the verify rule fires on that marker, verify_artifact is advertised/scripted, "+
+		"and docker is available (the journey builds the fixture image and runs go test in a fresh container)")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for

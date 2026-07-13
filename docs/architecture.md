@@ -50,6 +50,8 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `dev.task_cleared.*` | dev-route-rule | dev-from-task |
 | `dev.review_dispatched` | dev-review-rule | dev-from-task |
 | `dev.reviewed` | reviewer-quinn | dev-from-task |
+| `dev.verify_dispatched` | dev-verify-rule | dev-from-task |
+| `dev.verified` | verify-harness | dev-from-task |
 
 ## Components
 

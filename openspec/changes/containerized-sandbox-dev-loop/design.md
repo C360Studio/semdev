@@ -524,6 +524,20 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   verify explicitly that a `role=reviewer`, `run_scope=inherit` loop carries the `agent.run` anchor (it is inert in 8C, so
   8C did not exercise the run-binding of a reviewer loop). The gate/floors/measure loops (role=coordinator) all bind
   correctly; a reviewer loop is the first of its role to be depended on for chaining.
+- **[8D-1 verify station LIVE — a RETRY verdict RE-RUNS, it does not chain] (8D-1, semstreams-reviewer MEDIUM, fixed)** →
+  `dev-from-task/10` fires on the review loop's `dev.reviewed` marker and forces `verify_artifact` (role=coordinator, the
+  cold proof is a harness tool not a persona judgment) — the clean-room cold verify runs LIVE on the committed fixture in
+  the journey (station 15, verify.result=pass, RequestCount 13; the reviewer's 8C run-binding forward-check is CONFIRMED —
+  the role=reviewer inherit loop propagated the run anchor, verify.result landed on the run). **The verdict split is
+  load-bearing for 8D-2:** `verify.Decide` returns Retry (a Verdict, not a Go error) for a transport fault (a container
+  that won't provision, a resolve read as network-class) — the dominant infra-fault path. verify_artifact treats a Retry
+  verdict as RE-RUN: it stamps `verify.result=retry` (evidence) but NOT `dev.verified`, and does NOT StopLoop, so the
+  forced verify loop re-runs the cold proof. Only a TERMINAL verdict (pass = chain to open_pr; fail = the coherence gate
+  blocks/parks) stamps `dev.verified`. WITHOUT this, a single docker flake during the final verify would chain a
+  `retry` to the 8D-2 coherence gate, fail its `verify.result eq pass` check, and PARK a good run — subverting the whole
+  point of the Retry classification (never terminally reject a good artifact on a flake, SB5). A persistent transport
+  fault trips MaxIterations → stalls toward the human (the dev-loop-rail cap-exhaust gap), fail-closed. Pinned
+  `TestVerifyRetryStampsResultButDoesNotChainOrStopLoop`.
 
 ## Migration Plan
 

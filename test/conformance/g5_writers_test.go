@@ -53,6 +53,7 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"submit_review", submitreview.Source, "review.verdict.0"},
 		{"submit_review", submitreview.Source, submitreview.ReviewedPredicate},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
+		{"verify_artifact", verifyartifact.Source, verifyartifact.VerifiedPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
 		{"check_floors", checkfloors.Source, checkfloors.FloorsDonePredicate},
 		{"check_gate", checkgate.Source, "dev.gate.0.decision"},

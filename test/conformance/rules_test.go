@@ -705,6 +705,44 @@ func TestReviewTriggerIsSelfExtinguishing(t *testing.T) {
 	}
 }
 
+// The verify station (dev-from-task/10, group 8D): on the REVIEW loop terminal (chained
+// via the dev.reviewed loop marker, warn-free), run the clean-room cold verify. Like every
+// publish_agent spawn rule it MUST be self-extinguishing — LOOP-scoped: a fired-once
+// dev.verify_dispatched marker stamped BEFORE the publish, guarded by length_eq 0. It must
+// fire on the reviewed marker, force verify_artifact, and require role=reviewer (the review
+// loop). Red-first: drop any and this fails.
+func TestVerifyTriggerIsSelfExtinguishing(t *testing.T) {
+	v, ok := runLifecycleRules(t)["dev_from_task_verify_reviewed"]
+	if !ok {
+		t.Fatal("missing dev_from_task_verify_reviewed rule")
+	}
+	const marker = "dev.verify_dispatched"
+	if !v.hasAbsenceGuard(marker) {
+		t.Errorf("verify trigger must guard on %s length_eq 0 (fired-once) — else a graph replay re-spawns a duplicate verify loop", marker)
+	}
+	if !v.hasTriple(marker) {
+		t.Errorf("verify trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
+	}
+	if !v.markerBeforePublish(marker) {
+		t.Errorf("verify trigger must stamp %s BEFORE its publish_agent", marker)
+	}
+	if !v.forcesFunction("verify_artifact") {
+		t.Error("verify trigger must force the verify_artifact call (tool_choice mode=function, function_name=verify_artifact)")
+	}
+	// Fires on the REVIEW loop, distinguished by the tool-stamped dev.reviewed marker.
+	if c, ok := v.condition("dev.reviewed"); !ok || c.Operator != "ne" {
+		t.Error("verify trigger must fire on the review loop's dev.reviewed marker (ne \"\") — the warn-free loop-marker chain")
+	}
+	if c, ok := v.condition("agent.loop.role"); !ok || c.Value != "reviewer" {
+		t.Error("verify trigger must require agent.loop.role == reviewer (the review loop; verify chains off Quinn's review)")
+	}
+	if c, ok := v.condition("dev.reviewed"); ok {
+		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
+			t.Errorf("verify trigger condition on dev.reviewed uses the warn-flooding $entity.triple form (#519)")
+		}
+	}
+}
+
 // The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
 // sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
 // posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once

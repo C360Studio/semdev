@@ -1,0 +1,45 @@
+{
+  "id": "dev_from_task_verify_reviewed",
+  "type": "expression",
+  "name": "Reviewed task → clean-room COLD verify of the committed artifact (verify_artifact)",
+  "description": "The clean-room verify station (design SB3/SB4.3, group 8D). After Quinn has reviewed a cleared task, prove the COMMITTED artifact builds and passes its own tests COLD — in a SEPARATE fresh container over a fresh clone of the run's checkout with a fresh dependency cache (the third sandbox instance). This is the make-or-break both predecessors faked: a fix that only doctored the warm environment, a cache-masked fabrication, or a hidden runtime download in a build file cannot survive a fresh clone + fresh cache (SB3 forbidden_patterns tripwire + the cold resolve/test). G3: verify_artifact takes NO arguments — it clones, builds, and runs the artifact's OWN test command, and the outcome is derived from the real exit codes (verify.Decide), never a model claim. G2: it stamps verify.result; the open_pr coherence gate is a separate rule.\n\nTRIGGER = the REVIEW loop terminal, chained on the dev.reviewed loop marker (warn-free — not a run-fact field-to-field trigger, #519). submit_review stamps dev.reviewed on ITS OWN review loop once it records a verdict. This rule fires on that marker: agent.loop.role=reviewer (the review loop is Quinn's, the one role=reviewer loop) AND dev.reviewed ne \"\". The pair distinguishes the review loop. It fires for a changes_requested verdict too (dev.reviewed is stamped regardless) — the cold verify runs and the coherence gate blocks on the non-approved verdict + the verify result together. NOTE: verify is a WHOLE-ARTIFACT proof (one per run), downstream of the per-task review; at M0 (one task) the chain is linear, N tasks fan-in to one verify (a distinct-count synchronizer, deferred).\n\nRUN BINDING: run_scope=inherit reads the review loop's bare agent.run (inherit-spawned loops carry it — the review loop was itself inherit-spawned from the gate loop) and binds the verify loop's RunID to the same run, so verify_artifact clones THIS run's checkout and stamps verify.result on the run.\n\nROLE = coordinator (Sarah owns the harness tools; verify is a deterministic cold proof, not a persona judgment). tool_choice=function forces verify_artifact and tools stays nil (global discovery); the loop calls it and StopLoops, writing verify.result + the dev.verified loop marker.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps the fired-once marker dev.verify_dispatched=$entity.instance on the review loop (the firing entity), guarded by dev.verify_dispatched length_eq 0. House restart-safety pattern (dev-from-task/04..09): publish_agent is NOT idempotent and dev.reviewed stays stamped, so WITHOUT this marker a graph replay with RULE_STATE lost would re-spawn a DUPLICATE verify loop. Marker stamped BEFORE the publish so a publish failure stalls-toward-human rather than duplicating. LOOP-scoped (like dev.dispatched) because this rule fires on the review loop. A fresh review loop per attempt re-arms verify for free.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "reviewer", "required": true },
+    { "field": "dev.reviewed", "operator": "ne", "value": "", "required": true },
+    { "field": "dev.verify_dispatched", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.verify_dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.coordinator",
+      "role": "coordinator",
+      "model": "coordinator",
+      "tool_choice": { "mode": "function", "function_name": "verify_artifact" },
+      "properties": {
+        "phase": "verify"
+      },
+      "prompt": "SEMDEV — the developed task was reviewed. Now run the clean-room COLD verify of the committed artifact: call verify_artifact. The harness clones the run's checkout into a fresh directory, builds the operator-declared image, and proves the artifact resolves and passes its own tests COLD in a fresh throwaway container with a fresh dependency cache — you supply nothing and claim no outcome. Calling verify_artifact completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "verify_artifact — clean-room cold verify on the review-loop terminal (SB3/SB4.3, 8D)",
+    "trigger_rationale": "fires on the REVIEW loop terminal via the dev.reviewed loop marker (submit_review stamps it on its own loop). role=reviewer + dev.reviewed distinguishes the review loop. Loop-marker chaining, NOT a run-fact field-to-field trigger, to stay warn-free (#519).",
+    "role_rationale": "coordinator (verify is a deterministic cold proof, a harness tool — Sarah's, not a persona judgment, unlike the review it follows). tool_choice=function:verify_artifact + nil tools forces the call. The verify loop is role=coordinator so it re-triggers no reviewer-keyed rule.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.verify_dispatched marker + length_eq 0 guard (house pattern). publish_agent is not idempotent; verify_artifact's StopLoop keeps the verify loop one turn. Marker stamped BEFORE the publish. A fresh review loop per attempt re-arms verify for free.",
+    "g3": "verify_artifact takes NO arguments; it clones + builds + runs the artifact's own test command and derives verify.result from the real exit codes (verify.Decide), never a model claim.",
+    "chain_note": "the coherence gate (check_coherence) fires on the verify LOOP's dev.verified marker and rolls up verify.result eq pass + every review.verdict.* eq approved + openspec.validated ne \"\" → open_pr, else park. See design.md group-8 section.",
+    "run_binding_note": "run_scope=inherit binds the verify loop to the review loop's agent.run. The review loop was itself inherit-spawned (from the gate loop), so it carries the run anchor — the first time a role=reviewer loop is depended on for run-binding (8D forward-check); the journey's verify.result-on-the-run assertion proves the anchor propagated."
+  }
+}
