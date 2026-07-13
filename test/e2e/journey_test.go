@@ -1,26 +1,30 @@
 //go:build e2e
 
-// The mock-LLM spine journey (group 11). It boots the REAL shared runtime against
-// the in-process mock LLM (zero paid tokens) and drives the issue→PR arc through
-// it, growing one station at a time.
+// The mock-LLM BRIDGE PROOF. It boots the REAL shared runtime against the
+// in-process mock LLM (zero paid tokens) and drives the whole issue→PR arc
+// through it — front door → issue_intake → create_change → validate → human
+// approval → project task.spec → provision + prove-cold sandbox → dispatch
+// (Amelia) → apply_patch → measure in-container → structural floors → gate →
+// review (Quinn) → cold clean-room verify → coherence → open_pr → pr.ref.
 //
-// Station 1 proved the live plumbing: the config points the agentic-model
-// endpoint at the mock, the runtime assembles the agentic-execution plane, a
-// coordinator TaskMessage published to the front door spawns a loop, and that
-// loop reaches the mock.
+// This is a bridge proof, NOT a completeness claim (G7/G10): it proves the rail
+// CONNECTS end-to-end under the mock — that every station's rules, tools, and
+// facts wire together and the whole chain advances — not that the rail is
+// correct, production-shaped, or that M0 is complete. A completion claim needs
+// real-LLM evidence and a real forge delivery (a mock run is bridge proof and
+// never counts as real-LLM evidence — see internal/ledger).
 //
-// Station 2 (this slice) proves the coordinator actually ROUTES: the front-door
-// wake is built exactly as the intake adapter will build it (via
+// The route-a-decision path is the spine every station layers onto: the
+// front-door wake is built exactly as the intake adapter builds it (via
 // intake.CoordinatorTask — nil tools = global discovery, tool_choice=required,
 // the closed decide-action allowlist), the seeded coordinator persona is live,
 // and the mock's scripted decide turn lands a coordinator.decision.next_action
 // triple on the loop entity. If the tool config, the persona seeding, the front
 // door subject, or the decide registration is wrong, the loop reaches the model
-// but never routes and no decision fact appears — so this is the regression guard
-// for the whole route-a-decision path the dev-loop rail layers onto.
+// but never routes and no decision fact appears.
 //
-// Run via `task e2e`, which resets NATS first so the runtime loads the journey's
-// patched config from file rather than a stale versioned-KV copy.
+// Run via `task e2e`, which resets NATS first so the runtime loads the
+// bridge proof's patched config from file rather than a stale versioned-KV copy.
 
 package e2e
 
@@ -138,11 +142,14 @@ var wantAgenticHealthy = []string{
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
 }
 
-// TestSpineJourneyCoordinatorDecidesAgainstMock is the second spine slice:
-// publish an admitted issue's coordinator wake to the front door and prove the
-// coordinator loop calls decide and stamps its routing decision. Later slices
-// grow the arc off that decision (mint the run → create_change → dev loop → …).
-func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
+// TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
+// admitted issue's coordinator wake to the front door and prove the whole
+// issue→PR arc CONNECTS through the real runtime — the coordinator routes, the
+// run mints, the change authors + validates, the human approves, the dev loop
+// develops → measures → floors → gates, review clears, cold verify passes, the
+// coherence gate rolls up, and open_pr records pr.ref. A bridge proof of
+// connection, not a claim of completeness (G7/G10).
+func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// The mock scripts the arc's sequential turns as a POSITIONAL sequence
 	// (cursor advances per matched tool call). The turns are causally ordered —
 	// each loop is spawned by a rule that fired on the prior loop's terminal — so
@@ -460,17 +467,18 @@ func TestSpineJourneyCoordinatorDecidesAgainstMock(t *testing.T) {
 	requireVerifyPassed(ctx, t, runEntityID)
 	t.Logf("station 15: clean-room COLD verify of the committed artifact — verify.result=pass (the fix is self-contained + reproducible) (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 16 — the ISSUE→PR ARC COMPLETES. The coherence gate (dev-from-task/11) fires
-	// on the verify loop's dev.verified marker and rolls up the three delivery signals —
+	// Station 16 — the ISSUE→PR ARC CONNECTS end-to-end. The coherence gate (dev-from-task/11)
+	// fires on the verify loop's dev.verified marker and rolls up the three delivery signals —
 	// verify.result=pass ∧ openspec.validated ∧ every review.verdict=approved — deriving
 	// coherent; the coherent router (dev-from-task/12a) then forces open_pr, which records
-	// pr.ref. This is the full arc's terminal: an issue became a reviewed, clean-room-verified
-	// PR. Assert pr.ref is present (an M0 local-delivery stub — the forge-io PR is M2; the
-	// gate genuinely passed, only the delivery target is stubbed). Red-first: disable
-	// dev-from-task/11 or 12a and this times out; break any signal (verify/validate/review)
-	// and the gate blocks (parks) instead of delivering.
+	// pr.ref. This is the bridge proof's terminal: under the mock, an issue drove all the way
+	// to a reviewed, clean-room-verified PR — the rail CONNECTS (it is not a completeness
+	// claim). Assert pr.ref is present (an M0 local-delivery stub — the real forge-io PR is a
+	// later group; the gate genuinely passed, only the delivery target is stubbed). Red-first:
+	// disable dev-from-task/11 or 12a and this times out; break any signal (verify/validate/
+	// review) and the gate blocks (parks) instead of delivering.
 	requirePRDelivered(ctx, t, runEntityID)
-	t.Logf("station 16: ISSUE→PR ARC COMPLETE — the run cohered and open_pr recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 16: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and open_pr recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
 	// Exactly fifteen model turns drove the FULL arc: …, V1 verify_artifact, CO1
 	// check_coherence, PR1 open_pr. The verify loop's dev.verified marker + the coherence

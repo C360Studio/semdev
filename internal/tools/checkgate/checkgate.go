@@ -203,25 +203,25 @@ func (e *Executor) readInputs(ctx context.Context, runEntityID string, idx int) 
 	var in Inputs
 
 	passedPred := measurement.ResultPrefix + strconv.Itoa(idx) + "." + measurement.FactPassed
-	if b, err := e.readBool(ctx, runEntityID, measurement.ResultPrefix+strconv.Itoa(idx)+".", passedPred); err != nil {
+	b, err := e.readBool(ctx, runEntityID, measurement.ResultPrefix+strconv.Itoa(idx)+".", passedPred)
+	if err != nil {
 		return in, err
-	} else {
-		in.Passed = b
 	}
+	in.Passed = b
 
 	rejectedPred := floors.FindingPrefix + strconv.Itoa(idx) + "." + floors.FactRejected
-	if b, err := e.readBool(ctx, runEntityID, floors.FindingPrefix+strconv.Itoa(idx)+".", rejectedPred); err != nil {
+	rejected, err := e.readBool(ctx, runEntityID, floors.FindingPrefix+strconv.Itoa(idx)+".", rejectedPred)
+	if err != nil {
 		return in, err
-	} else {
-		in.Rejected = b
 	}
+	in.Rejected = rejected
 
 	budgetPred := devtask.TaskSpecKeyPrefix(idx) + devtask.FactBudget
-	if n, err := e.readInt(ctx, runEntityID, devtask.TaskSpecKeyPrefix(idx), budgetPred); err != nil {
+	n, err := e.readInt(ctx, runEntityID, devtask.TaskSpecKeyPrefix(idx), budgetPred)
+	if err != nil {
 		return in, err
-	} else {
-		in.Budget = n
 	}
+	in.Budget = n
 
 	// task.attempt.<i> is a BARE per-task predicate (not a sub-key package), so the read
 	// scopes to the whole task.attempt. namespace and filters to the exact predicate — an

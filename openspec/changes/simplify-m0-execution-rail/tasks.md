@@ -1,8 +1,8 @@
 ## 1. Foundation: framework bump + honest baseline
 
-- [ ] 1.1 Bump semstreams beta.141 → beta.146; fix any API drift; full mock ladder green
-- [ ] 1.2 Add the three upstream-ask tripwire tests (#519 `.value` substitution, #528 per-spawn `max_iterations`, #529 uniform exhaustion reason) that FAIL when the capability lands, prompting the mechanical upgrade
-- [ ] 1.3 Rename the e2e journey a bridge proof (test names, comments, evidence-ledger labels) — no behavior change yet (G10)
+- [x] 1.1 Bump semstreams beta.141 → beta.146; fix any API drift; full mock ladder green
+- [x] 1.2 Add the three upstream-ask tripwire tests (#519 `.value` substitution, #528 per-spawn `max_iterations`, #529 uniform exhaustion reason) that FAIL when the capability lands, prompting the mechanical upgrade
+- [x] 1.3 Rename the e2e journey a bridge proof (test names, comments, evidence-ledger labels) — no behavior change yet (G10)
 
 ## 2. Immutable snapshot: git-backed runspace
 

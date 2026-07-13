@@ -20,8 +20,8 @@ github.com/agntcy/oasf-sdk/pkg v1.0.5 h1:Sv8K9tqdfl4gfl30spFh9MYkqnzXcTByCsb2uZs
 github.com/agntcy/oasf-sdk/pkg v1.0.5/go.mod h1:6dii5LpZlAPNhko78tvD2LOhJ2qwOXDy95aSjrsJbgg=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
-github.com/c360studio/semstreams v1.0.0-beta.141 h1:QBIMxjAMalIffKmmskr3+2blucooxHMUkNoc1Fsavb0=
-github.com/c360studio/semstreams v1.0.0-beta.141/go.mod h1:1KXSph1O8HaweRDxXWcC2IIK2ruQd4xLN8KP+y+PO6E=
+github.com/c360studio/semstreams v1.0.0-beta.146 h1:NY8F3bOJ3mf00Eg8HPZNO9824IvqkaS2OAypkzMuHWo=
+github.com/c360studio/semstreams v1.0.0-beta.146/go.mod h1:1KXSph1O8HaweRDxXWcC2IIK2ruQd4xLN8KP+y+PO6E=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

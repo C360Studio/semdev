@@ -3,7 +3,7 @@ module github.com/c360studio/semdev
 go 1.26.3
 
 require (
-	github.com/c360studio/semstreams v1.0.0-beta.141
+	github.com/c360studio/semstreams v1.0.0-beta.146
 	github.com/google/go-cmp v0.7.0
 	golang.org/x/tools v0.43.0
 )

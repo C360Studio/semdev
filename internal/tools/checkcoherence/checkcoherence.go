@@ -56,6 +56,8 @@ const (
 // delivery step, read.
 const CoherencePrefix = "pr.coherence."
 
+// FactDecision and FactReason are the two evidence fields the coherence gate stamps
+// under CoherencePrefix on the run entity (G7).
 const (
 	FactDecision = "decision" // coherent | blocked
 	FactReason   = "reason"   // the harness's plain-language justification (G7)
