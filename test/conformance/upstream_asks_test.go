@@ -49,10 +49,32 @@ func TestTripwire519ScalarValueSubstitution(t *testing.T) {
 		},
 	}
 
-	// Compare the first predicate against the SECOND predicate's value via the
-	// drafted `.value` field-to-field form. Today the RHS is compared as the
-	// literal string "$entity.triple.test.budget.value" (never substituted), so
-	// it cannot equal the sentinel and the condition does NOT match.
+	ev := expression.NewExpressionEvaluator()
+
+	// POSITIVE CONTROL — a LITERAL RHS equal to the field value DOES match. This proves
+	// the eq operator + field lookup actually work, so a `false` from the `.value` form
+	// below genuinely means "not substituted" and not a rotted harness (a future beta
+	// renaming `eq`, changing field resolution, or making Evaluate error would otherwise
+	// return false for an unrelated reason and the tripwire would silently stay green when
+	// #519 actually lands — the exact failure a canary exists to prevent).
+	control := expression.LogicalExpression{
+		Logic: "and",
+		Conditions: []expression.ConditionExpression{{
+			Field:    "test.attempt.count",
+			Operator: "eq",
+			Value:    sentinel,
+		}},
+	}
+	if matched, err := ev.Evaluate(entity, control); err != nil || !matched {
+		t.Fatalf("#519 positive control failed (matched=%v err=%v): the eq operator or "+
+			"field lookup changed shape — re-verify this tripwire's anchor before trusting it", matched, err)
+	}
+
+	// Compare the first predicate against the SECOND predicate's value via the drafted
+	// `.value` field-to-field form. Today the RHS is compared as the literal string
+	// "$entity.triple.test.budget.value" (never substituted), so it cannot equal the
+	// sentinel and the condition does NOT match. An error here is unexpected today (the
+	// RHS is just an unmatched literal) — treat it as the anchor rotting, not a pass.
 	expr := expression.LogicalExpression{
 		Logic: "and",
 		Conditions: []expression.ConditionExpression{{
@@ -61,8 +83,11 @@ func TestTripwire519ScalarValueSubstitution(t *testing.T) {
 			Value:    "$entity.triple.test.budget.value",
 		}},
 	}
-
-	matched, _ := expression.NewExpressionEvaluator().Evaluate(entity, expr)
+	matched, err := ev.Evaluate(entity, expr)
+	if err != nil {
+		t.Fatalf("#519 tripwire: evaluating the `.value` form errored (%v) — unexpected on "+
+			"beta.146 (the RHS should be an inert literal); re-verify the anchor", err)
+	}
 	if matched {
 		t.Fatal("TRIPWIRE #519 FIRED: rule conditions now resolve " +
 			"`$entity.triple.X.value` field-to-field. Do the mechanical upgrade — " +
@@ -122,10 +147,17 @@ func TestTripwire528PerSpawnMaxIterations(t *testing.T) {
 // typed signal, make the escalate route reason-aware (exhaustion → escalate
 // toward the human; transient model error → retry within budget) instead of
 // treating every failed outcome identically.
+//
+// COVERAGE CAVEAT (Go can't reflect package constants): the OTHER plausible #529
+// shape is a NEW distinct outcome constant (e.g. agentic.OutcomeExhausted) rather
+// than a LoopFailedEvent field. Anchor 3 reflects struct FIELDS and will not see a
+// new constant, and there is no runtime way to enumerate a package's constants — so
+// that shape is NOT auto-detected here. On every semstreams bump, re-read this ask
+// manually: if exhaustion gained a distinct terminal outcome, do the upgrade above.
 func TestTripwire529UniformExhaustionReason(t *testing.T) {
-	// Anchor 1: exhaustion still terminates as the generic failed outcome, and
-	// there is no exhaustion-specific outcome constant. Referencing exactly the
-	// four known outcomes is a compile-time pin on the terminal set.
+	// Anchor 1: the four outcome constants this rail routes over still EXIST (a
+	// compile-time floor — it does NOT prove the set is exactly four; a new
+	// OutcomeExhausted would compile fine here, see the coverage caveat above).
 	_ = []string{
 		agentic.OutcomeSuccess,
 		agentic.OutcomeFailed,
