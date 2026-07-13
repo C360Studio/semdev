@@ -10,7 +10,6 @@ import (
 	"github.com/c360studio/semdev/internal/verify"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/types"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -74,7 +73,7 @@ func verdictOf(o verify.Outcome) verify.Verdict { return verify.Verdict{Outcome:
 // verify.result (or "") plus the tool result.
 func execWith(t *testing.T, clones VerifyClones, prover Prover, w *fakeWriter) (string, agentic.ToolResult) {
 	t.Helper()
-	e := New(clones, fakeManifests{m: harness.GoProfile()}, prover, nil, types.PlatformMeta{}, w, nil)
+	e := New(clones, fakeManifests{m: harness.GoProfile()}, prover, nil, w, nil)
 	res, err := e.Execute(context.Background(), callVerify())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -120,85 +119,37 @@ func TestVerifyPassStampsResult(t *testing.T) {
 	}
 }
 
-// The chaining marker: verify_artifact stamps dev.verified on ITS OWN verify loop (value =
-// the outcome) after verify.result, so the coherence station (8D) fires on it. Stamped for
-// a FAIL too (the coherence gate must still block on a non-pass verify).
-func TestVerifyStampsVerifiedMarkerOnLoopEvenWhenFailing(t *testing.T) {
-	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+// A genuine cold failure (fabrication / non-self-contained fix) → verify.result = fail,
+// and it StopLoops (a terminal verdict). The delivery route (08b) reads verify.result=fail
+// off the run and parks — verify_artifact stamps NO loop chaining marker (the reshape, R1).
+func TestVerifyFailStampsResultAndStopsLoop(t *testing.T) {
 	w := &fakeWriter{}
-	e := New(fakeClones{root: "/c"}, fakeManifests{m: harness.GoProfile()}, &fakeProver{verdict: verdictOf(verify.OutcomeFail)}, nil, platform, w, nil)
-	call := callVerify()
-	call.LoopID = "verify-loop-abc"
-	res, err := e.Execute(context.Background(), call)
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error != "" {
-		t.Fatalf("a failing verdict is data, not a tool error: %s", res.Error)
-	}
-	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, call.LoopID)
-	if err != nil {
-		t.Fatalf("loop entity id: %v", err)
-	}
-	var found bool
-	for _, batch := range w.replaces {
-		for _, tr := range batch {
-			if tr.Predicate != VerifiedPredicate {
-				continue
-			}
-			found = true
-			if tr.Subject != loopEntityID {
-				t.Errorf("%s stamped on %q, want the verify LOOP entity %q", VerifiedPredicate, tr.Subject, loopEntityID)
-			}
-			if tr.Source != Source {
-				t.Errorf("%s Source = %q, want %q (G5)", VerifiedPredicate, tr.Source, Source)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("verify_artifact must stamp %s on its loop (even for a fail) so the coherence station fires", VerifiedPredicate)
-	}
-}
-
-// A genuine cold failure (fabrication / non-self-contained fix) → verify.result = fail.
-func TestVerifyFailStampsResult(t *testing.T) {
-	got, _ := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeFail)}, &fakeWriter{})
+	got, res := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeFail)}, w)
 	if got != string(verify.OutcomeFail) {
 		t.Fatalf("verify.result = %q, want fail", got)
+	}
+	if !res.StopLoop {
+		t.Error("a terminal (fail) verdict must StopLoop — the forced verify loop is one turn")
+	}
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == "dev.verified" {
+				t.Errorf("verify_artifact must no longer stamp dev.verified (the delivery route reads verify.result on the run): saw it on %q", tr.Subject)
+			}
+		}
 	}
 }
 
 // A transport fault classified by the proof → verify.result = retry (never a terminal
-// reject of a good artifact). AND a retry must RE-RUN, not chain: it stamps verify.result
-// but NOT the dev.verified marker, and it does NOT StopLoop — so the forced verify loop
-// re-runs the cold proof rather than parking a good artifact on a single flake (SB5; the
-// reviewer's 8D MEDIUM).
-func TestVerifyRetryStampsResultButDoesNotChainOrStopLoop(t *testing.T) {
-	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+// reject of a good artifact). A retry must RE-RUN, not terminate: it stamps verify.result
+// (evidence) and does NOT StopLoop — so the forced verify loop re-runs the cold proof
+// rather than parking a good artifact on a single flake. The delivery route keys on
+// verify.result eq "pass"/"fail", so a "retry" value never triggers delivery (SB5).
+func TestVerifyRetryStampsResultButDoesNotStopLoop(t *testing.T) {
 	w := &fakeWriter{}
-	e := New(fakeClones{root: "/c"}, fakeManifests{m: harness.GoProfile()}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, nil, platform, w, nil)
-	call := callVerify()
-	call.LoopID = "verify-loop-retry"
-	res, err := e.Execute(context.Background(), call)
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	var result, marker string
-	for _, batch := range w.replaces {
-		for _, tr := range batch {
-			switch tr.Predicate {
-			case ResultPredicate:
-				result = tr.Object.(string)
-			case VerifiedPredicate:
-				marker = tr.Object.(string)
-			}
-		}
-	}
-	if result != string(verify.OutcomeRetry) {
-		t.Errorf("verify.result = %q, want retry (evidence of the attempt)", result)
-	}
-	if marker != "" {
-		t.Errorf("a retry must NOT stamp the dev.verified marker (it re-runs, does not chain), got %q", marker)
+	got, res := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, w)
+	if got != string(verify.OutcomeRetry) {
+		t.Errorf("verify.result = %q, want retry (evidence of the attempt)", got)
 	}
 	if res.StopLoop {
 		t.Error("a retry must NOT StopLoop — the forced verify loop re-runs the cold proof")
@@ -255,7 +206,7 @@ func TestVerifyReVerifyUpserts(t *testing.T) {
 
 // Schema-only registration (nil clones/manifests/prover/writer) fails loudly.
 func TestVerifyFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil, nil, types.PlatformMeta{}, nil, nil).Execute(context.Background(), callVerify())
+	res, err := New(nil, nil, nil, nil, nil, nil).Execute(context.Background(), callVerify())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

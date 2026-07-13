@@ -20,23 +20,23 @@
 
 ## 4. One bounded multi-turn developer loop
 
-- [ ] 4.1 Drop `StopLoop` from `apply_patch` and `measure_task` results; `measure_task` remains outcome-parameter-free and returns real output in-loop (G3)
-- [ ] 4.2 New `read_workspace` tool: path-guarded, checkout-rooted, read-only, paginated under the 32KB tool-result cap (framework-alignment note + registry entry, G1)
-- [ ] 4.3 New `read_diff` tool for the reviewer: returns `git diff <base>..<attempt.commit>` (G1 note + registry entry)
-- [ ] 4.4 Developer dispatch: explicit `tools` allowlist (`read_workspace`, `apply_patch`, `measure_task`, `ask_human`), `tool_choice: auto`, dev-loop component `max_iterations` set (8 proposed)
-- [ ] 4.5 Context-complete prompts: template the full task contract (goal, `target_files`, `test_command`, assumptions, non-goals) into developer and reviewer prompts; re-entry prompts add `review.findings` + prior measurement state
-- [ ] 4.6 Config lint: every model-publishing spawn declares an explicit tool allowlist (test fails on an allowlist-less spawn)
-- [ ] 4.7 Reviewer loop: allowlist (`read_workspace`, `read_diff`, `submit_review`, `ask_human`), `tool_choice: auto`, `submit_review` terminal; `submit_review` stamps `review.verdict.0` + `review.findings.0` (add `review.findings.<i>` to vocabulary)
+- [x] 4.1 Drop `StopLoop` from `apply_patch` and `measure_task` results; `measure_task` remains outcome-parameter-free and returns real output in-loop (G3)
+- [x] 4.2 New `read_workspace` tool: path-guarded, checkout-rooted, read-only, paginated under the 32KB tool-result cap (framework-alignment note + registry entry, G1)
+- [x] 4.3 New `read_diff` tool for the reviewer: returns `git diff <base>..HEAD` over the committed checkout (HEAD == `attempt.commit` under the one-in-flight invariant). NOTE: the explicit-SHA pinning of `CloneForVerify`/`read_diff` (the group-2 review carry-forward) is DEFERRED — nil at M0 (HEAD is provably the reviewed attempt under serialization), tracked as a carry-forward for multi-attempt concurrency
+- [x] 4.4 Developer dispatch: explicit `tools` allowlist (`read_workspace`, `apply_patch`, `measure_task`, `ask_human`), `tool_choice: auto`, dev-loop component `max_iterations` set (8, in the bootstrap — per-spawn is #528)
+- [x] 4.5 Context-complete prompts: instruct the developer/reviewer to read the full task contract (goal, `target_files`, `test_command`, assumptions, non-goals) via `query_entity` + `read_workspace` (a rule cannot template cross-entity task.spec fields, R7); re-entry prompts point at `review.findings.0`
+- [x] 4.6 Config lint: every model-publishing spawn declares an explicit tool allowlist (`TestEveryModelSpawnDeclaresToolsAllowlist`); `allowed_tools` populated (closes MEDIUM-3)
+- [x] 4.7 Reviewer loop: allowlist (`read_workspace`, `read_diff`, `submit_review`, `ask_human`), `tool_choice: auto`, `submit_review` terminal; `submit_review` stamps `review.verdict.0` + `review.findings.0` (added `review.findings.<i>` to vocabulary)
 
 ## 5. Rule-native routing: delete the route-token layer
 
-- [ ] 5.1 Red-first pins for the route family: advance (passed + floor-clean), retry (red/absent measurement within budget), escalate (`length_eq` budget), rejection re-entry, rejection-beyond-budget park — offline rule-evaluation tests
-- [ ] 5.2 Delete `internal/tools/checkgate` + `internal/tools/checkcoherence`, their registrations, and the `dev.gate_decision` / `dev.coherence_decided` predicates
-- [ ] 5.3 Delete relay rules dev-from-task/06,07,08a/b/c,11,12a/b and the ten relay-marker predicates; author the replacing route rules (same commit — the arc stays runnable)
-- [ ] 5.4 Attempt accounting: the dispatching rule appends `task.attempt.0 = $instance` at spawn time; constant budget 3 in route literals; redelivered-append regression pin (count rises exactly +1)
-- [ ] 5.5 Reviewer rejection routes: `changes_requested` + budget remaining → fresh developer attempt with findings; `changes_requested` + `length_eq 3` → park (D16 honored)
-- [ ] 5.6 Widen the G2 conformance census: zero product-Go functions deriving routing tokens consumed by rule dispatch conditions (the pin that would have caught check_gate)
-- [ ] 5.7 Bootstrap config: remove deleted rules, add new rules to the explicit list, bump the config version; delivery route reads `verify.result` + `review.verdict.0` + `openspec.validated` directly
+- [x] 5.1 Red-first pins for the route family: advance/not_clean/retry/escalate totality + mutual exclusion, review approved/retry/park/no-verdict, delivery coherent/blocked — offline rule-evaluation tests (`TestFloorsRouteTotalityAndSelfExtinguish`, `TestReviewRouteTotalityAndSelfExtinguish`, `TestDeliveryRouteTotalityAndSelfExtinguish`)
+- [x] 5.2 Delete `internal/tools/checkgate` + `internal/tools/checkcoherence`, their registrations, and the `dev.gate_decision` / `dev.coherence_decided` predicates
+- [x] 5.3 Delete relay rules (old 05 measure, 06 floors, 07 gate, 08a/b/c, 09 review, 10 verify, 11 coherence, 12a/b) and the relay-marker predicates; author the replacing route rules (05 floors-trigger + 06a-d floors route + 07a-d review route + 08a/b delivery route, same commit)
+- [x] 5.4 Attempt accounting: the dispatching rules (04/06c/07b) append `task.attempt.0 = $instance` at spawn time; constant budget 3 in route literals (via the `route.attempt` mirror + `length_lt 3`/`length_gt 2`). NOTE: an explicit redelivered-append regression pin is a carry-forward; robustness is by design (storage dedups exact triples, and `length_gt 2` catches an over-count fail-closed — pinned in `TestFloorsRouteTotalityAndSelfExtinguish`)
+- [x] 5.5 Reviewer rejection routes: `changes_requested` + budget remaining → fresh developer attempt (D16 re-entry, 07b); `changes_requested` + exhausted → park (07c); no-verdict → park (07d)
+- [x] 5.6 Widen the G2 conformance census: zero Go-derived routing tokens consumed by rule dispatch conditions (`TestNoGoDerivedRoutingTokens` — the pin that would have caught check_gate)
+- [x] 5.7 Bootstrap config: removed deleted rules, added the new rules to the explicit list, bumped the config version (0.16.0), set `max_iterations` 8, populated `allowed_tools`; delivery route reads `verify.result` + `review.verdict.0` + `openspec.validated` directly
 
 ## 6. Deterministic stations as publish-triggered components
 

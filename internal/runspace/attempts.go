@@ -58,7 +58,7 @@ func (a *Attempts) Resolve(ctx context.Context, runEntityID string, taskIndex in
 
 	files := make([]floors.File, 0, len(targets))
 	for _, rel := range targets {
-		abs, err := safeJoin(root, rel)
+		abs, err := SafeJoin(root, rel)
 		if err != nil {
 			return floors.Attempt{}, err
 		}
@@ -116,10 +116,13 @@ func decodeStringArray(tr message.Triple, predicate string) ([]string, error) {
 	return out, nil
 }
 
-// safeJoin resolves a repo-relative path within root, rejecting any path that escapes the
+// SafeJoin resolves a repo-relative path within root, rejecting any path that escapes the
 // checkout (a `../` traversal or an absolute path) — the artifact's declared targets must
-// stay inside its own tree.
-func safeJoin(root, rel string) (string, error) {
+// stay inside its own tree. Exported so the read-side tools (read_workspace) share the SAME
+// containment guard the write side (Attempts, the Patcher) enforces — one path-guard
+// implementation, not a re-derived copy (DRY; a divergent read-side guard would be a silent
+// escape surface).
+func SafeJoin(root, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("runspace: target file %q must be repo-relative, not absolute", rel)
 	}

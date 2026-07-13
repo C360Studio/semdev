@@ -131,8 +131,14 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.String("attempt_commit", commitSHA),
 		slog.Any("files", touched))
 
+	// NO StopLoop (the reshape, group 4): apply_patch runs INSIDE Amelia's bounded
+	// multi-turn loop (tool_choice=auto). The tool result — the applied files + the commit
+	// SHA — is her feedback; she continues (typically to measure_task) rather than the loop
+	// ending here. The loop terminates when she stops calling tools (success) or hits the
+	// component iteration cap (failed); routing reads the harness-stamped facts, never her
+	// stopping decision (G3).
 	body, _ := json.Marshal(map[string]any{"applied": true, "files": touched, "commit": commitSHA})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(body), StopLoop: true}, nil
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(body)}, nil
 }
 
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {

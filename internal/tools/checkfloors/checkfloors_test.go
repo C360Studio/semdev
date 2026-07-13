@@ -24,6 +24,48 @@ func (f fakeAttempts) Resolve(_ context.Context, _ string, _ int) (floors.Attemp
 	return f.attempt, f.err
 }
 
+// fakeReader replays the run's measurement + attempt facts the route mirror reads
+// (measurement.result.<i>.passed, task.attempt.<i>), filtered by the queried prefix.
+type fakeReader struct {
+	facts []message.Triple
+	err   error
+}
+
+func (r fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.Triple, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	var out []message.Triple
+	for _, tr := range r.facts {
+		if strings.HasPrefix(tr.Predicate, prefix) {
+			out = append(out, tr)
+		}
+	}
+	return out, nil
+}
+
+// measuredPassed builds the measurement.result.<i>.passed fact the route mirror copies.
+func measuredPassed(idx int, passed string) message.Triple {
+	return message.Triple{Predicate: "measurement.result." + strconv.Itoa(idx) + ".passed", Object: passed, Source: "measurement-harness"}
+}
+
+// measuredCommit builds the measurement.result.<i>.commit fact that binds a measurement to
+// the snapshot it ran against (the semstreams-reviewer HIGH fix: a green is trusted only
+// when this equals the run's current attempt.commit).
+func measuredCommit(idx int, sha string) message.Triple {
+	return message.Triple{Predicate: "measurement.result." + strconv.Itoa(idx) + ".commit", Object: sha, Source: "measurement-harness"}
+}
+
+// attemptCommitFact builds the run's current attempt.commit (apply_patch's latest SHA).
+func attemptCommitFact(sha string) message.Triple {
+	return message.Triple{Predicate: "attempt.commit", Object: sha, Source: "patch-committer"}
+}
+
+// attemptFact builds one appended task.attempt.<i> counter triple (object = a loop id).
+func attemptFact(idx int, loopID string) message.Triple {
+	return message.Triple{Predicate: "task.attempt." + strconv.Itoa(idx), Object: loopID, Source: "dev-dispatch-rule"}
+}
+
 type fakeWriter struct {
 	owned    []string // predicates ReadOwnedPredicates returns (the stale set)
 	replaces [][]message.Triple
@@ -74,7 +116,7 @@ func vacuousAttempt() floors.Attempt {
 
 func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[string]string, agentic.ToolResult) {
 	t.Helper()
-	res, err := New(fakeAttempts{attempt: attempt}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(idx))
+	res, err := New(fakeAttempts{attempt: attempt}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(idx))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -203,7 +245,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 		floors.FindingPrefix + "0." + floors.FloorVacuousTest + "." + floors.FactPassed,
 	}
 	w := &fakeWriter{owned: stale}
-	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
+	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -230,7 +272,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 // A negative task index is rejected before any resolve or stamp.
 func TestCheckFloorsRejectsNegativeIndex(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(fakeAttempts{attempt: passingAttempt()}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(-1))
+	res, err := New(fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(-1))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -246,7 +288,7 @@ func TestCheckFloorsRejectsNegativeIndex(t *testing.T) {
 // silent pass.
 func TestCheckFloorsResolveErrorFails(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
+	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -260,7 +302,7 @@ func TestCheckFloorsResolveErrorFails(t *testing.T) {
 
 // Schema-only registration (nil attempts/writer) fails loudly if executed.
 func TestCheckFloorsFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
+	res, err := New(nil, nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -290,17 +332,29 @@ func TestCheckFloorsSchemaTakesOnlyTaskSelector(t *testing.T) {
 	}
 }
 
-// The chaining marker: check_floors stamps dev.floors_done on ITS OWN loop entity
-// (value = the task index) after recording the findings, so the gate-trigger
-// (dev-from-task/07) fires on the floors loop. It is stamped for a REJECTING run too
-// (the gate decides retry), so a fabrication finding still chains to the gate.
-func TestCheckFloorsStampsFloorsDoneMarkerOnLoopEvenWhenRejecting(t *testing.T) {
+// The ROUTE MIRROR: check_floors copies the routing inputs onto ITS OWN floors loop so
+// the rule-native floors route (advance / not_clean → retry / escalate) can fire on
+// them. route.passed = the run's measurement, route.rejected = its own aggregate, and
+// route.attempt.<i> = the append-mirror of task.attempt.<i>. All carry the route-mirror
+// Source (a distinct writer from floor-tools, so no predicate gains two writers, G5). It
+// is stamped for a REJECTING run too (the route decides retry).
+func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 	w := &fakeWriter{}
 	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	// The run measured GREEN but the floors REJECT (vacuous test) — route.passed=true,
+	// route.rejected=true (the "cache-masked fabrication that passes warm" shape). Two
+	// attempts already counted (task.attempt.0 has two objects). The measurement is bound to
+	// the run's CURRENT attempt.commit (sha-b), so the green is trusted (not stale).
+	reader := fakeReader{facts: []message.Triple{
+		measuredPassed(0, "true"),
+		measuredCommit(0, "sha-b"),
+		attemptCommitFact("sha-b"),
+		attemptFact(0, "dev-loop-1"),
+		attemptFact(0, "dev-loop-2"),
+	}}
 	call := callFor(0)
 	call.LoopID = "floors-loop-abc"
-	// A vacuous test → the floors REJECT; the marker must still land.
-	res, err := New(fakeAttempts{attempt: vacuousAttempt()}, w, platform, nil).Execute(context.Background(), call)
+	res, err := New(fakeAttempts{attempt: vacuousAttempt()}, reader, w, platform, nil).Execute(context.Background(), call)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -311,42 +365,109 @@ func TestCheckFloorsStampsFloorsDoneMarkerOnLoopEvenWhenRejecting(t *testing.T) 
 	if err != nil {
 		t.Fatalf("loop entity id: %v", err)
 	}
-	var found bool
+	var passed, rejected string
+	attemptObjs := map[string]bool{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate != FloorsDonePredicate {
-				continue
+			switch tr.Predicate {
+			case RoutePassedPredicate, RouteRejectedPredicate, RouteAttemptPrefix + "0":
+				if tr.Subject != loopEntityID {
+					t.Errorf("route mirror %q stamped on %q, want the floors LOOP entity %q", tr.Predicate, tr.Subject, loopEntityID)
+				}
+				if tr.Source != RouteMirrorSource {
+					t.Errorf("route mirror %q Source = %q, want %q (G5)", tr.Predicate, tr.Source, RouteMirrorSource)
+				}
 			}
-			found = true
-			if tr.Subject != loopEntityID {
-				t.Errorf("%s stamped on %q, want the floors LOOP entity %q (not the run)", FloorsDonePredicate, tr.Subject, loopEntityID)
-			}
-			if tr.Source != Source {
-				t.Errorf("%s Source = %q, want %q (G5)", FloorsDonePredicate, tr.Source, Source)
-			}
-			if tr.Object.(string) != "0" {
-				t.Errorf("%s object = %q, want the task index \"0\"", FloorsDonePredicate, tr.Object)
+			switch tr.Predicate {
+			case RoutePassedPredicate:
+				passed = tr.Object.(string)
+			case RouteRejectedPredicate:
+				rejected = tr.Object.(string)
+			case RouteAttemptPrefix + "0":
+				attemptObjs[tr.Object.(string)] = true
 			}
 		}
 	}
-	if !found {
-		t.Errorf("check_floors must stamp %s on its loop (even for a rejecting run) so the gate-trigger fires", FloorsDonePredicate)
+	if passed != "true" {
+		t.Errorf("route.passed = %q, want the measurement copy \"true\"", passed)
+	}
+	if rejected != "true" {
+		t.Errorf("route.rejected = %q, want the vacuous-test rejection \"true\"", rejected)
+	}
+	if len(attemptObjs) != 2 || !attemptObjs["dev-loop-1"] || !attemptObjs["dev-loop-2"] {
+		t.Errorf("route.attempt.0 must mirror both task.attempt.0 objects, got %v", attemptObjs)
 	}
 }
 
-// Without a LoopID (unit/registration path) the findings still land but the marker is
-// skipped — a missing marker never fails a recorded findings write.
-func TestCheckFloorsWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
+// Fail-closed: when the run has NO measurement (Amelia stopped without measuring),
+// route.passed is copied as "false" — the route treats it as a red attempt, not green.
+func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
+	w := &fakeWriter{}
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	call := callFor(0)
+	call.LoopID = "floors-loop-xyz"
+	// No measurement fact seeded → route.passed must fail closed to "false".
+	res, err := New(fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, platform, nil).Execute(context.Background(), call)
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	var sawPassed bool
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == RoutePassedPredicate {
+				sawPassed = true
+				if tr.Object.(string) != "false" {
+					t.Errorf("route.passed with no measurement must fail closed to \"false\", got %q", tr.Object)
+				}
+			}
+		}
+	}
+	if !sawPassed {
+		t.Error("check_floors must always stamp route.passed (fail-closed) so the route can fire")
+	}
+}
+
+// Fail-closed on a STALE green (the semstreams-reviewer HIGH): a green measurement bound to
+// a PRIOR snapshot (measurement.result.0.commit=sha-a) must NOT advance a later attempt that
+// was re-applied to a new snapshot (attempt.commit=sha-b) but never re-measured. route.passed
+// mirrors "false" so the route treats it as red (not-clean → retry), never a stale advance.
+func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
+	w := &fakeWriter{}
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	call := callFor(0)
+	call.LoopID = "floors-loop-stale"
+	// Green measurement bound to sha-a, but the run has since been re-applied to sha-b.
+	reader := fakeReader{facts: []message.Triple{
+		measuredPassed(0, "true"),
+		measuredCommit(0, "sha-a"),
+		attemptCommitFact("sha-b"),
+	}}
+	res, err := New(fakeAttempts{attempt: passingAttempt()}, reader, w, platform, nil).Execute(context.Background(), call)
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == RoutePassedPredicate && tr.Object.(string) != "false" {
+				t.Errorf("route.passed on a STALE green (measured sha-a, current sha-b) must be \"false\", got %q — a stale measurement must not advance a re-applied-but-unmeasured attempt", tr.Object)
+			}
+		}
+	}
+}
+
+// Without a LoopID (unit/registration path) the findings still land but the route
+// mirror is skipped — a missing mirror never fails a recorded findings write.
+func TestCheckFloorsWithoutLoopIDSkipsMirrorButRecords(t *testing.T) {
 	w := &fakeWriter{}
 	facts, res := run(t, passingAttempt(), w, 0) // callFor sets no LoopID
 	if res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
-	if _, ok := facts[FloorsDonePredicate]; ok {
-		t.Errorf("no LoopID → the floors-done marker must be skipped, but %s was stamped", FloorsDonePredicate)
+	if _, ok := facts[RoutePassedPredicate]; ok {
+		t.Errorf("no LoopID → the route mirror must be skipped, but %s was stamped", RoutePassedPredicate)
 	}
 	if facts[floors.FindingPrefix+"0."+floors.FactRejected] != "false" {
-		t.Error("the findings must still be recorded when the marker is skipped")
+		t.Error("the findings must still be recorded when the mirror is skipped")
 	}
 }
 

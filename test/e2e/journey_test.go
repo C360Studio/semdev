@@ -4,8 +4,11 @@
 // in-process mock LLM (zero paid tokens) and drives the whole issue→PR arc
 // through it — front door → issue_intake → create_change → validate → human
 // approval → project task.spec → provision + prove-cold sandbox → dispatch
-// (Amelia) → apply_patch → measure in-container → structural floors → gate →
-// review (Quinn) → cold clean-room verify → coherence → open_pr → pr.ref.
+// Amelia's BOUNDED MULTI-TURN dev loop (apply_patch → measure in-container →
+// stop) → structural floors + route mirror → FLOORS ROUTE advance → review
+// (Quinn) → REVIEW ROUTE approved → cold clean-room verify → DELIVERY ROUTE
+// coherent → open_pr → pr.ref. Routing is RULE-NATIVE (the reshape deleted the
+// check_gate/check_coherence route-token tools — routes compose from harness facts).
 //
 // This is a bridge proof, NOT a completeness claim (G7/G10): it proves the rail
 // CONNECTS end-to-end under the mock — that every station's rules, tools, and
@@ -83,34 +86,22 @@ const journeyDevRewakeMarker = "Begin developing"
 // (dev-from-task/04-dispatch-developer.json) the mock's apply_patch turn guards on.
 const journeyDeveloperMarker = "SEMDEV DEVELOPER"
 
-// journeyMeasureMarker is a distinctive substring of the measure prompt
-// (dev-from-task/05-measure-developed-task.json) the mock's measure_task turn guards
-// on — the prompt threads no slug/ref, so this stable phrase keys the positional cursor.
-const journeyMeasureMarker = "measure the developed task"
-
 // journeyFloorsMarker is a distinctive substring of the floors prompt
-// (dev-from-task/06-check-floors.json) the mock's check_floors turn guards on.
-const journeyFloorsMarker = "run the structural floors"
-
-// journeyGateMarker is a distinctive substring of the gate prompt
-// (dev-from-task/07-gate-decision.json) the mock's check_gate turn guards on — the
-// prompt threads no slug/ref, so this stable phrase keys the positional cursor.
-const journeyGateMarker = "gate the attempt"
+// (dev-from-task/05-floors-trigger.json) the mock's check_floors turn guards on. Measure
+// moved INTO Amelia's loop (the reshape), so there is no separate measure/gate turn — the
+// measure_task turn is guarded by Amelia's own prompt (journeyDeveloperMarker) instead.
+const journeyFloorsMarker = "structural floors"
 
 // journeyReviewMarker is a distinctive substring of Quinn's review prompt
-// (dev-from-task/09-review-cleared-task.json) the mock's submit_review turn guards on.
+// (dev-from-task/06a-route-advance.json) the mock's submit_review turn guards on.
 const journeyReviewMarker = "SEMDEV REVIEWER"
 
 // journeyVerifyMarker is a distinctive substring of the verify prompt
-// (dev-from-task/10-verify-reviewed-task.json) the mock's verify_artifact turn guards on.
+// (dev-from-task/07a-review-approved.json) the mock's verify_artifact turn guards on.
 const journeyVerifyMarker = "clean-room COLD verify"
 
-// journeyCoherenceMarker is a distinctive substring of the coherence-gate prompt
-// (dev-from-task/11-coherence-gate.json) the mock's check_coherence turn guards on.
-const journeyCoherenceMarker = "roll up the delivery coherence gate"
-
 // journeyOpenPRMarker is a distinctive substring of the open_pr prompt
-// (dev-from-task/12a-open-pr.json) the mock's open_pr turn guards on.
+// (dev-from-task/08a-delivery-open-pr.json) the mock's open_pr turn guards on.
 const journeyOpenPRMarker = "Open the pull request"
 
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
@@ -145,15 +136,15 @@ var wantAgenticHealthy = []string{
 // TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
 // admitted issue's coordinator wake to the front door and prove the whole
 // issue→PR arc CONNECTS through the real runtime — the coordinator routes, the
-// run mints, the change authors + validates, the human approves, the dev loop
-// develops → measures → floors → gates, review clears, cold verify passes, the
-// coherence gate rolls up, and open_pr records pr.ref. A bridge proof of
-// connection, not a claim of completeness (G7/G10).
+// run mints, the change authors + validates, the human approves, Amelia's bounded
+// multi-turn loop develops → measures in-loop, the floors route advances, Quinn's
+// review approves, the cold verify passes, and the delivery route opens the PR
+// (pr.ref). Routing is rule-native. A bridge proof of connection, not a claim of
+// completeness (G7/G10).
 func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// The mock scripts the arc's sequential turns as a POSITIONAL sequence
-	// (cursor advances per matched tool call). The turns are causally ordered —
-	// each loop is spawned by a rule that fired on the prior loop's terminal — so
-	// the cursor lands each fixture on its turn:
+	// (cursor advances per matched tool call). The reshape makes Amelia's dev loop a
+	// BOUNDED MULTI-TURN loop, so the cursor now spans WITHIN her loop:
 	//   1. C1 front-door coordinator → decide(issue_intake)     [mints the run]
 	//   2. C2 re-woken coordinator   → decide(create_change)    [routes to author]
 	//   3. A1 authoring coordinator  → create_change(<change>)  [emits the change]
@@ -161,27 +152,23 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	//   5. P1 projection coordinator  → project_tasks(<slug>)   [approval → task.spec]
 	//   6. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
 	//   7. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
-	//   8. D1 developer (Amelia)     → apply_patch(fix diff)    [authors the fix in-checkout]
-	//   9. M1 measure coordinator    → measure_task(index 0)    [in-container go test, real]
-	//  10. F1 floors coordinator     → check_floors(index 0)    [structural floors on the diff]
-	//  11. G1 gate coordinator       → check_gate(index 0)      [advance/retry/escalate route]
+	//   8. D-a developer (Amelia)    → apply_patch(fix diff)    [authors the fix, tool_choice=auto]
+	//   9. D-b developer (Amelia)    → measure_task(index 0)    [measures IN-LOOP, real go test]
+	//  10. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
+	//  11. F1 floors coordinator     → check_floors(index 0)    [floors + route mirror on its loop]
 	//  12. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
 	//  13. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
-	//  14. CO1 coherence coordinator → check_coherence()        [roll up verify+validate+review]
-	//  15. PR1 delivery coordinator  → open_pr()                [record pr.ref — the PR]
-	// Turns 1–3 mark on the issue ref (each rule threads the prior decision reason,
-	// which carries it); turns 4 and 5 thread the slug (validate via the authored
-	// marker, projection via the run-level openspec.change.slug pointer), so they
-	// mark on the slug; turns 6–15 thread the run entity id, so they mark on a stable
-	// phrase of their prompts (provision, dev re-wake, developer, measure, floors, gate,
-	// review, verify, coherence, open_pr). The cursor — not the marker — distinguishes the
-	// turns: projection → provision → dev re-wake → dispatch → measure → floors → gate →
-	// review → verify → coherence → open_pr is serialized by the rule gates (each forced
-	// turn chains off the prior loop's terminal marker — dev.measure_done → dev.floors_done →
-	// dev.gate_decision(advance) → dev.reviewed → dev.verified → dev.coherence_decided —
-	// with review co-firing on the gate advance and open_pr on the coherent decision), so no
-	// two forced turns race. An unscripted turn returns mockllm.UnmatchedSentinel, failing
-	// loudly not green.
+	//  14. PR1 delivery coordinator  → open_pr()                [record pr.ref — the PR]
+	// Turns 8-10 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
+	// under tool_choice=auto the loop continues; her apply_patch AND measure_task turns both
+	// guard on her own prompt (journeyDeveloperMarker), and turn 10 finds no matching fixture
+	// at the cursor (the next is check_floors, keyed on "structural floors" which is not in
+	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
+	// her loop (StatusComplete → outcome=success). The route rules then chain the rest with NO
+	// model turns of their own: floors terminal → floors route (06a advance) spawns Quinn →
+	// review route (07a approved) spawns verify → delivery route (08a coherent) forces open_pr.
+	// 13 tool fixtures drive 14 model turns (turn 10 consumes no fixture). An unscripted turn
+	// returns mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -220,21 +207,21 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 				"reason": "the change is approved and the run resumed; develop the run's tasks",
 			}},
 		},
+		// Amelia's bounded multi-turn loop: apply_patch then measure_task, BOTH guarded by her
+		// own prompt (journeyDeveloperMarker) — the loop continues because neither StopLoops.
 		mockllm.Fixture{
 			Marker: journeyDeveloperMarker,
 			Tool:   &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}},
 		},
 		mockllm.Fixture{
-			Marker: journeyMeasureMarker,
+			Marker: journeyDeveloperMarker,
 			Tool:   &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}},
 		},
+		// (Amelia's 3rd turn matches no fixture here — the cursor sits on check_floors, whose
+		// marker is absent from her prompt — so the mock returns a completion and her loop ends.)
 		mockllm.Fixture{
 			Marker: journeyFloorsMarker,
 			Tool:   &mockllm.ToolCall{Name: "check_floors", Args: map[string]any{"task_index": 0}},
-		},
-		mockllm.Fixture{
-			Marker: journeyGateMarker,
-			Tool:   &mockllm.ToolCall{Name: "check_gate", Args: map[string]any{"task_index": 0}},
 		},
 		mockllm.Fixture{
 			Marker: journeyReviewMarker,
@@ -243,10 +230,6 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 		mockllm.Fixture{
 			Marker: journeyVerifyMarker,
 			Tool:   &mockllm.ToolCall{Name: "verify_artifact", Args: map[string]any{}},
-		},
-		mockllm.Fixture{
-			Marker: journeyCoherenceMarker,
-			Tool:   &mockllm.ToolCall{Name: "check_coherence", Args: map[string]any{}},
 		},
 		mockllm.Fixture{
 			Marker: journeyOpenPRMarker,
@@ -390,104 +373,89 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Assert a DEVELOPER loop bound to THIS run (agent.run.entity_id == runEntityID)
 	// reached agent.loop.outcome=success — proof the dispatch fired, Amelia inherited
 	// the run, apply_patch ran and applied cleanly. The fix actually working is proven
-	// by the in-container measure (group 7B); here we prove the author station chained.
+	// by the in-container measure (Amelia's in-loop turn); here we prove the author station chained.
 	requireDeveloperLoopCompleted(ctx, t, runEntityID)
 	t.Logf("station 10: developer dispatched — Amelia authored the fix via apply_patch (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 11 — the make-or-break payoff: the fix is MEASURED cold, in-container.
-	// The measure-trigger rule (dev-from-task/05) fires on Amelia's successful terminal
-	// and spawns a forced measure_task loop (run_scope=inherit), which Execs the task's
-	// frozen test command (`go test ./...`) IN the run's WARM sandbox container — the
-	// one provision_sandbox stood up over the SAME checkout apply_patch wrote — and
-	// stamps the harness-derived measurement.result.0. Because the developer's diff
-	// actually fixed the boundary bug, the in-container `go test` PASSES: assert
-	// measurement.result.0.passed == "true" — proof the whole loop did REAL work
-	// (author → apply → build cold → test), not theater. This is the exact class both
-	// predecessors faked (a hollow attempt that measured nothing). Also assert the
-	// attempt counter task.attempt.0 was appended (the budget/retry gate counts it, 7D).
-	// Red-first: disable dev-from-task/05 and this station times out; break the warm
-	// container (or measure over unpatched bytes) and passed comes back "false".
+	// Station 11 — the make-or-break payoff: the fix is MEASURED cold, IN-LOOP, in-container.
+	// The reshape moved measure INTO Amelia's bounded loop: her SECOND turn calls
+	// measure_task (no StopLoop), which Execs the task's frozen test command (`go test ./...`)
+	// IN the run's WARM sandbox container — the one provision_sandbox stood up over the SAME
+	// checkout apply_patch wrote — and stamps the harness-derived measurement.result.0 as her
+	// in-loop feedback. Because the developer's diff actually fixed the boundary bug, the
+	// in-container `go test` PASSES: assert measurement.result.0.passed == "true" — proof the
+	// loop did REAL work (author → apply → build cold → test), not theater. Also assert the
+	// attempt counter task.attempt.0 was appended (by dispatch at spawn, R3 — the route counts
+	// it against the budget). Red-first: break the warm container (or measure over unpatched
+	// bytes) and passed comes back "false".
 	requireMeasurementPassed(ctx, t, runEntityID)
 	requireTriplePresent(ctx, t, runEntityID, "task.attempt.0")
-	t.Logf("station 11: task measured in-container — measurement.result.0.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 11: task measured IN-LOOP, in-container — measurement.result.0.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 12 — the structural floors run on the developer's REAL diff. The
-	// floors-trigger (dev-from-task/06) fires on the measure loop's dev.measure_done
-	// marker (the warn-free loop-marker chain, NOT a #519 field-to-field run-fact
-	// trigger) and spawns a forced check_floors loop (run_scope=inherit), which runs the
-	// deterministic go/ast floors over the task's target files in the checkout — the
-	// SAME bytes measure ran over — and stamps the aggregate floor.finding.0.rejected +
-	// the per-floor findings. Because the fix is a clean edit (real test present, source
-	// parses, no stub/mock, targets authored), NO floor rejects: assert
-	// floor.finding.0.rejected == "false" — the harness-derived structural verdict the
-	// group-7D gate routes advance on. Also assert the presence floor ran (the H1 gate
-	// that closes the all-absent-reads-green hole). Red-first: disable dev-from-task/06
-	// and this station times out.
+	// Station 12 — the structural floors run on the developer's REAL diff. The floors trigger
+	// (dev-from-task/05) fires on Amelia's DEVELOPER-loop TERMINAL (agent.loop.outcome ne "" —
+	// measure moved in-loop, so there is no separate measure loop) and spawns a forced
+	// check_floors loop (run_scope=inherit), which runs the deterministic go/ast floors over
+	// the task's target files in the checkout — the SAME bytes measure ran over — stamps the
+	// aggregate floor.finding.0.rejected + the per-floor findings on the run, AND mirrors the
+	// routing inputs (route.passed/route.rejected/route.attempt) onto its loop for the route.
+	// Because the fix is a clean edit (real test present, source parses, no stub/mock, targets
+	// authored), NO floor rejects: assert floor.finding.0.rejected == "false" — the structural
+	// verdict the floors route advances on. Also assert the presence floor ran (the H1 gate).
+	// Red-first: disable dev-from-task/05 and this station times out.
 	requireFloorsPassed(ctx, t, runEntityID)
 	t.Logf("station 12: structural floors ran on the diff — floor.finding.0.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 13 — the dev-loop GATE routes the attempt. The gate-trigger
-	// (dev-from-task/07) fires on the floors loop's dev.floors_done marker and spawns a
-	// forced check_gate loop (run_scope=inherit), which reads the recorded
-	// measurement.result.0.passed (true) + floor.finding.0.rejected (false) + the distinct
-	// task.attempt.0 count against task.spec.0.budget and DERIVES the route in Go (G3 — no
-	// model verdict). Because the attempt measured green and no floor rejected, the gate
-	// decides ADVANCE: it stamps dev.gate.0.decision=advance on the run, and the advance
-	// router (dev-from-task/08a) fires on the gate loop's dev.gate_decision marker and
-	// stamps dev.task_cleared.0 (the signal the clean-room verify station chains on).
-	// Assert BOTH — the harness-derived decision and the router's handoff fact. Red-first:
-	// disable dev-from-task/07 (no gate) or 08a (no cleared fact) and this station times out.
-	requireGateAdvanced(ctx, t, runEntityID)
-	t.Logf("station 13: the gate routed advance — dev.gate.0.decision=advance, task cleared for verify (mock RequestCount=%d)", mock.RequestCount())
-
-	// Station 14 — Quinn reviews the cleared task (D16 per-task review). The review-trigger
-	// (dev-from-task/09) co-fires on the gate loop's advance decision and spawns a forced
-	// submit_review loop (role=reviewer, run_scope=inherit), which reads the task's
-	// task.spec + measurement.result and DERIVES the floored verdict (G3 — no model
-	// outcome). Because the task measured green (measurement.result.0.passed=true) and the
-	// mock raises no findings, the verdict is approved: assert review.verdict.0 == approved
-	// — the per-task signal the open_pr coherence gate (8D) rolls up. Red-first: disable
-	// dev-from-task/09 and this station times out; break the measurement and the verdict
-	// comes back changes_requested.
+	// Station 13 — the FLOORS ROUTE advances (rule-native, the reshape replaced check_gate).
+	// The floors trigger (dev-from-task/05) fired on Amelia's DEVELOPER-loop terminal and
+	// spawned a forced check_floors loop, which ran the deterministic floors over the checkout
+	// AND MIRRORED the routing inputs onto its own loop: route.passed (=measurement.result.0.
+	// passed=true), route.rejected (=floor.finding.0.rejected=false), route.attempt.0 (the
+	// attempt mirror). The floors ROUTE (dev-from-task/06a) then fires ON THAT LOOP: because
+	// route.passed=true AND route.rejected=false, it ADVANCES — spawning Quinn's reviewer loop
+	// directly (NO gate tool, NO route-token, NO extra model turn for the route rule). Quinn
+	// reviews the cleared task (D16 per-task review): submit_review reads the task's task.spec
+	// + measurement.result and DERIVES the floored verdict (G3). Because the task measured
+	// green and the mock raises no findings, the verdict is approved: assert review.verdict.0
+	// == approved. Red-first: break the measurement and the floors route goes not_clean→retry
+	// instead of advance→review, so no verdict lands and this station times out.
 	requireReviewApproved(ctx, t, runEntityID)
-	t.Logf("station 14: Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 13: floors route advanced → Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 15 — the CLEAN-ROOM COLD VERIFY of the committed artifact (the make-or-break,
-	// now LIVE end-to-end). The verify-trigger (dev-from-task/10) fires on the review loop's
-	// dev.reviewed marker and spawns a forced verify_artifact loop (role=coordinator,
-	// run_scope=inherit — proving a role=reviewer inherit loop propagated the run anchor,
-	// the 8D forward-check). verify_artifact CLONES the run's checkout into a fresh dir,
-	// builds the operator-declared image, and proves the artifact resolves + passes its own
-	// tests COLD in a SEPARATE fresh container with a fresh dependency cache (the third
-	// sandbox instance) — the exact proof both predecessors faked. Because the fix is real
-	// and self-contained, the cold verify PASSES: assert verify.result == "pass". This runs
-	// the REAL docker cold proof on the committed fixture. Red-first: disable dev-from-task/10
-	// and this times out; a non-self-contained fix (or a warm-cache-masked fabrication) comes
-	// back "fail".
+	// Station 14 — the CLEAN-ROOM COLD VERIFY of the committed artifact (the make-or-break).
+	// The review ROUTE (dev-from-task/07a) fires on Quinn's loop reading the route.verdict
+	// mirror: because route.verdict=approved, it spawns a forced verify_artifact loop
+	// (run_scope=inherit — proving a role=reviewer inherit loop propagated the run anchor).
+	// verify_artifact CLONES the run's checkout into a fresh dir, builds the operator-declared
+	// image, and proves the artifact resolves + passes its own tests COLD in a SEPARATE fresh
+	// container with a fresh dependency cache. Because the fix is real and self-contained, the
+	// cold verify PASSES: assert verify.result == "pass". This runs the REAL docker cold proof.
+	// Red-first: a non-self-contained fix (or a warm-cache-masked fabrication) comes back "fail".
 	requireVerifyPassed(ctx, t, runEntityID)
-	t.Logf("station 15: clean-room COLD verify of the committed artifact — verify.result=pass (the fix is self-contained + reproducible) (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 14: clean-room COLD verify of the committed artifact — verify.result=pass (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 16 — the ISSUE→PR ARC CONNECTS end-to-end. The coherence gate (dev-from-task/11)
-	// fires on the verify loop's dev.verified marker and rolls up the three delivery signals —
-	// verify.result=pass ∧ openspec.validated ∧ every review.verdict=approved — deriving
-	// coherent; the coherent router (dev-from-task/12a) then forces open_pr, which records
-	// pr.ref. This is the bridge proof's terminal: under the mock, an issue drove all the way
-	// to a reviewed, clean-room-verified PR — the rail CONNECTS (it is not a completeness
-	// claim). Assert pr.ref is present (an M0 local-delivery stub — the real forge-io PR is a
-	// later group; the gate genuinely passed, only the delivery target is stubbed). Red-first:
-	// disable dev-from-task/11 or 12a and this times out; break any signal (verify/validate/
-	// review) and the gate blocks (parks) instead of delivering.
+	// Station 15 — the ISSUE→PR ARC CONNECTS end-to-end. The DELIVERY ROUTE (dev-from-task/08a)
+	// fires ON THE RUN (delivery is terminal, so it routes on run facts directly — no loop, no
+	// mirror, no check_coherence tool): because verify.result=pass AND review.verdict.0=approved
+	// AND openspec.validated present, it forces open_pr, which records pr.ref. This is the
+	// bridge proof's terminal: under the mock, an issue drove all the way to a reviewed,
+	// clean-room-verified PR — the rail CONNECTS (not a completeness claim). Assert pr.ref is
+	// present (an M0 local-delivery stub — the real forge-io PR is a later group; the gate
+	// genuinely passed, only the delivery target is stubbed). Red-first: break any signal
+	// (verify/validate/review) and the delivery route blocks (08b parks) instead of delivering.
 	requirePRDelivered(ctx, t, runEntityID)
-	t.Logf("station 16: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and open_pr recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and open_pr recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly fifteen model turns drove the FULL arc: …, V1 verify_artifact, CO1
-	// check_coherence, PR1 open_pr. The verify loop's dev.verified marker + the coherence
-	// loop's dev.coherence_decided marker are tool-owned (no extra model call). The two new
-	// turns since station 15 are the forced coherence loop (CO1) and the forced open_pr loop
-	// (PR1). A spurious re-spawn (a router re-firing, a second open_pr) or an unscripted turn
-	// would push this past 15.
-	if got := mock.RequestCount(); got != 15 {
-		t.Fatalf("expected exactly 15 model turns (…, V1 verify_artifact, CO1 check_coherence, PR1 open_pr), got %d — extra turns indicate a re-spawn/loop, an errant router, or an unscripted turn", got)
+	// Exactly fourteen model turns drove the FULL arc. The route rules (floors 06a advance,
+	// review 07a approved, delivery 08a coherent) chain the stations with NO model turns of
+	// their own — they compose the route from harness-stamped facts (the reshape deleted the
+	// check_gate/check_coherence forced turns and the separate measure loop; Amelia's in-loop
+	// measure + her terminal completion turn net to the same count). Turns: C1, C2, A1, V1,
+	// P1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, F1 floors, R1 review, V verify,
+	// PR1 open_pr = 14. A spurious re-spawn (a route re-firing, a second open_pr) or an
+	// unscripted turn would push this past 14.
+	if got := mock.RequestCount(); got != 14 {
+		t.Fatalf("expected exactly 14 model turns (…, Amelia's 3-turn loop, F1 floors, R1 review, V verify, PR1 open_pr), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
 	}
 }
 
@@ -602,7 +570,7 @@ func requireRunCoordinatorDecision(ctx context.Context, t *testing.T, runEntityI
 // agent.loop.outcome == "success" — the framework's atomic loop-terminal stamp
 // (WriteLoopCompletion). Its presence is the proof dispatch-developer fired, Amelia
 // inherited the run, and her forced apply_patch ran and applied cleanly (a failed
-// apply would not reach success). This is also the exact fact the group-7B measure
+// apply would not reach success). This is also the exact fact the in-loop measure
 // chain keys on. Bound by the run anchor + the developer role so no coordinator loop
 // on the same run can false-match.
 func requireDeveloperLoopCompleted(ctx context.Context, t *testing.T, runEntityID string) {
@@ -651,9 +619,9 @@ func requireMeasurementPassed(ctx context.Context, t *testing.T, runEntityID str
 				passed, tripleString(e, "measurement.result.0.exit_code"))
 		}
 		return tripleString(e, passed) == "true"
-	}, "run entity "+runEntityID+" never gained "+passed+"=true — the measure-trigger rule (dev-from-task/05) did not fire, "+
-		"the warm sandbox was not provisioned/resolved, or the in-container `go test` did not run: check the developer loop reached "+
-		"success, the dev.measured marker/guard, that measure_task was advertised/scripted, and that provision_sandbox left a warm "+
+	}, "run entity "+runEntityID+" never gained "+passed+"=true — Amelia did not call measure_task in her loop, "+
+		"the warm sandbox was not provisioned/resolved, or the in-container `go test` did not run: check her dispatch allowlist "+
+		"includes measure_task (tool_choice=auto), that measure_task was scripted as her second turn, and that provision_sandbox left a warm "+
 		"container Up over the run's checkout")
 }
 
@@ -682,46 +650,16 @@ func requireFloorsPassed(ctx context.Context, t *testing.T, runEntityID string) 
 		// Require the aggregate present AND a per-floor finding, so a partial/absent
 		// finding set cannot false-green the "not true" check above.
 		return tripleString(e, rejected) == "false" && tripleString(e, presencePassed) != ""
-	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set — the floors-trigger (dev-from-task/06) did not fire, "+
-		"or check_floors could not resolve the attempt: check measure_task stamped dev.measure_done on its loop, the floors rule fires on that marker, "+
+	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set — the floors trigger (dev-from-task/05) did not fire, "+
+		"or check_floors could not resolve the attempt: check Amelia's developer loop reached a terminal (the floors trigger fires on agent.loop.outcome ne \"\"), "+
 		"check_floors is advertised/scripted, and the Attempts seam resolves the target files from the checkout")
 }
 
-// requireGateAdvanced polls the run entity until dev.gate.0.decision == "advance" AND
-// dev.task_cleared.0 is present — the proof the gate-trigger (dev-from-task/07) fired on
-// the floors loop, check_gate read the recorded verdicts and derived ADVANCE (the fix
-// measured green and no floor rejected), and the advance router (dev-from-task/08a)
-// handed the cleared task off to the verify station. A stamped retry/escalate is a hard
-// failure (the gate misjudged a clean attempt, or the facts it read were wrong), surfaced
-// immediately rather than by timeout.
-func requireGateAdvanced(ctx context.Context, t *testing.T, runEntityID string) {
-	t.Helper()
-	client := connectFrontDoor(ctx, t)
-	defer func() { _ = client.Close(context.Background()) }()
-
-	const decision = "dev.gate.0.decision"
-	const cleared = "dev.task_cleared.0"
-	requireEventually(t, 45*time.Second, func() bool {
-		e, ok := scanEntities(ctx, client)[runEntityID]
-		if !ok {
-			return false
-		}
-		if got := tripleString(e, decision); got == "retry" || got == "escalate" {
-			t.Fatalf("check_gate routed %s=%q on a CLEAN attempt (measured green, no floor rejected) — the gate misread the recorded facts, or the measurement/floor facts it read were wrong: check that measurement.result.0.passed=true and floor.finding.0.rejected=false are on the run and that check_gate reads the right task index", decision, got)
-		}
-		// Require the advance decision AND the router's cleared fact, so a partial state
-		// (gate ran but the router did not fire) cannot false-green.
-		return tripleString(e, decision) == "advance" && tripleString(e, cleared) != ""
-	}, "run entity "+runEntityID+" never gained "+decision+"=advance with "+cleared+" present — the gate-trigger (dev-from-task/07) did not fire, "+
-		"check_gate could not read the verdicts, or the advance router (dev-from-task/08a) did not fire: check check_floors stamped dev.floors_done on its loop, "+
-		"the gate rule fires on that marker, check_gate is advertised/scripted, and the router matches dev.gate_decision eq advance")
-}
-
 // requireReviewApproved polls the run entity until review.verdict.0 == "approved" — the
-// proof the review-trigger (dev-from-task/09) fired on the gate loop's advance, the forced
-// submit_review loop (Quinn, role=reviewer) ran, and it DERIVED an approving verdict from
-// the task's passing measurement with no findings. A stamped changes_requested is a hard
-// failure (the measurement floor blocked, or a finding was raised), surfaced immediately.
+// proof the floors route advanced (dev-from-task/06a, on route.passed=true+route.rejected=
+// false) and spawned Quinn's reviewer loop, which DERIVED an approving verdict from the
+// task's passing measurement with no findings. A stamped changes_requested is a hard failure
+// (the measurement floor blocked, or a finding was raised), surfaced immediately.
 func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
@@ -734,16 +672,16 @@ func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string
 			return false
 		}
 		if got := tripleString(e, verdict); got == "changes_requested" {
-			t.Fatalf("submit_review stamped %s=changes_requested — the measurement floor blocked approval (measurement.result.0 not passing) or Quinn raised a finding: check the gate advanced on a green measurement and the mock submit_review fixture supplies no findings", verdict)
+			t.Fatalf("submit_review stamped %s=changes_requested — the measurement floor blocked approval (measurement.result.0 not passing) or Quinn raised a finding: check the floors route advanced on a green measurement and the mock submit_review fixture supplies no findings", verdict)
 		}
 		return tripleString(e, verdict) == "approved"
-	}, "run entity "+runEntityID+" never gained "+verdict+"=approved — the review-trigger (dev-from-task/09) did not fire, "+
-		"or submit_review could not derive the verdict: check check_gate advanced (dev.gate.0.decision=advance), the review rule fires on that gate-loop marker, "+
+	}, "run entity "+runEntityID+" never gained "+verdict+"=approved — the floors advance route (dev-from-task/06a) did not fire, "+
+		"or submit_review could not derive the verdict: check check_floors mirrored route.passed=true+route.rejected=false onto its loop, the advance route spawns Quinn on that mirror, "+
 		"submit_review is advertised/scripted as a role=reviewer loop, and the task's measurement.result.0 is passing")
 }
 
 // requireVerifyPassed polls the run entity until verify.result == "pass" — the proof the
-// verify-trigger (dev-from-task/10) fired on the review loop, the forced verify_artifact
+// review approved route (dev-from-task/07a) fired on Quinn's loop, the forced verify_artifact
 // loop cloned the committed artifact and proved it resolves + passes its own tests COLD in
 // a fresh throwaway container, and the artifact is self-contained + reproducible. A stamped
 // "fail" is a hard failure (the fix is not self-contained, a fabrication survived to verify,
@@ -765,37 +703,38 @@ func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) 
 			t.Fatalf("verify_artifact stamped %s=fail — the committed artifact did NOT prove cold: the fix is not self-contained, a warm-cache-masked fabrication survived to the cold verify, or a build file carries a forbidden runtime download; check the clone carries the patched bytes and the fixture's build files are clean", result)
 		}
 		return tripleString(e, result) == "pass"
-	}, "run entity "+runEntityID+" never gained "+result+"=pass — the verify-trigger (dev-from-task/10) did not fire "+
+	}, "run entity "+runEntityID+" never gained "+result+"=pass — the review approved route (dev-from-task/07a) did not fire "+
 		"(a role=reviewer inherit loop may not have propagated the run anchor), or the cold clean-room proof did not run: "+
-		"check submit_review stamped dev.reviewed on its loop, the verify rule fires on that marker, verify_artifact is advertised/scripted, "+
+		"check submit_review mirrored route.verdict=approved onto its loop, the approved route spawns verify on that mirror, verify_artifact is advertised/scripted, "+
 		"and docker is available (the journey builds the fixture image and runs go test in a fresh container)")
 }
 
-// requirePRDelivered polls the run entity until pr.ref is present — the proof the
-// coherence gate (dev-from-task/11) rolled up the delivery signals as coherent, the
-// coherent router (dev-from-task/12a) fired, and open_pr recorded the delivery reference:
-// the full issue→PR arc's terminal. A stamped run.awaiting_human (the incoherent park)
-// alongside no pr.ref is the blocked path; here we require delivery. Also asserts the
-// coherence decision was "coherent" so a partial state can't false-green.
+// requirePRDelivered polls the run entity until pr.ref is present — the proof the DELIVERY
+// ROUTE (dev-from-task/08a) fired ON THE RUN: because verify.result=pass AND review.verdict.0
+// =approved AND openspec.validated present cohere, it forced open_pr, which recorded the
+// delivery reference — the full issue→PR arc's terminal. A stamped run.awaiting_human (the
+// blocked delivery park, 08b) alongside no pr.ref is the blocked path; here we require
+// delivery. The rule-native delivery route stamps no pr.coherence decision (check_coherence
+// is deleted) — the route conditions ARE the roll-up, so pr.ref present is the coherent proof.
 func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
 	const prRef = "pr.ref"
-	const decision = "pr.coherence.decision"
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
 			return false
 		}
-		if got := tripleString(e, decision); got == "blocked" {
-			t.Fatalf("check_coherence BLOCKED delivery (%s=blocked) — a delivery signal did not cohere (verify not pass, change unvalidated, or a task unapproved); see pr.coherence.reason. The happy-path journey expects all three green", decision)
+		// The blocked delivery route (08b) parks on a non-pass verify — if the run parked
+		// instead of delivering, surface it rather than timing out.
+		if park := tripleString(e, "run.awaiting_human"); park != "" && tripleString(e, prRef) == "" {
+			t.Fatalf("the run PARKED instead of delivering (run.awaiting_human=%q, no pr.ref) — the delivery route blocked (08b): a delivery signal did not cohere (verify not pass, change unvalidated, or the task unapproved). The happy-path journey expects all three green", park)
 		}
-		return tripleString(e, prRef) != "" && tripleString(e, decision) == "coherent"
-	}, "run entity "+runEntityID+" never gained "+prRef+" with a coherent decision — the coherence gate (dev-from-task/11) did not fire, "+
-		"check_coherence did not derive coherent, or the coherent router (dev-from-task/12a) did not force open_pr: check verify_artifact stamped dev.verified on its loop, "+
-		"the coherence rule fires on that marker, check_coherence + open_pr are advertised/scripted, and all three signals (verify.result=pass, openspec.validated, review.verdict.0=approved) are on the run")
+		return tripleString(e, prRef) != ""
+	}, "run entity "+runEntityID+" never gained "+prRef+" — the coherent delivery route (dev-from-task/08a) did not fire or open_pr did not record it: "+
+		"check all three signals are on the run (verify.result=pass, review.verdict.0=approved, openspec.validated present), the delivery route fires on the run reading them, and open_pr is advertised/scripted")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for
@@ -817,8 +756,8 @@ func requireTriplePresent(ctx context.Context, t *testing.T, runEntityID, predic
 			}
 		}
 		return false
-	}, "run entity "+runEntityID+" never gained a "+predicate+" triple — the measure-trigger rule (dev-from-task/05) "+
-		"must append the per-task attempt counter on the developer-loop terminal (the group-7D budget gate counts it)")
+	}, "run entity "+runEntityID+" never gained a "+predicate+" triple — dispatch-developer (dev-from-task/04) "+
+		"must append the per-task attempt counter AT SPAWN (R3 — the route counts it against the budget)")
 }
 
 // requireRunAnchor polls until THIS wake's coordinator loop carries an

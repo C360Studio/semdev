@@ -55,20 +55,22 @@ var Predicates = []Predicate{
 	{"openspec.validated", "openspec-validate-harness", "openspec-io", m0},
 	{"openspec.archived", "openspec-archive-harness", "openspec-io", m0},
 	{"task.spec.*", "task-projector", "dev-from-task", m0},
-	// task.attempt.* is the PER-TASK attempt counter: the measure-trigger rule
-	// (dev-from-task/05) appends one triple per attempt on the developer-loop terminal,
-	// object = the developer loop instance (distinct per attempt). A rule add_triple
-	// goes through graph-ingest's UNCONDITIONAL append (no property-replace, no
-	// set-dedup — verified against Component.AddTriple), and the mutation is at-least-
-	// once (a lost NATS ack retries and double-appends). So the group-7D budget gate
-	// MUST count DISTINCT OBJECTS of task.attempt.<i> (the loop instance) against
-	// task.spec.<i>.budget — never raw triple cardinality: distinct-object counting is
-	// robust to the retry double-append AND counts every real attempt (the dev.measured
-	// marker already bounds it to one append per developer loop in the normal path). A
-	// NAMESPACE (task.attempt.<i>) so the count is per-task, not global — realized by
-	// the sandbox change's dev loop (group 7B); the NAME was reserved in m0's founding
-	// dev-loop vocabulary.
-	{"task.attempt.*", "dev-measure-rule", "dev-from-task", m0},
+	// task.attempt.* is the PER-TASK attempt counter: the dispatching rules append one
+	// triple per attempt AT SPAWN TIME (R3) — dispatch-developer (04) on the first
+	// attempt, the floors-retry route (06c) and the review-retry route (07b) on each
+	// subsequent attempt — object = the spawned developer loop instance (distinct per
+	// attempt). Appended at spawn (not terminal) so a crashed/wedged loop still consumed an
+	// attempt (honest accounting, restart-safe). A rule add_triple goes through graph-ingest's
+	// UNCONDITIONAL append (Component.AddTriple appends + bumps the entity version with NO
+	// dedup — verified against beta.146), so length_* over this family is a per-attempt count.
+	// Its robustness rests on the DISTINCT loop-instance object per real attempt (not storage
+	// dedup) plus the rule engine's per-entity revision tracker breaking self-feedback re-fire;
+	// an at-least-once redelivered mutation can double-append, which the budget route handles
+	// FAIL-CLOSED (length_gt 2 escalate catches an over-count → early park, never a false
+	// retry-past-budget nor a hollow advance). A NAMESPACE (task.attempt.<i>) so the count is
+	// per-task. One logical writer (dev-dispatch-rule) realized by the three sanctioned
+	// developer spawners (04/06c/07b); rules carry no Source, so the single entry is not drifted.
+	{"task.attempt.*", "dev-dispatch-rule", "dev-from-task", m0},
 	// attempt.commit is the immutable-snapshot pointer: the SHA apply_patch commits after
 	// each successful apply (latest-wins, one writer patch-committer). The cold verify
 	// clones this commit and read_diff diffs base..this — so what is verified and reviewed
@@ -77,6 +79,12 @@ var Predicates = []Predicate{
 	{"floor.finding.*", "floor-tools", "dev-from-task", m0},
 	{"measurement.result.*", "measurement-harness", "harness-measurement", m0},
 	{"review.verdict.*", "reviewer-quinn", "harness-measurement", m0},
+	// review.findings.<i> is the reviewer's per-task PROSE findings (the required changes
+	// Quinn raised) — model JUDGMENT (G3 restricts measurement outcomes, not review
+	// judgment), stamped by submit_review on the run alongside the floored verdict. A
+	// changes_requested re-entry (D16, the review-retry route) tells the fresh Amelia to
+	// re-read these off the run and address them. Same single writer as review.verdict.*.
+	{"review.findings.*", "reviewer-quinn", "harness-measurement", reshape},
 	{"verify.result", "verify-harness", "clean-room-verify", m0},
 	{"evidence.run", "evidence-ledger", "evidence-ledger", m0},
 
@@ -90,97 +98,63 @@ var Predicates = []Predicate{
 	{"sandbox.blocked", "sandbox-provisioner", "sandbox", sandbox},
 	{"sandbox.attestation.*", "sandbox-provisioner", "sandbox", sandbox},
 
-	// dev loop in the sandbox (group 7). dev.dispatched is the fired-once marker the
-	// dispatch-developer rule stamps on the coordinator loop whose dev_from_task
-	// decision it consumed, so a graph replay cannot re-spawn Amelia (self-extinguishing,
-	// loop-scoped like the run.*_kickoff markers are run-scoped).
+	// the bounded dev loop + rule-native routing (the reshape, groups 4+5). The
+	// route-token layer (check_gate/check_coherence, dev.gate_decision,
+	// dev.coherence_decided, and the ten relay markers) is DELETED — routing is now RULES
+	// over harness-stamped facts (design R1). measure_task runs INSIDE Amelia's multi-turn
+	// loop, so the separate measure loop + its dev.measured/dev.measure_done markers are gone.
+	//
+	// dev.dispatched is the fired-once marker dispatch-developer (04) stamps on the
+	// coordinator loop whose dev_from_task decision it consumed, so a graph replay cannot
+	// re-spawn Amelia (self-extinguishing, loop-scoped).
 	{"dev.dispatched", "dev-dispatch-rule", "dev-from-task", sandbox},
-	// dev.measured is the fired-once marker the measure-trigger rule (dev-from-task/05)
-	// stamps on the DEVELOPER loop whose successful terminal it consumed, so a graph
-	// replay cannot re-spawn a duplicate measure loop (self-extinguishing, loop-scoped
-	// like dev.dispatched). A fresh developer loop per retry carries no marker, so each
-	// attempt re-measures for free.
-	{"dev.measured", "dev-measure-rule", "dev-from-task", sandbox},
-	// dev.measure_done is the CHAINING marker measure_task stamps on ITS OWN measure
-	// loop (value = task index) once it has recorded a measurement — the slug-independent
-	// "this coordinator loop just measured" signal the floors-trigger (dev-from-task/06)
-	// fires on to spawn check_floors and inherit the run. Tool-owned (writer
-	// measurement-harness, measure_task's Source — like create_change's openspec.change.
-	// authored marker); distinguishes the measure loop from the other coordinator loops
-	// that also reach outcome=success.
-	{"dev.measure_done", "measurement-harness", "dev-from-task", sandbox},
-	// dev.floors_dispatched is the fired-once marker the floors-trigger (dev-from-task/06)
-	// stamps on the measure loop before spawning check_floors, so a graph replay cannot
-	// re-spawn a duplicate floors loop (self-extinguishing, loop-scoped like dev.dispatched).
-	{"dev.floors_dispatched", "dev-floors-rule", "dev-from-task", sandbox},
-	// dev.floors_done is the CHAINING marker check_floors stamps on ITS OWN floors loop
-	// (value = task index) once it has recorded the findings — the slug-independent "this
-	// coordinator loop just ran the floors" signal the gate-trigger (dev-from-task/07)
-	// fires on to spawn check_gate and inherit the run. Tool-owned (writer floor-tools,
-	// check_floors' Source — the measure→floors precedent, dev.measure_done); distinguishes
-	// the floors loop from the other coordinator loops that also reach outcome=success.
-	{"dev.floors_done", "floor-tools", "dev-from-task", sandbox},
+	// dev.floors_dispatched is the fired-once marker the floors trigger (05) stamps on the
+	// DEVELOPER loop before spawning check_floors — the trigger now fires on the developer
+	// loop's terminal (measure moved in-loop), not on a separate measure loop. Self-
+	// extinguishing, loop-scoped; a fresh developer loop per retry re-arms floors for free.
+	{"dev.floors_dispatched", "dev-floors-rule", "dev-from-task", reshape},
 
-	// the dev-loop GATE (group 7D). check_gate reads the recorded measurement/floor
-	// verdicts and the attempt count vs budget and derives advance/retry/escalate — the
-	// harness owns the route (G3). dev.gate.* is the per-task decision EVIDENCE on the
-	// run (the human who gets parked, and the verify/PR steps, read it); dev.gate_decision
-	// is the loop marker the router rules act on. Both tool-owned (writer gate-tools).
-	{"dev.gate.*", "gate-tools", "dev-from-task", sandbox},
-	{"dev.gate_decision", "gate-tools", "dev-from-task", sandbox},
-	// dev.gate_dispatched is the fired-once marker the gate-trigger (dev-from-task/07)
-	// stamps on the floors loop before spawning check_gate, so a graph replay cannot
-	// re-spawn a duplicate gate loop (self-extinguishing, loop-scoped like dev.dispatched).
-	{"dev.gate_dispatched", "dev-gate-rule", "dev-from-task", sandbox},
-	// dev.routed is the fired-once marker the three router rules (dev-from-task/08a/b/c)
-	// stamp on the gate loop before acting, so a graph replay cannot re-fire a router
-	// (critical for the retry router, whose publish_agent is not idempotent — a re-fire
-	// would spawn a duplicate developer, breaking the one-in-flight serialization
-	// invariant). One logical writer (dev-route-rule) realized by three mutually-exclusive
-	// rule files (like run.awaiting_human's two park realizations); rule add_triple carries
-	// no Source, so the single vocab entry is not drifted.
-	{"dev.routed", "dev-route-rule", "dev-from-task", sandbox},
-	// dev.task_cleared.<i> is the ADVANCE router's output: the per-task signal that its
-	// dev loop converged (measured green, no floor rejected, gate advanced). The clean-room
-	// verify station (group 8) chains on it. Rule-owned (writer dev-route-rule).
-	{"dev.task_cleared.*", "dev-route-rule", "dev-from-task", sandbox},
+	// THE ROUTING INPUTS mirrored onto the fresh-per-attempt firing loop (route-mirror,
+	// design R1). A rule condition reads only the FIRING entity's triples, so the harness
+	// copies the run-level routing inputs onto the loop the route rules fire on. These are
+	// RAW facts (harness copies of measurement/floor verdicts + the attempt-count mirror),
+	// never a derived route DECISION (the advance/retry/escalate decision lives entirely in
+	// the route RULES, G2 — that is the whole point of deleting check_gate). ONE logical
+	// writer route-mirror, realized by check_floors (route.passed/rejected/attempt on its
+	// loop) and submit_review (route.verdict/attempt on its loop).
+	//
+	// route.passed = check_floors' copy of measurement.result.<i>.passed onto its own loop,
+	// fail-closed "false" when the measurement is absent (the "model never measured" case).
+	{"route.passed", "route-mirror", "dev-from-task", reshape},
+	// route.rejected = check_floors' copy of its own floor.finding.<i>.rejected onto its loop.
+	{"route.rejected", "route-mirror", "dev-from-task", reshape},
+	// route.verdict = submit_review's copy of review.verdict.<i> onto its own review loop.
+	{"route.verdict", "route-mirror", "dev-from-task", reshape},
+	// route.attempt.<i> = the tool-written MIRROR of task.attempt.<i>'s distinct objects onto
+	// the firing loop (check_floors' floors loop, submit_review's review loop), so the route
+	// rules can count the budget via length_* (a rule can't read the run's task.attempt from a
+	// loop). Written via ReplaceTriples → MergeTriples FULL-SET-REPLACE per predicate: the tool
+	// stamps the COMPLETE current attempt set each run (not append), so it is replay-idempotent
+	// (the same set replaces itself). Distinct from the RULE-written task.attempt.* on the run,
+	// which is an unconditional APPEND (rule add_triple) — the two use different write paths.
+	{"route.attempt.*", "route-mirror", "dev-from-task", reshape},
 
-	// the REVIEW station (group 8C). dev.review_dispatched is the fired-once marker the
-	// review-trigger (dev-from-task/09) stamps on the gate loop before spawning Quinn's
-	// submit_review, so a graph replay cannot re-spawn a duplicate review loop
-	// (self-extinguishing, loop-scoped like dev.dispatched).
-	{"dev.review_dispatched", "dev-review-rule", "dev-from-task", sandbox},
-	// dev.reviewed is the CHAINING marker submit_review stamps on ITS OWN review loop
-	// (value = task index) once it records a verdict — the "this reviewer loop just
-	// reviewed" signal the verify station (group 8D) fires on to spawn verify_artifact.
-	// Tool-owned (writer reviewer-quinn, submit_review's Source — like measure_task's
-	// dev.measure_done); distinguishes the review loop from other loops.
-	{"dev.reviewed", "reviewer-quinn", "dev-from-task", sandbox},
-
-	// the VERIFY station (group 8D). dev.verify_dispatched is the fired-once marker the
-	// verify-trigger (dev-from-task/10) stamps on the review loop before spawning
-	// verify_artifact (self-extinguishing, loop-scoped).
-	{"dev.verify_dispatched", "dev-verify-rule", "dev-from-task", sandbox},
-	// dev.verified is the CHAINING marker verify_artifact stamps on ITS OWN verify loop
-	// (value = the cold-verify outcome) — the signal the coherence station (group 8D) fires
-	// on to spawn check_coherence. Tool-owned (writer verify-harness, verify_artifact's Source).
-	{"dev.verified", "verify-harness", "dev-from-task", sandbox},
-
-	// the COHERENCE GATE + delivery (group 8D). check_coherence rolls up verify.result +
-	// openspec.validated + every review.verdict and derives coherent/blocked — the harness
-	// owns the roll-up (G3). pr.coherence.* is the decision EVIDENCE on the run (the human
-	// who gets parked reads it); dev.coherence_decided is the loop marker the router rules
-	// act on. Both tool-owned (writer coherence-tools).
-	{"pr.coherence.*", "coherence-tools", "forge-io", sandbox},
-	{"dev.coherence_decided", "coherence-tools", "dev-from-task", sandbox},
-	// dev.coherence_dispatched is the fired-once marker the coherence-trigger (dev-from-task/11)
-	// stamps on the verify loop before spawning check_coherence (self-extinguishing, loop-scoped).
-	{"dev.coherence_dispatched", "dev-coherence-rule", "dev-from-task", sandbox},
-	// dev.pr_routed is the fired-once marker the two delivery routers (dev-from-task/12a/b)
-	// stamp on the coherence loop before acting, so a graph replay cannot re-fire a router
-	// (critical for the coherent router, whose publish_agent open_pr is not idempotent). One
-	// logical writer (dev-pr-route-rule) realized by two mutually-exclusive rule files.
-	{"dev.pr_routed", "dev-pr-route-rule", "dev-from-task", sandbox},
+	// THE ROUTE MARKERS (rule-owned, no Source drift — the multi-realized single-writer
+	// pattern, like run.awaiting_human). route.not_clean is the OR-collapse intermediate:
+	// the pure logic:or floors-route rule (route.passed eq false OR route.rejected eq true)
+	// stamps it single-valued "true", and the pure-AND retry/escalate rules read it (a rule
+	// can't AND a disjunction with the budget count, so the disjunction is a separate rule).
+	{"route.not_clean", "dev-route-rule", "dev-from-task", reshape},
+	// route.routed is the shared fired-once self-extinguish marker the floors-route rules
+	// (advance/retry/escalate) and the review-route rules (approved/retry/park/no-verdict)
+	// stamp on their firing loop BEFORE any (non-idempotent) publish — a fresh loop per
+	// attempt re-arms it, so retries route for free. Loop-scoped, mutually-exclusive routes.
+	{"route.routed", "dev-route-rule", "dev-from-task", reshape},
+	// delivery.routed is the fired-once self-extinguish marker the two delivery routes
+	// (coherent→open_pr / blocked→park) stamp on the RUN — delivery is terminal (it never
+	// repeats), so a run-scoped guard is correct (no per-attempt reset needed), and it is
+	// load-bearing for the coherent route since open_pr is not idempotent.
+	{"delivery.routed", "dev-route-rule", "dev-from-task", reshape},
 }
 
 // Names returns every predicate name in declaration order.

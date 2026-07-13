@@ -1,0 +1,44 @@
+{
+  "id": "dev_from_task_review_approved",
+  "type": "expression",
+  "name": "Review route → APPROVED: clean-room COLD verify of the committed artifact",
+  "description": "The approved review route (design R1/R4/SB3, group 5). When Quinn's submit_review mirrored route.verdict='approved' onto her review loop (the task measured green and she raised no findings), prove the COMMITTED artifact builds and passes its own tests COLD — in a SEPARATE fresh container over a fresh clone of the run's checkout with a fresh dependency cache (the third sandbox instance). Only APPROVED work is cold-verified. This REPLACES the old verify-trigger rule: verify is now the APPROVED branch of the rule-native review route (no dev.reviewed relay marker).\n\nTRIGGER = Quinn's review LOOP, keyed on the route.verdict mirror: route.verdict eq \"approved\" (required:false — the mirror exists only on a review loop, so it uniquely identifies Quinn's loop) AND route.routed length_eq 0 (self-extinguish). Mutually exclusive with the changes_requested routes (07b/07c) on the single verdict value, and with the no-verdict park (07d) which fires only on an absent verdict.\n\nRUN BINDING: run_scope=inherit reads the review loop's agent.run (Quinn's loop was inherit-spawned from the floors loop) and binds the verify loop to the same run, so verify_artifact clones THIS run's checkout and stamps verify.result on the run.\n\nROLE = coordinator (verify is a deterministic cold proof, a harness tool — Sarah's, not a persona judgment). tool_choice=function + the [verify_artifact] allowlist force the call; verify_artifact StopLoops, writing verify.result (pass/fail/retry) on the run. The delivery route (08a coherent / 08b blocked) then fires on the RUN reading verify.result directly (it never repeats, so it fires on the run, not a loop — no mirror needed).\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps route.routed=$entity.instance on the review loop, guarded by route.routed length_eq 0, BEFORE the publish. A fresh review loop per attempt re-arms it. Shared with the other review-route rules (mutually exclusive anyway).",
+  "enabled": true,
+  "conditions": [
+    { "field": "route.verdict", "operator": "eq", "value": "approved", "required": false },
+    { "field": "route.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.coordinator",
+      "role": "coordinator",
+      "model": "coordinator",
+      "tools": ["verify_artifact"],
+      "tool_choice": { "mode": "function", "function_name": "verify_artifact" },
+      "properties": {
+        "phase": "verify"
+      },
+      "prompt": "SEMDEV — the developed task was reviewed and approved. Run the clean-room COLD verify of the committed artifact: call verify_artifact. The harness clones the run's checkout into a fresh directory, builds the operator-declared image, and proves the artifact resolves and passes its own tests COLD in a fresh throwaway container with a fresh dependency cache — you supply nothing and claim no outcome. Calling verify_artifact completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "route",
+    "station": "review approved → clean-room cold verify (R1/R4/SB3, group 5)",
+    "trigger_rationale": "fires on the review loop's route.verdict=approved mirror (required:false scalar — identifies Quinn's loop). Mutually exclusive with the changes_requested routes and the no-verdict park.",
+    "role_rationale": "coordinator (verify is a harness cold proof, not a persona judgment). Forced [verify_artifact].",
+    "delivery_note": "verify_artifact stamps verify.result (pass/fail/retry) on the run; the delivery route (08a/08b) fires on the RUN reading verify.result — a 'retry' matches neither (it re-runs), so a docker flake never triggers delivery.",
+    "restart_safe": "SELF-EXTINGUISHING via the shared LOOP-scoped route.routed marker, stamped BEFORE the publish."
+  }
+}

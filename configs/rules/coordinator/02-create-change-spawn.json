@@ -16,6 +16,7 @@
       "subject": "agent.task.coordinator",
       "role": "coordinator",
       "model": "coordinator",
+      "tools": ["create_change"],
       "tool_choice": { "mode": "function", "function_name": "create_change" },
       "properties": {
         "phase": "author"

@@ -1,0 +1,40 @@
+{
+  "id": "dev_from_task_review_park",
+  "type": "expression",
+  "name": "Review route → CHANGES_REQUESTED, budget exhausted → park toward the human",
+  "description": "The review-exhaustion park (design R4/D16/SB5, group 5). When Quinn requested changes (route.verdict='changes_requested') AND the shared iteration budget is exhausted (route.attempt.0 count ≥ 3, via length_gt 2), the task cannot converge — PARK toward the human with the findings. An unreviewable-to-approval task NEVER ships a PR, it parks (SB5).\n\nTRIGGER = Quinn's review LOOP: route.verdict eq \"changes_requested\" (required:false) AND route.attempt.0 length_gt 2 (required:true — count ≥ 3, fail-closed) AND route.routed length_eq 0 (self-extinguish). Mutually exclusive with the review-retry (07b, length_lt 3) on the budget count.\n\nWRITER: run.awaiting_human — a sanctioned park realization (G5), same meaning as the others, differing only in trigger. RUN BINDING: the park marker goes on the RUN (subject-override the review loop's agent.run.entity_id).\n\nSELF-EXTINGUISHING: route.routed on the review loop (a LOOP-scoped guard is required — the loop does not carry the run-scoped park marker).",
+  "enabled": true,
+  "conditions": [
+    { "field": "route.verdict", "operator": "eq", "value": "changes_requested", "required": false },
+    { "field": "route.attempt.0", "operator": "length_gt", "value": 2, "required": true },
+    { "field": "route.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity_id",
+      "predicate": "run.awaiting_human",
+      "object": "the reviewer requested changes but the iteration budget is exhausted; see review.findings.0"
+    },
+    {
+      "type": "publish",
+      "subject": "user.response.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "park",
+    "station": "review changes_requested + budget exhausted → park (R4/SB5, group 5)",
+    "writer_note": "run.awaiting_human — a sanctioned park realization (G5). Rule add_triple carries no Source; no vocab drift.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped route.routed marker (the review loop does not carry the run-scoped park marker)."
+  }
+}

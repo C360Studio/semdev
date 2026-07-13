@@ -4,9 +4,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/tools/applypatch"
-	"github.com/c360studio/semdev/internal/tools/checkcoherence"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
-	"github.com/c360studio/semdev/internal/tools/checkgate"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/openpr"
@@ -52,17 +50,18 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"validate_change", validatechange.Source, validatechange.ValidatedPredicate},
 		{"project_tasks", projecttasks.Source, "task.spec.0.goal"},
 		{"measure_task", measuretask.Source, "measurement.result.0.passed"},
-		{"measure_task", measuretask.Source, measuretask.MeasureDonePredicate},
 		{"submit_review", submitreview.Source, "review.verdict.0"},
-		{"submit_review", submitreview.Source, submitreview.ReviewedPredicate},
+		{"submit_review", submitreview.Source, "review.findings.0"},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
-		{"verify_artifact", verifyartifact.Source, verifyartifact.VerifiedPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
-		{"check_floors", checkfloors.Source, checkfloors.FloorsDonePredicate},
-		{"check_gate", checkgate.Source, "dev.gate.0.decision"},
-		{"check_gate", checkgate.Source, checkgate.GateDecisionMarker},
-		{"check_coherence", checkcoherence.Source, "pr.coherence.decision"},
-		{"check_coherence", checkcoherence.Source, checkcoherence.DecidedMarker},
+		// The route mirror (design R1): check_floors + submit_review both stamp the route.*
+		// facts onto their firing loop under ONE logical writer route-mirror (a distinct
+		// Source from floor-tools / reviewer-quinn, so no predicate gains two writers, G5).
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RoutePassedPredicate},
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteRejectedPredicate},
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteAttemptPrefix + "0"},
+		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteVerdictPredicate},
+		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteAttemptPrefix + "0"},
 		{"open_pr", openpr.Source, openpr.RefPredicate},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 		{"apply_patch", applypatch.Source, applypatch.CommitPredicate},

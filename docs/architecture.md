@@ -28,11 +28,12 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `openspec.validated` | openspec-validate-harness | openspec-io |
 | `openspec.archived` | openspec-archive-harness | openspec-io |
 | `task.spec.*` | task-projector | dev-from-task |
-| `task.attempt.*` | dev-measure-rule | dev-from-task |
+| `task.attempt.*` | dev-dispatch-rule | dev-from-task |
 | `attempt.commit` | patch-committer | sandbox |
 | `floor.finding.*` | floor-tools | dev-from-task |
 | `measurement.result.*` | measurement-harness | harness-measurement |
 | `review.verdict.*` | reviewer-quinn | harness-measurement |
+| `review.findings.*` | reviewer-quinn | harness-measurement |
 | `verify.result` | verify-harness | clean-room-verify |
 | `evidence.run` | evidence-ledger | evidence-ledger |
 | `sandbox.provisioned` | sandbox-provision-rule | sandbox |
@@ -40,23 +41,14 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `sandbox.blocked` | sandbox-provisioner | sandbox |
 | `sandbox.attestation.*` | sandbox-provisioner | sandbox |
 | `dev.dispatched` | dev-dispatch-rule | dev-from-task |
-| `dev.measured` | dev-measure-rule | dev-from-task |
-| `dev.measure_done` | measurement-harness | dev-from-task |
 | `dev.floors_dispatched` | dev-floors-rule | dev-from-task |
-| `dev.floors_done` | floor-tools | dev-from-task |
-| `dev.gate.*` | gate-tools | dev-from-task |
-| `dev.gate_decision` | gate-tools | dev-from-task |
-| `dev.gate_dispatched` | dev-gate-rule | dev-from-task |
-| `dev.routed` | dev-route-rule | dev-from-task |
-| `dev.task_cleared.*` | dev-route-rule | dev-from-task |
-| `dev.review_dispatched` | dev-review-rule | dev-from-task |
-| `dev.reviewed` | reviewer-quinn | dev-from-task |
-| `dev.verify_dispatched` | dev-verify-rule | dev-from-task |
-| `dev.verified` | verify-harness | dev-from-task |
-| `pr.coherence.*` | coherence-tools | forge-io |
-| `dev.coherence_decided` | coherence-tools | dev-from-task |
-| `dev.coherence_dispatched` | dev-coherence-rule | dev-from-task |
-| `dev.pr_routed` | dev-pr-route-rule | dev-from-task |
+| `route.passed` | route-mirror | dev-from-task |
+| `route.rejected` | route-mirror | dev-from-task |
+| `route.verdict` | route-mirror | dev-from-task |
+| `route.attempt.*` | route-mirror | dev-from-task |
+| `route.not_clean` | dev-route-rule | dev-from-task |
+| `route.routed` | dev-route-rule | dev-from-task |
+| `delivery.routed` | dev-route-rule | dev-from-task |
 
 ## Components
 
@@ -77,11 +69,11 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `submit_review` | tool | harness-measurement | `submit-review-tool` |
 | `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
 | `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
-| `check_gate` | tool | dev-from-task | `check-gate-tool` |
-| `check_coherence` | tool | dev-from-task | `check-coherence-tool` |
 | `open_pr` | tool | forge-io | `open-pr-tool` |
 | `provision_sandbox` | tool | sandbox | `provision-sandbox-tool` |
 | `apply_patch` | tool | sandbox | `apply-patch-tool` |
+| `read_workspace` | tool | dev-from-task | `read-workspace-tool` |
+| `read_diff` | tool | dev-from-task | `read-diff-tool` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

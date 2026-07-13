@@ -52,18 +52,28 @@ import (
 // ToolName is the registered tool name and the reviewer's verdict handler.
 const ToolName = "submit_review"
 
-// Source is stamped on every review.verdict.<i> triple AND the dev.reviewed loop marker.
-// It MUST equal the writer declared for the review.verdict.* namespace and dev.reviewed in
-// internal/vocab (G5) — a conformance pin cross-checks it.
+// Source is stamped on every review.verdict.<i> AND review.findings.<i> triple. It MUST
+// equal the writer declared for those namespaces in internal/vocab (G5) — a conformance
+// pin cross-checks it.
 const Source = "reviewer-quinn"
 
-// ReviewedPredicate is the chaining marker submit_review stamps on ITS OWN review loop
-// entity (value = task index) once it has recorded a verdict — the slug-independent "this
-// reviewer loop just reviewed" signal the clean-room verify station (group 8D) fires on to
-// spawn verify_artifact. It rides the review loop (which carries agent.run) so the
-// verify-trigger's run_scope=inherit binds to the same run; it distinguishes the review
-// loop from other loops. Mirrors measure_task's dev.measure_done / check_floors' dev.floors_done.
-const ReviewedPredicate = "dev.reviewed"
+// RouteMirrorSource is stamped on the route.* facts submit_review MIRRORS onto its own
+// review loop so the rule-native review route (approved / changes_requested) can fire on
+// them (design R1). It MUST equal the single writer declared for the route.* mirror
+// namespace in internal/vocab (G5). It is a SECOND, distinct Source than reviewer-quinn:
+// review.verdict/findings (the substance, on the run) is reviewer-quinn; the route mirror
+// (raw COPIES onto the loop, one logical writer route-mirror shared with check_floors) is
+// route-mirror — so neither predicate has two writers.
+const RouteMirrorSource = "route-mirror"
+
+// The route-mirror predicates submit_review stamps on ITS OWN review loop (not the run):
+// route.verdict is the copy of review.verdict.<i>, and route.attempt is the append-mirror
+// of task.attempt.<i>'s distinct objects (review cycles share the one attempt budget, R4),
+// so the review-route rules can count the budget via length_* on the loop.
+const (
+	RouteVerdictPredicate = "route.verdict"
+	RouteAttemptPrefix    = "route.attempt."
+)
 
 // VerdictPrefix is the namespace this tool owns on the run entity: the reviewer's
 // current per-task verdict, keyed by task index (review.verdict.<i>). Per-task
@@ -72,6 +82,17 @@ const ReviewedPredicate = "dev.reviewed"
 // task's verdict without one task clobbering another (the graph merges replace
 // per-(subject, predicate)).
 const VerdictPrefix = "review.verdict."
+
+// FindingsPrefix is the namespace this tool owns for the reviewer's per-task PROSE
+// findings (review.findings.<i>) — the required changes Quinn raised, joined into one
+// scalar. A changes_requested re-entry (D16) tells the fresh Amelia to re-read them off
+// the run and address them. Same single writer as the verdict (reviewer-quinn).
+const FindingsPrefix = "review.findings."
+
+// findingsPredicate returns the per-task findings predicate for a task index.
+func findingsPredicate(taskIndex int) string {
+	return FindingsPrefix + strconv.Itoa(taskIndex)
+}
 
 // verdictPredicate returns the per-task verdict predicate for a task index.
 func verdictPredicate(taskIndex int) string {
@@ -182,7 +203,7 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		verdict = VerdictApproved
 	}
 
-	if err := e.stampVerdict(ctx, runEntityID, idx, verdict); err != nil {
+	if err := e.stampVerdict(ctx, runEntityID, idx, verdict, findings); err != nil {
 		return errResult(call, writeErrKind(err), "submit_review: stamp %s on %s: %v", verdictPredicate(idx), runEntityID, err)
 	}
 
@@ -193,34 +214,36 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.Bool("measurement_pass", measurementPass),
 		slog.Int("findings", len(findings)))
 
-	// Stamp the chaining marker on THIS review loop entity (value = task index) so the
-	// verify station (group 8D) can fire on this review loop and inherit the run. The
-	// verdict (the substance) is written FIRST; the marker (the chaining signal) follows,
-	// so a marker-write failure surfaces only AFTER the verdict is durably recorded
-	// (measure_task's discipline). It is stamped regardless of approved/changes_requested —
-	// a changes_requested verdict must still chain forward so the coherence gate can block
-	// on it; only a submit_review ERROR (no marker) stalls the chain. Failure posture: a
-	// marker error returns errResult WITHOUT StopLoop, so the forced loop re-runs
-	// (re-stamping idempotently) until it lands or MaxIterations trips — never a silent
-	// green. A missing LoopID (unit-test-only) skips the marker with a loud warn.
+	// MIRROR the routing inputs onto THIS review loop so the rule-native review route
+	// (approved → verify / changes_requested → retry-or-park / no-verdict → park) can fire
+	// on them (design R1/R4: a rule reads only the firing entity's triples, so the run-level
+	// verdict + attempt facts are copied onto the review loop). RAW copies (never a derived
+	// route decision, G2): route.verdict (the copy of review.verdict.<i>) and route.attempt
+	// (the append-mirror of the run's task.attempt.<i> — review cycles share the one attempt
+	// budget, R4). The verdict (the substance) is written to the run FIRST; the mirror (the
+	// chaining signal the route triggers on) follows. Failure posture: a mirror error returns
+	// errResult WITHOUT StopLoop, so the loop re-runs (re-stamping idempotently) until it
+	// lands — never a silent green. A missing LoopID (unit-test-only) skips the mirror.
 	if call.LoopID == "" {
-		e.logger.Warn("submit_review: no loop_id on the tool call — skipping the reviewed marker; the verify station will not trigger",
+		e.logger.Warn("submit_review: no loop_id on the tool call — skipping the route mirror; the review route will not fire",
 			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
 	} else {
 		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
 		if lerr != nil {
 			return errResult(call, agentic.ToolErrorInternal, "submit_review: construct review loop entity id: %v", lerr)
 		}
-		marker := []message.Triple{{
-			Subject:    loopEntityID,
-			Predicate:  ReviewedPredicate,
-			Object:     idxStr,
-			Source:     Source,
-			Timestamp:  time.Now().UTC(),
-			Confidence: 1.0,
-		}}
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{ReviewedPredicate}); merr != nil {
-			return errResult(call, writeErrKind(merr), "submit_review: stamp %s on %s: %v", ReviewedPredicate, loopEntityID, merr)
+		attempts, aerr := e.readAttemptObjects(ctx, runEntityID, idx)
+		if aerr != nil {
+			return errResult(call, changefacts.ReadErrorKind(aerr), "submit_review: read task.attempt for the route mirror on %s: %v", runEntityID, aerr)
+		}
+		now := time.Now().UTC()
+		mirror := []message.Triple{{Subject: loopEntityID, Predicate: RouteVerdictPredicate, Object: verdict, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0}}
+		attemptPred := RouteAttemptPrefix + idxStr
+		for _, obj := range attempts {
+			mirror = append(mirror, message.Triple{Subject: loopEntityID, Predicate: attemptPred, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0})
+		}
+		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, mirror, []string{RouteVerdictPredicate}); merr != nil {
+			return errResult(call, writeErrKind(merr), "submit_review: stamp the route mirror on %s: %v", loopEntityID, merr)
 		}
 	}
 
@@ -234,20 +257,45 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
-// stampVerdict upserts review.verdict.<taskIndex> on the run entity (replace-by-
-// predicate, so a re-review of that task replaces its prior verdict rather than
-// appending a second one; other tasks' verdicts, being distinct predicates, are
-// untouched).
-func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskIndex int, verdict string) error {
-	triple := message.Triple{
-		Subject:    runEntityID,
-		Predicate:  verdictPredicate(taskIndex),
-		Object:     verdict,
-		Source:     Source,
-		Timestamp:  time.Now().UTC(),
-		Confidence: 1.0,
+// stampVerdict upserts review.verdict.<taskIndex> AND review.findings.<taskIndex> on the
+// run entity (replace-by-predicate, so a re-review of that task replaces its prior verdict
+// and findings rather than appending; other tasks' facts, being distinct predicates, are
+// untouched). The findings are Quinn's prose (joined into one scalar) — model JUDGMENT the
+// changes_requested re-entry (D16) tells the fresh Amelia to re-read and address.
+func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskIndex int, verdict string, findings []string) error {
+	now := time.Now().UTC()
+	mk := func(pred, obj string) message.Triple {
+		return message.Triple{Subject: runEntityID, Predicate: pred, Object: obj, Source: Source, Timestamp: now, Confidence: 1.0}
 	}
-	return e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
+	// review.findings.<i> is always stamped (empty string when Quinn raised none), so a
+	// re-review that clears prior findings does not leave a stale set readable.
+	triples := []message.Triple{
+		mk(verdictPredicate(taskIndex), verdict),
+		mk(findingsPredicate(taskIndex), strings.Join(findings, "\n")),
+	}
+	return e.writer.ReplaceTriples(ctx, runEntityID, triples, nil)
+}
+
+// readAttemptObjects reads the distinct objects of the run's task.attempt.<idx> counter
+// (each object is a developer-loop instance, one per attempt) so the review-route mirror
+// can append them onto the review loop and the route rules count the shared attempt budget
+// via length_* (R4: review cycles and measurement retries share the one budget).
+func (e *Executor) readAttemptObjects(ctx context.Context, runEntityID string, idx int) ([]string, error) {
+	want := "task.attempt." + strconv.Itoa(idx)
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, want)
+	if err != nil {
+		return nil, err
+	}
+	var objs []string
+	for _, tr := range triples {
+		if tr.Predicate != want {
+			continue
+		}
+		if s, ok := tr.Object.(string); ok {
+			objs = append(objs, s)
+		}
+	}
+	return objs, nil
 }
 
 // projectedTaskIDs returns the distinct projected task indices (as strings, matching

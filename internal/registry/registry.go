@@ -44,11 +44,15 @@ var Entries = []Entry{
 	{Name: "submit_review", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "submit-review-tool"},
 	{Name: "verify_artifact", Kind: KindTool, Capability: "clean-room-verify", AlignmentNote: "verify-artifact-tool"},
 	{Name: "check_floors", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "floor-tools-wrapper"},
-	{Name: "check_gate", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "check-gate-tool"},
-	{Name: "check_coherence", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "check-coherence-tool"},
 	{Name: "open_pr", Kind: KindTool, Capability: "forge-io", AlignmentNote: "open-pr-tool"},
 	{Name: "provision_sandbox", Kind: KindTool, Capability: "sandbox", AlignmentNote: "provision-sandbox-tool"},
 	{Name: "apply_patch", Kind: KindTool, Capability: "sandbox", AlignmentNote: "apply-patch-tool"},
+	// read_workspace / read_diff (the reshape, group 4): the developer/reviewer loops are
+	// bounded multi-turn; no framework primitive can put checkout bytes (read_workspace) or
+	// the authored diff (read_diff) into a loop — a rule can't populate TaskMessage.Context
+	// and file contents are not triples, so these are the read-side harness seams.
+	{Name: "read_workspace", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "read-workspace-tool"},
+	{Name: "read_diff", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "read-diff-tool"},
 }
 
 // ComponentNames returns the declared names of Entries of KindComponent.

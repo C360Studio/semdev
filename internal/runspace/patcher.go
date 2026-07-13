@@ -72,9 +72,9 @@ func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) (touched 
 	// PATH-GUARD every target to inside the checkout BEFORE touching the filesystem —
 	// the primary containment. `git apply` also rejects escapes (belt), but a rule
 	// that relies on the tool's own protection alone is the pattern the constitution
-	// bars; safeJoin is the explicit fail-closed guard.
+	// bars; SafeJoin is the explicit fail-closed guard.
 	for _, t := range targets {
-		if _, err := safeJoin(root, t); err != nil {
+		if _, err := SafeJoin(root, t); err != nil {
 			return nil, "", err
 		}
 	}

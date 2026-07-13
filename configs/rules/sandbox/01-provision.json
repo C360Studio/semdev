@@ -26,6 +26,7 @@
       "subject": "agent.task.coordinator",
       "role": "coordinator",
       "model": "coordinator",
+      "tools": ["provision_sandbox"],
       "tool_choice": { "mode": "function", "function_name": "provision_sandbox" },
       "properties": {
         "phase": "provision"

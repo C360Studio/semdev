@@ -17,6 +17,7 @@
       "subject": "agent.task.coordinator",
       "role": "coordinator",
       "model": "coordinator",
+      "tools": ["decide", "query_entity", "read_loop_result", "scratchpad"],
       "tool_choice": { "mode": "required" },
       "properties": {
         "run_loop_id": "$entity.instance"

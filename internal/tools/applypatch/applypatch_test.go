@@ -71,8 +71,8 @@ func TestApplyPassesDiffAndReportsFiles(t *testing.T) {
 	if !strings.Contains(p.gotDiff, "+++ b/x") {
 		t.Errorf("patcher got diff %q, want the authored diff", p.gotDiff)
 	}
-	if !res.StopLoop {
-		t.Error("apply_patch must end the authoring turn (StopLoop)")
+	if res.StopLoop {
+		t.Error("apply_patch must NOT StopLoop — it runs inside Amelia's multi-turn loop (group 4); she continues to measure")
 	}
 	if !strings.Contains(res.Content, "pkg/health/health.go") {
 		t.Errorf("result should report the touched files, got %q", res.Content)

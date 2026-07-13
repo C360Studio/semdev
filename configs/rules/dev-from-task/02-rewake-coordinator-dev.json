@@ -27,6 +27,7 @@
       "subject": "agent.task.coordinator",
       "role": "coordinator",
       "model": "coordinator",
+      "tools": ["decide", "query_entity", "read_loop_result", "scratchpad"],
       "tool_choice": { "mode": "required" },
       "action_allowlist": ["dev_from_task", "ask_human"],
       "related_loops": {

@@ -16,6 +16,7 @@
       "subject": "agent.task.coordinator",
       "role": "coordinator",
       "model": "coordinator",
+      "tools": ["validate_change"],
       "tool_choice": { "mode": "function", "function_name": "validate_change" },
       "properties": {
         "phase": "validate"

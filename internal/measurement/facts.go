@@ -36,4 +36,10 @@ const (
 	FactExitCode = "exit_code"
 	FactTimedOut = "timed_out"
 	FactPassed   = "passed"
+	// FactCommit binds the measurement to the SNAPSHOT it ran against — the run's
+	// attempt.commit at measure time. It is NOT part of the pass derivation (CanApprove
+	// ignores it, and ResultsFromFacts collects but does not read it — an extra sub-key is
+	// harmless); it lets the floors route treat a green measurement as stale (fail-closed)
+	// when a later attempt was re-applied but never re-measured (a different attempt.commit).
+	FactCommit = "commit"
 )

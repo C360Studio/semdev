@@ -46,27 +46,20 @@ import (
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
-	"github.com/c360studio/semstreams/types"
 )
 
 // ToolName is the registered tool name and the run's verify handler.
 const ToolName = "verify_artifact"
 
-// Source is stamped on the verify.result triple AND the dev.verified loop marker. It MUST
-// equal the writer declared for verify.result and dev.verified in internal/vocab (G5) — a
-// conformance pin cross-checks it.
+// Source is stamped on the verify.result triple. It MUST equal the writer declared for
+// verify.result in internal/vocab (G5) — a conformance pin cross-checks it.
 const Source = "verify-harness"
 
-// ResultPredicate is the terminal clean-room fact this harness owns on the run
-// entity. Exact predicate → latest-wins (a retry re-run upserts).
+// ResultPredicate is the terminal clean-room fact this harness owns on the run entity. Exact
+// predicate → latest-wins (a retry re-run upserts). The rule-native delivery route reads it
+// directly (08a coherent on eq "pass", 08b blocked on eq "fail"; a "retry" matches neither),
+// which is why verify_artifact no longer stamps a loop chaining marker (the reshape, R1).
 const ResultPredicate = "verify.result"
-
-// VerifiedPredicate is the chaining marker verify_artifact stamps on ITS OWN verify loop
-// entity once it has recorded a verify.result — the "this coordinator loop just verified"
-// signal the coherence station (group 8D) fires on to spawn check_coherence. It rides the
-// verify loop (which carries agent.run) so the coherence-trigger's run_scope=inherit binds
-// to the same run. Mirrors measure_task's dev.measure_done / check_floors' dev.floors_done.
-const VerifiedPredicate = "dev.verified"
 
 // dockerBin is the docker CLI binary the cold proof shells (matches cleanroom's and
 // provision_sandbox's default). A package const keeps the surface small; a fake Prover
@@ -112,8 +105,7 @@ type Executor struct {
 	clones    VerifyClones
 	manifests Manifests
 	prover    Prover
-	store     secrets.Store      // governed creds-refs (SB2c); nil at M0 (no secrets)
-	platform  types.PlatformMeta // builds the verify loop's entity id for the chaining marker
+	store     secrets.Store // governed creds-refs (SB2c); nil at M0 (no secrets)
 	writer    agentictools.OwnedFactWriter
 	logger    *slog.Logger
 }
@@ -121,14 +113,14 @@ type Executor struct {
 // New builds the verify_artifact executor. prover is always supplied (a pure adapter —
 // DefaultProver in production, a fake in tests); clones/manifests/writer are nil for
 // schema-only registration (the censuses inspect ListTools without a live checkout or
-// NATS client). store is nil at M0 (no governed secrets). platform builds the verify
-// loop's entity id for the dev.verified chaining marker. Execute fails loudly if any
-// required dependency is missing.
-func New(clones VerifyClones, manifests Manifests, prover Prover, store secrets.Store, platform types.PlatformMeta, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// NATS client). store is nil at M0 (no governed secrets). It stamps only verify.result on
+// the run (no loop chaining marker — the delivery route reads verify.result directly, R1).
+// Execute fails loudly if any required dependency is missing.
+func New(clones VerifyClones, manifests Manifests, prover Prover, store secrets.Store, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{clones: clones, manifests: manifests, prover: prover, store: store, platform: platform, writer: writer, logger: logger}
+	return &Executor{clones: clones, manifests: manifests, prover: prover, store: store, writer: writer, logger: logger}
 }
 
 // Execute clones the run's committed artifact into a fresh dir, builds the declared image
@@ -189,52 +181,23 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	// A RETRY verdict is a TRANSIENT infra fault (a container that would not provision, a
 	// resolve read as network-class), NOT a verdict about the artifact — the whole point of
 	// the Retry classification is to NEVER terminally reject a good artifact on a flake (SB5,
-	// verify.go). So it must RE-RUN the cold proof, not chain forward: do NOT stamp the
-	// dev.verified marker (a retry that chained to the coherence gate would fail its
-	// verify.result eq pass check and PARK a good run on a single flake — the reviewer's 8D
-	// MEDIUM) and do NOT StopLoop, so the forced verify loop re-runs verify_artifact. The
-	// verify.result=retry stamp stays as evidence of the attempt (a later pass upserts it). A
-	// persistent transport fault trips MaxIterations and stalls toward the human (the
-	// dev-loop-rail cap-exhaust gap) — fail-closed, never a false green, never a park of a
-	// good artifact. Only a TERMINAL verdict (pass = advance, fail = the coherence gate
-	// blocks) chains via the marker.
+	// verify.go). So it RE-RUNS the cold proof rather than terminating: it does NOT StopLoop,
+	// so the forced verify loop re-runs verify_artifact. The verify.result=retry stamp stays
+	// as evidence (a later pass/fail upserts it). Because the rule-native delivery route
+	// (dev-from-task/08a/08b) keys on verify.result eq \"pass\" / eq \"fail\", a \"retry\"
+	// value matches NEITHER route — so a single docker flake never triggers delivery nor
+	// parks a good run (the reshape replaced the dev.verified chaining marker with this direct
+	// run-fact route). A persistent transport fault trips MaxIterations and stalls toward the
+	// human — fail-closed, never a false green.
 	if verdict.Outcome == verify.OutcomeRetry {
 		return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
 	}
 
-	// Stamp the chaining marker on THIS verify loop entity so the coherence station
-	// (dev-from-task/11) can fire on it and inherit the run. The verify.result (the
-	// substance) was written FIRST; the marker (the chaining signal) follows (measure_task's
-	// discipline). It is stamped for a FAIL as well as a pass — a failing verify must still
-	// chain to the coherence gate (which BLOCKS on the non-pass verify.result); only a
-	// retry (above) or a verify ERROR (no marker) stays out of the chain. A marker error
-	// returns errResult WITHOUT StopLoop so the forced loop re-runs. A missing LoopID
-	// (unit-test-only) skips it.
-	if call.LoopID == "" {
-		e.logger.Warn("verify_artifact: no loop_id on the tool call — skipping the verified marker; the coherence station will not trigger",
-			slog.String("run_entity_id", runEntityID))
-	} else {
-		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
-		if lerr != nil {
-			return errResult(call, agentic.ToolErrorInternal, "verify_artifact: construct verify loop entity id: %v", lerr)
-		}
-		marker := []message.Triple{{
-			Subject:    loopEntityID,
-			Predicate:  VerifiedPredicate,
-			Object:     string(verdict.Outcome),
-			Source:     Source,
-			Timestamp:  time.Now().UTC(),
-			Confidence: 1.0,
-		}}
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{VerifiedPredicate}); merr != nil {
-			return errResult(call, writeErrKind(merr), "verify_artifact: stamp %s on %s: %v", VerifiedPredicate, loopEntityID, merr)
-		}
-	}
-
-	// StopLoop: the verify-trigger rule forces a single-turn verify loop; ending the turn
-	// here keeps it one model call (mirrors measure/floors/gate). A fail verdict is DATA,
-	// not a tool error — it ends the turn as a success too; the coherence gate reads the
-	// stamped verify.result, not this StopLoop.
+	// A TERMINAL verdict (pass or fail) ends the turn (StopLoop) — the verify.result the tool
+	// already stamped on the RUN is what the delivery route reads (08a coherent on pass, 08b
+	// blocked on fail). A fail verdict is DATA, not a tool error; it ends the turn as a
+	// success too. No loop chaining marker (the delivery route fires on the run's verify.result
+	// directly, not a loop marker — the reshape's rule-native routing, R1).
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 

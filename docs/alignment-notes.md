@@ -435,66 +435,44 @@ Template:
 - **Registry entry:** `apply_patch` (`tool`)
 - **Change:** containerized-sandbox-dev-loop
 
-## check-gate-tool
+## read-workspace-tool
 
-- **Primitive considered:** a rule (or set of rules) that reads the recorded
-  measurement/floor verdicts and the attempt count against the budget and branches to
-  advance/retry/escalate — the "fully rule-owned gate, no tool" the original blueprint
-  proposed.
-- **Why it cannot express this (three independent blockers, the architect's 7D ruling):**
-  (1) the gate chains off a LOOP terminal (the floors loop's `dev.floors_done` marker) but
-  must read RUN facts (`measurement.result.<i>.passed`, `floor.finding.<i>.rejected`,
-  `task.spec.<i>.budget`) — a rule firing on a loop entity sees only that entity, so it
-  cannot read the run. (2) the budget test counts DISTINCT OBJECTS of the appended
-  multi-valued `task.attempt.<i>` (the at-least-once append double-counts a lost-ack
-  re-append, so raw cardinality over-counts) — not something a rule's `length_*` operator
-  expresses. (3) a scalar field-to-field compare (attempt count vs budget) in a rule
-  condition is the `$entity.triple.<pred>` value form that floods the semstreams #519 WARN
-  (guarded by `TestChangeApprovalGateFreshnessForwardContract`). All three force the
-  comparison into Go. This ALSO retired the blueprint's per-attempt TOKEN HANDSHAKE
-  (measure stamps an attempt token, floors echoes it, the gate compares them): field-to-
-  field #519-unbuildable AND unnecessary — the chain is strictly serial (one developer
-  loop in flight per task; only dispatch-developer and this gate's retry branch spawn a
-  `role=developer` loop, a load-bearing conformance-pinned invariant), so measure and
-  floors provably evaluated the same frozen checkout by construction.
-- **G3 (the load-bearing property):** the schema takes ONLY `task_index` — no decision,
-  pass/fail, count, or budget field. Every input is a fact the harness stamped; the route
-  is DERIVED in Go (`checkgate.Decide`), never a model claim. It fails CLOSED: a missing
-  judgment fact escalates toward the human rather than retrying blind (an unbounded loop or
-  a verification skipped over absent evidence is the dangerous direction). A read fault is a
-  retryable tool error, not a stamped decision.
-- **Fact shape:** `dev.gate.<i>.{decision,reason}` is the per-task decision EVIDENCE on the
-  run (the human who gets parked and the downstream verify/PR steps read it, G7);
-  `dev.gate_decision` is the loop marker on the gate loop the three router rules act on
-  (`08a` advance → `dev.task_cleared.<i>` hands off to clean-room verify; `08b` retry →
-  re-dispatch the developer, re-arming the whole chain; `08c` escalate → `run.awaiting_human`
-  park, the third park realization). Both fact families are the single G5 writer `gate-tools`;
-  the router-stamped `dev.task_cleared.*`/`dev.routed` are the `dev-route-rule` subsystem. It
-  fires no transition (G2) — the routers act on the recorded marker.
-- **Registry entry:** `check_gate` (`tool`)
-- **Change:** containerized-sandbox-dev-loop
+- **Primitive considered:** templating the checkout's file contents into the developer/
+  reviewer prompt via a rule's `$entity.triple.<pred>` substitution, or reusing a framework
+  file-read/`bash` tool.
+- **Why it cannot express this:** the reshape makes the developer (Amelia) and reviewer
+  (Quinn) loops bounded MULTI-TURN (`tool_choice: auto`), so they must READ the artifact
+  before authoring/judging. File contents are not triples — a rule cannot template them, and
+  it cannot populate `TaskMessage.Context` (audit-verified), so prompt templating + a read
+  tool is the whole channel. A general file-read/`bash` tool is the "model reads (and could
+  write) anywhere on the host" hole both predecessors died on — it would let a loop escape
+  the run's checkout. So a thin tool (`internal/tools/readworkspace`) wraps the checkout seam:
+  it resolves the run's `runspace.Checkouts.Root`, PATH-GUARDS the requested path to inside
+  the checkout (`runspace.SafeJoin` — the read sibling of apply_patch's write guard), reads
+  read-only, and paginates under the component's 32KB `ToolResultMaxBytes`.
+- **G3 (the load-bearing property):** read-only — it stamps no fact and takes no outcome; it
+  returns bytes. A path escape/absent file is an invalid-args tool error the loop re-reads
+  from, not a silent success.
+- **Fact shape:** none — it writes no graph fact and fires no transition (G2). No G5 writer.
+- **Registry entry:** `read_workspace` (`tool`)
+- **Change:** simplify-m0-execution-rail
 
-## check-coherence-tool
+## read-diff-tool
 
-- **Primitive considered:** a rule that gates open_pr on the three delivery signals as
-  conditions (`verify.result eq pass` ∧ `openspec.validated ne ""` ∧ every
-  `review.verdict.* eq approved`).
-- **Why it cannot express this (same three blockers as check_gate):** the gate chains off a
-  LOOP terminal (the verify loop's `dev.verified` marker) but must read RUN facts; the review
-  roll-up counts PROJECTED TASKS vs APPROVED VERDICTS (an absent verdict blocks — not a
-  `length_*` on one predicate); and a wildcard `review.verdict.*` field-to-field compare
-  floods the semstreams #519 WARN. All three force the roll-up into Go (`checkcoherence.Decide`,
-  a pure fail-closed function pinned exhaustively offline). It FAILS CLOSED (D16/SB5): a
-  non-pass/absent verify, an unvalidated change, no projected task, or ANY projected task
-  without an approved verdict blocks — a missing signal never opens a PR (semspec encoded
-  "couldn't prove" as a pass; this inverts that). G3: the schema takes no arguments — every
-  input is a fact the harness stamped.
-- **Fact shape:** `pr.coherence.{decision,reason}` is the decision EVIDENCE on the run (the
-  human who gets parked reads it, G7); `dev.coherence_decided` is the loop marker the two
-  delivery routers (`12a` coherent → open_pr; `12b` blocked → the fourth `run.awaiting_human`
-  park) act on. Both the single G5 writer `coherence-tools`. Fires no transition (G2).
-- **Registry entry:** `check_coherence` (`tool`)
-- **Change:** containerized-sandbox-dev-loop
+- **Primitive considered:** templating the cumulative diff into Quinn's prompt, or letting
+  the reviewer shell `git diff` via a `bash` tool.
+- **Why it cannot express this:** the reviewer reviews the AUTHORED CHANGE, which is the
+  `git diff <base>..<committed attempt>` of the run's checkout — not a triple a rule can
+  template, and (as with read_workspace) `TaskMessage.Context` cannot be populated. A `bash`
+  tool is the host-escape hole. So a thin tool (`internal/tools/readdiff`) wraps a checkout
+  seam (`runspace.Checkouts.Diff`): it resolves the run's checkout, finds the pristine base
+  (`git rev-list --max-parents=0 HEAD`), and returns `git diff base..HEAD` — HEAD is the
+  latest committed attempt (`attempt.commit`) under the one-in-flight serialization invariant,
+  so what Quinn reviews is exactly the committed tree the cold verify proves.
+- **G3 (the load-bearing property):** read-only, no arguments, stamps no fact.
+- **Fact shape:** none — it writes no graph fact and fires no transition (G2). No G5 writer.
+- **Registry entry:** `read_diff` (`tool`)
+- **Change:** simplify-m0-execution-rail
 
 ## open-pr-tool
 

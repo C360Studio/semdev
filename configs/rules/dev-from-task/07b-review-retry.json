@@ -1,0 +1,53 @@
+{
+  "id": "dev_from_task_review_retry",
+  "type": "expression",
+  "name": "Review route → CHANGES_REQUESTED, budget remains → re-dispatch Amelia (D16 re-entry)",
+  "description": "The review re-entry route (design R4/D16, group 5). When Quinn requested changes (route.verdict='changes_requested') AND the task's iteration budget still has room (route.attempt.0 count < 3), spawn a FRESH developer loop (Amelia) whose prompt tells her to re-read Quinn's findings off the run and address them. THIS CLOSES D16 — reviewer rejection re-enters DEVELOPMENT (the old rail routed rejection to verify→park, a confirmed defect). Review cycles and measurement retries SHARE the one task.attempt.0 budget (an attempt is an attempt regardless of what sent it back), which is why the review route counts the same route.attempt mirror.\n\n⚠ SERIALIZATION INVARIANT: this rule, dispatch-developer (04), and the floors-retry route (06c) are the ONLY three sanctioned role=developer spawners (pinned — one developer in flight per task).\n\nTRIGGER = Quinn's review LOOP: route.verdict eq \"changes_requested\" (required:false) AND route.attempt.0 length_lt 3 (required:true) AND route.routed length_eq 0 (self-extinguish). Mutually exclusive with approved (07a) on the verdict value, and with the review-park (07c, length_gt 2) on the budget count (length_lt 3 / length_gt 2 partition with no gap).\n\nRUN BINDING + ATTEMPT COUNT (R3): run_scope=inherit binds the fresh developer loop to the run (the review loop's agent.run), and on_enter appends task.attempt.0 = $entity.instance on the RUN (subject-override the review loop's agent.run.entity_id) AT SPAWN — so a review-triggered attempt increments the SAME budget as a measurement retry.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe, CRITICAL): route.routed stamped on the review loop BEFORE the publish (the developer spawn is not idempotent).",
+  "enabled": true,
+  "conditions": [
+    { "field": "route.verdict", "operator": "eq", "value": "changes_requested", "required": false },
+    { "field": "route.attempt.0", "operator": "length_lt", "value": 3, "required": true },
+    { "field": "route.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity_id",
+      "predicate": "task.attempt.0",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.developer",
+      "role": "developer",
+      "model": "developer",
+      "tools": ["read_workspace", "apply_patch", "measure_task", "ask_human"],
+      "tool_choice": { "mode": "auto" },
+      "related_loops": {
+        "run-loop-entity-id": "$entity.triple.agent.run.entity_id"
+      },
+      "properties": {
+        "phase": "develop"
+      },
+      "prompt": "SEMDEV DEVELOPER (Amelia) — the reviewer (Quinn) requested changes to this run's task. Address the findings.\n\nYour run entity ID is $entity.triple.agent.run.entity_id. Read the reviewer's findings (review.findings.0) AND the task contract with query_entity(entity_id=\"$entity.triple.agent.run.entity_id\"); read the files with read_workspace. Author a corrected unified diff touching only task.spec.0.target_files that addresses every finding, record it with apply_patch, then measure_task(task_index=0). Iterate until the test passes and the findings are addressed, then stop. You author the fix; the harness measures it and you never claim the outcome (G3)."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "route",
+    "station": "review changes_requested + budget → re-dispatch Amelia with findings (R4/D16, group 5)",
+    "d16": "closes D16 — reviewer rejection re-enters DEVELOPMENT (not verify→park). Review + measurement retries share the one task.attempt.0 budget.",
+    "serialization_invariant": "this rule + dispatch-developer (04) + floors-retry (06c) are the ONLY sanctioned role=developer spawners (pinned).",
+    "restart_safe": "SELF-EXTINGUISHING via route.routed (shared, LOOP-scoped) stamped BEFORE the publish — CRITICAL (the developer spawn is not idempotent)."
+  }
+}

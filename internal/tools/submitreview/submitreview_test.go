@@ -139,8 +139,11 @@ func TestReviewApprovesWhenMeasuredPassAndNoFindings(t *testing.T) {
 			if tr.Subject != runEntity {
 				t.Errorf("verdict subject = %q, want run entity (D15)", tr.Subject)
 			}
-			if tr.Predicate != verdictPredicate(0) {
-				t.Errorf("verdict predicate = %q, want %q (per-task namespace)", tr.Predicate, verdictPredicate(0))
+			// On the run, submit_review writes exactly its two owned facts: the verdict and
+			// the (empty here) findings — both under reviewer-quinn (the route mirror lands on
+			// the loop, not the run, and only when a LoopID is present).
+			if tr.Predicate != verdictPredicate(0) && tr.Predicate != findingsPredicate(0) {
+				t.Errorf("run predicate = %q, want %q or %q", tr.Predicate, verdictPredicate(0), findingsPredicate(0))
 			}
 		}
 	}
@@ -211,16 +214,16 @@ func TestReviewFindingBlocksEvenWhenMeasuredPass(t *testing.T) {
 	}
 }
 
-// Findings never weaken task.spec: the review tool writes ONLY review.verdict.<i>
-// and holds no writer for task.spec, so a finding is structurally incapable of
-// removing or relaxing a task.spec requirement (G5 single-writer).
-func TestReviewWritesOnlyVerdictNeverTaskSpec(t *testing.T) {
+// Findings never weaken task.spec: on the run the review tool writes ONLY its owned
+// review.verdict.<i> / review.findings.<i> facts and holds no writer for task.spec, so a
+// finding is structurally incapable of removing or relaxing a task.spec requirement (G5).
+func TestReviewWritesOnlyVerdictAndFindingsNeverTaskSpec(t *testing.T) {
 	w := &fakeWriter{}
 	run(t, oneTaskPassing(), w, "please also add a benchmark")
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate != verdictPredicate(0) {
-				t.Errorf("review stamped %q — it must write only %q (findings are additive, never weaken task.spec)", tr.Predicate, verdictPredicate(0))
+			if tr.Predicate != verdictPredicate(0) && tr.Predicate != findingsPredicate(0) {
+				t.Errorf("review stamped %q on the run — it must write only %q / %q (findings are additive, never weaken task.spec)", tr.Predicate, verdictPredicate(0), findingsPredicate(0))
 			}
 			if strings.HasPrefix(tr.Predicate, "task.spec.") {
 				t.Errorf("review wrote a task.spec predicate %q — findings must not touch the immutable spec", tr.Predicate)
@@ -312,16 +315,23 @@ func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
 	}
 }
 
-// The chaining marker: submit_review stamps dev.reviewed on ITS OWN review loop entity
-// (value = the task index) after the verdict, so the verify station (8D) can fire on the
-// review loop. It is stamped for a changes_requested verdict too (the coherence gate must
-// still see the review), so a blocking review still chains forward.
-func TestReviewStampsReviewedMarkerOnLoopEvenWhenBlocking(t *testing.T) {
+// The ROUTE MIRROR: submit_review copies the routing inputs onto ITS OWN review loop so
+// the rule-native review route (approved → verify / changes_requested → retry-or-park) can
+// fire on them. route.verdict = the verdict, route.attempt.<i> = the append-mirror of the
+// run's task.attempt.<i> (the shared budget, R4). Both carry the route-mirror Source (a
+// distinct writer from reviewer-quinn, so no predicate gains two writers, G5). It is
+// stamped for a changes_requested verdict too (the route decides retry-or-park).
+func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	w := &fakeWriter{}
 	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	// One passing task + two counted attempts; a finding forces changes_requested.
+	facts := append(oneTaskPassing(),
+		message.Triple{Predicate: "task.attempt.0", Object: "dev-loop-1", Source: "dev-dispatch-rule"},
+		message.Triple{Predicate: "task.attempt.0", Object: "dev-loop-2", Source: "dev-dispatch-rule"},
+	)
 	c := call(0, "regression found") // a finding → changes_requested
 	c.LoopID = "review-loop-abc"
-	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, platform, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: facts}, w, platform, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -332,29 +342,70 @@ func TestReviewStampsReviewedMarkerOnLoopEvenWhenBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop entity id: %v", err)
 	}
-	var found bool
+	var gotVerdict string
+	attemptObjs := map[string]bool{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate != ReviewedPredicate {
-				continue
+			switch tr.Predicate {
+			case RouteVerdictPredicate, RouteAttemptPrefix + "0":
+				if tr.Subject != loopEntityID {
+					t.Errorf("route mirror %q stamped on %q, want the review LOOP entity %q", tr.Predicate, tr.Subject, loopEntityID)
+				}
+				if tr.Source != RouteMirrorSource {
+					t.Errorf("route mirror %q Source = %q, want %q (G5)", tr.Predicate, tr.Source, RouteMirrorSource)
+				}
 			}
-			found = true
-			if tr.Subject != loopEntityID {
-				t.Errorf("%s stamped on %q, want the review LOOP entity %q (not the run)", ReviewedPredicate, tr.Subject, loopEntityID)
-			}
-			if tr.Source != Source {
-				t.Errorf("%s Source = %q, want %q (G5)", ReviewedPredicate, tr.Source, Source)
+			switch tr.Predicate {
+			case RouteVerdictPredicate:
+				gotVerdict = tr.Object.(string)
+			case RouteAttemptPrefix + "0":
+				attemptObjs[tr.Object.(string)] = true
 			}
 		}
 	}
-	if !found {
-		t.Errorf("submit_review must stamp %s on its loop (even for a blocking verdict) so the verify station fires", ReviewedPredicate)
+	if gotVerdict != VerdictChangesRequested {
+		t.Errorf("route.verdict = %q, want %q", gotVerdict, VerdictChangesRequested)
+	}
+	if len(attemptObjs) != 2 {
+		t.Errorf("route.attempt.0 must mirror both task.attempt.0 objects, got %v", attemptObjs)
 	}
 }
 
-// Without a LoopID (unit/registration path) the verdict still lands but the marker is
-// skipped — a missing marker never fails a recorded verdict.
-func TestReviewWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
+// review.findings.<i> is stamped on the run (Quinn's prose) so a changes_requested
+// re-entry can re-read it; it is always stamped (empty when none) so a re-review clears it.
+func TestReviewStampsFindingsOnRun(t *testing.T) {
+	w := &fakeWriter{}
+	verdict, res := run(t, oneTaskPassing(), w, "boundary off by one", "add the missing test")
+	if res.Error != "" {
+		t.Fatalf("tool error: %s", res.Error)
+	}
+	if verdict != VerdictChangesRequested {
+		t.Fatalf("verdict = %q, want changes_requested (findings raised)", verdict)
+	}
+	var findings string
+	var sawFindings bool
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == FindingsPrefix+"0" {
+				sawFindings = true
+				findings = tr.Object.(string)
+				if tr.Source != Source {
+					t.Errorf("review.findings Source = %q, want %q (G5)", tr.Source, Source)
+				}
+			}
+		}
+	}
+	if !sawFindings {
+		t.Fatal("submit_review must stamp review.findings.0 on the run")
+	}
+	if !strings.Contains(findings, "boundary off by one") || !strings.Contains(findings, "add the missing test") {
+		t.Errorf("review.findings.0 must carry Quinn's prose, got %q", findings)
+	}
+}
+
+// Without a LoopID (unit/registration path) the verdict still lands but the route mirror
+// is skipped — a missing mirror never fails a recorded verdict.
+func TestReviewWithoutLoopIDSkipsMirrorButRecords(t *testing.T) {
 	w := &fakeWriter{}
 	verdict, res := run(t, oneTaskPassing(), w) // call sets no LoopID
 	if res.Error != "" {
@@ -365,8 +416,8 @@ func TestReviewWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
 	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate == ReviewedPredicate {
-				t.Errorf("no LoopID → the reviewed marker must be skipped, but %s was stamped", ReviewedPredicate)
+			if tr.Predicate == RouteVerdictPredicate {
+				t.Errorf("no LoopID → the route mirror must be skipped, but %s was stamped", RouteVerdictPredicate)
 			}
 		}
 	}

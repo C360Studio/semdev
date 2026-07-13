@@ -52,26 +52,14 @@ import (
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
-	"github.com/c360studio/semstreams/types"
 )
 
 // ToolName is the registered tool name and the dev loop's measurement handler.
 const ToolName = "measure_task"
 
-// Source is stamped on every measurement.result triple AND the dev.measure_done loop
-// marker. It MUST equal the single writer declared for measurement.result.* and
-// dev.measure_done in internal/vocab (G5) — a conformance pin cross-checks it.
+// Source is stamped on every measurement.result triple. It MUST equal the single writer
+// declared for measurement.result.* in internal/vocab (G5) — a conformance pin cross-checks it.
 const Source = "measurement-harness"
-
-// MeasureDonePredicate is the chaining marker measure_task stamps on ITS OWN loop
-// entity (not the run) once it has recorded a measurement — the slug-independent "this
-// coordinator loop just measured" signal the floors-trigger rule (dev-from-task/06)
-// fires on to spawn check_floors. It rides the measure loop (which carries agent.run)
-// so the floors-trigger's run_scope=inherit binds to the same run; it distinguishes
-// the measure loop from the other coordinator loops that also reach outcome=success
-// (provision/create_change/validate/project_tasks) — none carry it. Mirrors
-// create_change's openspec.change.authored marker → the validate station.
-const MeasureDonePredicate = "dev.measure_done"
 
 // measureTimeout bounds one test_command run. A hung suite is killed by the
 // deadline and surfaces (via the container exec's ctx cancellation) as a
@@ -95,19 +83,17 @@ type Executor struct {
 	reader    changefacts.Reader
 	sandboxes Sandboxes
 	writer    agentictools.OwnedFactWriter
-	platform  types.PlatformMeta // builds the measure loop's entity id for the chaining marker
 	logger    *slog.Logger
 }
 
 // New builds the measure_task executor. reader/sandboxes/writer may be nil for
 // schema-only registration (the tool censuses inspect ListTools without a live NATS
-// client or a provisioned sandbox); Execute fails loudly if any is nil. platform
-// builds the measure loop's entity id for the dev.measure_done chaining marker.
-func New(reader changefacts.Reader, sandboxes Sandboxes, writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
+// client or a provisioned sandbox); Execute fails loudly if any is nil.
+func New(reader changefacts.Reader, sandboxes Sandboxes, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{reader: reader, sandboxes: sandboxes, writer: writer, platform: platform, logger: logger}
+	return &Executor{reader: reader, sandboxes: sandboxes, writer: writer, logger: logger}
 }
 
 type payload struct {
@@ -182,7 +168,23 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 	result := measurement.Measure(strconv.Itoa(idx), command,
 		cliexec.Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, TimedOut: timedOut}, runErr)
-	out := measurementTriples(runEntityID, idx, result, time.Now().UTC())
+	// Bind the measurement to the SNAPSHOT it ran against: stamp the attempt.commit apply_patch
+	// last committed. The route reads measurement.result.<i>.passed only when this commit still
+	// equals the run's current attempt.commit — so a STALE green from a prior attempt cannot
+	// advance a later attempt that was re-applied but never re-measured (the semstreams-reviewer
+	// HIGH: measurement.result is keyed by task index and persists across attempts). Read via the
+	// shared reader; empty/absent when nothing has been committed (then the route reads it as
+	// stale → not clean, fail-closed).
+	now := time.Now().UTC()
+	measuredCommit, cerr := e.readAttemptCommit(ctx, runEntityID)
+	if cerr != nil {
+		return errResult(call, changefacts.ReadErrorKind(cerr), "measure_task: read attempt.commit to bind the measurement on %s: %v", runEntityID, cerr)
+	}
+	out := measurementTriples(runEntityID, idx, result, now)
+	out = append(out, message.Triple{
+		Subject: runEntityID, Predicate: measurement.ResultPrefix + strconv.Itoa(idx) + "." + measurement.FactCommit,
+		Object: measuredCommit, Source: Source, Timestamp: now, Confidence: 1.0,
+	})
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "measure_task: stamp measurement.result.%d on %s: %v", idx, runEntityID, err)
 	}
@@ -195,39 +197,6 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		slog.Int("exit_code", result.ExitCode),
 		slog.Bool("passed", result.Passed))
 
-	// Stamp the chaining marker on THIS loop entity (value = task index) so the
-	// floors-trigger (dev-from-task/06) can fire on this measure loop and inherit the
-	// run anchor. The measurement (the substance) is written FIRST; the marker (the
-	// chaining signal) follows, so a marker-write failure surfaces only AFTER the
-	// measurement is durably recorded (create_change's discipline). It is stamped for a
-	// recorded measurement regardless of pass/fail — a FAILING measurement must still
-	// chain to floors→gate so the gate can decide retry; only a measure_task ERROR
-	// (couldn't measure) stalls the chain toward the human. Failure posture: a marker
-	// error returns errResult WITHOUT StopLoop, so the forced loop re-runs measure_task
-	// (which re-stamps idempotently) until it lands or MaxIterations trips — never a
-	// silent green. LoopID is always present at runtime; a missing one (unit-test-only)
-	// skips the marker with a loud warn rather than failing a recorded measurement.
-	if call.LoopID == "" {
-		e.logger.Warn("measure_task: no loop_id on the tool call — skipping the measure-done marker; the floors station will not trigger",
-			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
-	} else {
-		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
-		if lerr != nil {
-			return errResult(call, agentic.ToolErrorInternal, "measure_task: construct measure loop entity id: %v", lerr)
-		}
-		marker := []message.Triple{{
-			Subject:    loopEntityID,
-			Predicate:  MeasureDonePredicate,
-			Object:     strconv.Itoa(idx),
-			Source:     Source,
-			Timestamp:  time.Now().UTC(),
-			Confidence: 1.0,
-		}}
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{MeasureDonePredicate}); merr != nil {
-			return errResult(call, changefacts.ReadErrorKind(merr), "measure_task: stamp %s on %s: %v", MeasureDonePredicate, loopEntityID, merr)
-		}
-	}
-
 	summary, _ := json.Marshal(map[string]any{
 		"task_index": idx,
 		"command":    command,
@@ -238,12 +207,34 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		"stdout":     result.Stdout,
 		"stderr":     result.Stderr,
 	})
-	// StopLoop: the measure-trigger rule (dev-from-task/05) forces a single-turn
-	// measure loop; ending the turn here is what keeps it one model call (mirrors
-	// project_tasks/create_change/validate). A non-zero measurement is DATA, not a
-	// tool error — it ends the turn as a success too; the loop gate reads the stamped
-	// measurement.result, not this StopLoop, to decide advance/retry.
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+	// NO StopLoop (the reshape, group 4): measure_task runs INSIDE Amelia's bounded
+	// multi-turn loop (tool_choice=auto) — it is her feedback channel. The stdout/stderr +
+	// passed in this result content are what she reads to decide whether to iterate; the
+	// loop continues rather than ending here. A non-zero measurement is DATA, not a tool
+	// error. Routing reads the harness-stamped measurement.result (regardless of loop
+	// outcome, G3), never her stopping decision; measure no longer stamps a chaining marker
+	// because the floors trigger now fires on the developer-loop terminal, not a measure loop.
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
+}
+
+// readAttemptCommit reads the run's current attempt.commit (the SHA apply_patch last
+// committed) so the measurement can be bound to the snapshot it ran against. Returns ""
+// (no error) when absent — measure ran before any apply, which the route reads as stale.
+func (e *Executor) readAttemptCommit(ctx context.Context, runEntityID string) (string, error) {
+	const attemptCommit = "attempt.commit"
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, attemptCommit)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate != attemptCommit {
+			continue
+		}
+		if s, ok := tr.Object.(string); ok {
+			return s, nil
+		}
+	}
+	return "", nil
 }
 
 // readTestCommand reads the frozen task.spec.<idx>.test_command off the run entity.

@@ -245,6 +245,42 @@ func (c *Checkouts) CloneForVerify(ctx context.Context, runEntityID string) (str
 	return dest, nil
 }
 
+// Diff returns the unified diff of everything the run has authored so far: the run's
+// checkout's pristine base commit (the ONE commit initCommit made of the source before any
+// attempt landed) through its current HEAD. Under the M0 one-in-flight serialization
+// invariant a run develops exactly one task with attempts applied strictly serially, so HEAD
+// IS the latest committed attempt (attempt.commit, apply_patch's stamped pointer) — base..HEAD
+// is exactly the cumulative authored change. It is the read_diff seam: the reviewer (Quinn)
+// reads this instead of re-deriving the diff from raw file contents. Fails CLOSED when no
+// checkout is materialized (Root's fail-closed posture) or git itself fails. `git rev-list
+// --max-parents=0 HEAD` normally names exactly one root commit (initCommit makes exactly
+// one); if history ever carried more than one (should not happen), the LAST line is taken
+// defensively rather than erroring or guessing which is "the" base.
+func (c *Checkouts) Diff(ctx context.Context, runEntityID string) (string, error) {
+	root, err := c.Root(ctx, runEntityID)
+	if err != nil {
+		return "", err
+	}
+	roots, err := c.git(ctx, root, "rev-list", "--max-parents=0", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("runspace: find the checkout's root commit for %s: %w", runEntityID, err)
+	}
+	lines := strings.Split(roots, "\n")
+	base := strings.TrimSpace(lines[len(lines)-1])
+	if base == "" {
+		return "", fmt.Errorf("runspace: no root commit found in %s's checkout", runEntityID)
+	}
+	// `git diff` exits 0 whether or not there is output (a base==HEAD run authored nothing
+	// yet, which is a legitimate empty diff, not an error); c.git already fails closed on a
+	// non-zero exit (a malformed ref, a corrupt repo), so no separate exit-code handling is
+	// needed here.
+	diff, err := c.git(ctx, root, "diff", base+"..HEAD")
+	if err != nil {
+		return "", fmt.Errorf("runspace: diff %s..HEAD for %s: %w", base, runEntityID, err)
+	}
+	return diff, nil
+}
+
 // Remove tears down a run's checkout AND any cold-verify clone (best-effort). A no-op when
 // nothing is materialized.
 func (c *Checkouts) Remove(runEntityID string) error {

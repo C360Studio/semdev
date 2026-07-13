@@ -13,7 +13,6 @@ import (
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/types"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -78,7 +77,7 @@ func warmSandboxOf(runner *cleanroom.MockRunner) *fakeSandboxes {
 
 // execWith builds an executor over a scripted reader + warm sandbox + writer.
 func execWith(reader *fakeReader, runner *cleanroom.MockRunner, w *fakeWriter) *Executor {
-	return New(reader, warmSandboxOf(runner), w, types.PlatformMeta{}, nil)
+	return New(reader, warmSandboxOf(runner), w, nil)
 }
 
 // fakeWriter records replace calls. It owns no immutability guard: a measurement is
@@ -178,64 +177,37 @@ func TestMeasureStampsDerivedResult(t *testing.T) {
 	}
 }
 
-// The chaining marker: measure_task stamps dev.measure_done on ITS OWN loop entity
-// (not the run) so the floors-trigger (dev-from-task/06) can fire on the measure loop.
-// It is stamped even for a FAILING measurement — a failing attempt must still chain to
-// floors→gate so the gate can decide retry; only a measure ERROR stalls the chain.
-func TestMeasureStampsMeasureDoneMarkerOnLoopEvenWhenFailing(t *testing.T) {
+// measure_task runs INSIDE Amelia's multi-turn loop (the reshape, group 4): it records
+// the measurement and returns it as loop feedback WITHOUT StopLoop and WITHOUT a chaining
+// marker (the floors trigger fires on the developer-loop terminal, not a measure loop).
+// A failing measurement still lands as measurement.result.<i> (routing reads it, G3).
+func TestMeasureDoesNotStopTheLoopNorStampAMarker(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
 	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 1}}}} // a FAILING measurement
 	w := &fakeWriter{}
-	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
-	e := New(reader, warmSandboxOf(runner), w, platform, nil)
+	e := New(reader, warmSandboxOf(runner), w, nil)
 
 	call := callFor(0)
-	call.LoopID = "measure-loop-abc"
+	call.LoopID = "dev-loop-abc"
 	res, err := e.Execute(context.Background(), call)
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
-	if facts := stampedFacts(w); facts["measurement.result.0.passed"] != "false" {
-		t.Fatalf("precondition: this measurement must be failing, got passed=%q", facts["measurement.result.0.passed"])
-	}
-
-	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, call.LoopID)
-	if err != nil {
-		t.Fatalf("loop entity id: %v", err)
-	}
-	found := false
-	for _, batch := range w.replaces {
-		for _, tr := range batch {
-			if tr.Predicate != MeasureDonePredicate {
-				continue
-			}
-			found = true
-			if tr.Subject != loopEntityID {
-				t.Errorf("%s stamped on %q, want the measure LOOP entity %q (not the run)", MeasureDonePredicate, tr.Subject, loopEntityID)
-			}
-			if tr.Source != Source {
-				t.Errorf("%s Source = %q, want %q (G5)", MeasureDonePredicate, tr.Source, Source)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("measure_task must stamp %s on its loop (even for a failing measurement) so the floors-trigger fires", MeasureDonePredicate)
-	}
-}
-
-// No loop id on the call (a unit-test / degenerate case) skips the marker with a warn
-// rather than failing a recorded measurement — the measurement still lands.
-func TestMeasureWithoutLoopIDSkipsMarkerButRecords(t *testing.T) {
-	e, _, w := happyExecutor() // callFor sets no LoopID
-	if res := exec(t, e, 0); res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	// It does NOT end Amelia's loop — she reads the result and iterates (tool_choice=auto).
+	if res.StopLoop {
+		t.Error("measure_task must NOT StopLoop — it is Amelia's in-loop feedback channel (group 4)")
 	}
 	facts := stampedFacts(w)
-	if facts["measurement.result.0.passed"] != "true" {
-		t.Error("the measurement must still be recorded when no loop id is present")
+	if facts["measurement.result.0.passed"] != "false" {
+		t.Fatalf("a failing measurement must still record measurement.result.0.passed=false, got %q", facts["measurement.result.0.passed"])
 	}
-	if _, ok := facts[MeasureDonePredicate]; ok {
-		t.Error("no loop id → the marker must be skipped, not stamped on the run")
+	// It stamps NO loop chaining marker — only the measurement package on the run.
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == "dev.measure_done" {
+				t.Errorf("measure_task must no longer stamp dev.measure_done (the floors trigger fires on the developer-loop terminal): saw it on %q", tr.Subject)
+			}
+		}
 	}
 }
 
@@ -314,7 +286,7 @@ func TestMeasureTimeoutIsRecordedAndNotPass(t *testing.T) {
 	// A caller ctx with a short deadline propagates as the effective exec deadline
 	// (the earlier of it and measureTimeout), so the blocking runner is killed by
 	// DeadlineExceeded — exactly what a real hung suite does at measureTimeout.
-	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, w, types.PlatformMeta{}, nil)
+	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, w, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
@@ -423,7 +395,7 @@ func TestMeasureRequiresTaskIndex(t *testing.T) {
 // Schema-only registration (nil reader/sandboxes/writer) fails loudly if executed,
 // never silently drops the measurement.
 func TestMeasureFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
+	res, err := New(nil, nil, nil, nil).Execute(context.Background(), callFor(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -438,7 +410,7 @@ func TestMeasureFailsLoudlyWithoutHarness(t *testing.T) {
 func TestMeasureFailsClosedWithoutSandbox(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(0, "test_command", "go test ./...")}}
 	w := &fakeWriter{}
-	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, w, types.PlatformMeta{}, nil)
+	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, w, nil)
 
 	res := exec(t, e, 0)
 	if res.Error == "" || !strings.Contains(res.Error, "sandbox") {

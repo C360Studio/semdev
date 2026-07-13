@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/vocab"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 )
 
@@ -403,30 +404,67 @@ func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
 	}
 }
 
-// The dispatch station (dev-from-task/04): on a coordinator's dev_from_task decision,
-// spawn Amelia to author the fix via apply_patch. Like every publish_agent spawn rule
-// it MUST be self-extinguishing — but LOOP-scoped: it fires on the coordinator loop
-// carrying the decision (conditions can't read run facts), so the fired-once marker
-// dev.dispatched is stamped on that loop, guarded by length_eq 0. Unlike coordinator/02
-// (create_change, idempotent-replace, intentionally re-fires), re-dispatching Amelia
-// double-authors, so this MUST self-extinguish. It must force the apply_patch call.
-func TestDispatchDeveloperIsSelfExtinguishing(t *testing.T) {
+// toFloat coerces a JSON-decoded numeric condition value (float64) to float64 for the
+// budget-partition arithmetic.
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	}
+	return 0
+}
+
+// declaresTools reports whether every publish_agent action in the rule declares a
+// non-empty tools allowlist (the config-lint: no allowlist-less model-publishing spawn).
+func (r ruleFile) declaresTools() bool {
+	sawSpawn := false
+	for _, a := range r.OnEnter {
+		if a.Type != "publish_agent" {
+			continue
+		}
+		sawSpawn = true
+		if len(a.Tools) == 0 {
+			return false
+		}
+	}
+	return sawSpawn
+}
+
+// usesToolChoiceAuto reports whether a publish_agent uses tool_choice mode=auto.
+func (r ruleFile) usesToolChoiceAuto() bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "publish_agent" && a.ToolChoice.Mode == "auto" {
+			return true
+		}
+	}
+	return false
+}
+
+// The dispatch station (dev-from-task/04, the reshape group 4): on a coordinator's
+// dev_from_task decision, spawn Amelia's BOUNDED MULTI-TURN dev loop — a scoped tool
+// allowlist + tool_choice=auto (she reads, patches, measures IN-LOOP, iterates), NOT a
+// single forced author turn. It appends task.attempt.0 at SPAWN (R3) and is LOOP-scoped
+// self-extinguishing (dev.dispatched). Red-first: drop the allowlist / the auto choice /
+// the attempt append / the marker and this fails.
+func TestDispatchDeveloperIsMultiTurnAndSelfExtinguishing(t *testing.T) {
 	disp, ok := runLifecycleRules(t)["dev_from_task_dispatch_developer"]
 	if !ok {
 		t.Fatal("missing dev_from_task_dispatch_developer rule")
 	}
 	const marker = "dev.dispatched"
-	if !disp.hasAbsenceGuard(marker) {
-		t.Errorf("dispatch-developer must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate developer (publish_agent is not idempotent)", marker)
+	if !disp.hasAbsenceGuard(marker) || !disp.hasTriple(marker) || !disp.markerBeforePublish(marker) {
+		t.Errorf("dispatch-developer must be self-extinguishing (%s guard + add_triple before the publish)", marker)
 	}
-	if !disp.hasTriple(marker) {
-		t.Errorf("dispatch-developer must add_triple %s in on_enter to extinguish its own trigger", marker)
+	if !disp.usesToolChoiceAuto() {
+		t.Error("dispatch-developer must spawn a BOUNDED MULTI-TURN loop (tool_choice mode=auto), not a single forced author turn (R2)")
 	}
-	if !disp.markerBeforePublish(marker) {
-		t.Errorf("dispatch-developer must stamp %s BEFORE its publish_agent (SB7) — else a publish failure leaves the run duplicable", marker)
+	if !disp.declaresTools() {
+		t.Error("dispatch-developer must declare an explicit tools allowlist (the config-lint; Amelia's scoped [read_workspace, apply_patch, measure_task, ask_human])")
 	}
-	if !disp.forcesFunction("apply_patch") {
-		t.Error("dispatch-developer must force the apply_patch call (tool_choice mode=function, function_name=apply_patch)")
+	if !disp.hasTriple("task.attempt.0") {
+		t.Error("dispatch-developer must append task.attempt.0 AT SPAWN (R3) — the attempt counter the route counts against the budget")
 	}
 	if c, ok := disp.condition("coordinator.decision.next_action"); !ok || c.Value != "dev_from_task" {
 		t.Error("dispatch-developer must fire on the coordinator's dev_from_task decision")
@@ -436,198 +474,260 @@ func TestDispatchDeveloperIsSelfExtinguishing(t *testing.T) {
 	}
 }
 
-// The measure station (dev-from-task/05, group 7B): on the developer loop's
-// SUCCESSFUL terminal, measure the task in-container and count the attempt. Like
-// every publish_agent spawn rule it MUST be self-extinguishing — LOOP-scoped (it
-// fires on the developer loop): a fired-once dev.measured marker stamped BEFORE the
-// publish, guarded by length_eq 0. It must fire ONLY on outcome=success (never
-// measure a failed/unapplied attempt), force measure_task, and append the per-task
-// attempt counter (task.attempt.0). Red-first: drop any of these and this fails.
-func TestMeasureTriggerIsSelfExtinguishing(t *testing.T) {
-	meas, ok := runLifecycleRules(t)["dev_from_task_measure_developed"]
+// The floors station (dev-from-task/05, the reshape group 5): measure moved INTO Amelia's
+// loop, so the floors trigger fires on the DEVELOPER loop's TERMINAL (role=developer AND
+// outcome ne "" — present for both success and failed) and forces check_floors, which
+// mirrors the routing inputs (route.passed/route.rejected/route.attempt) onto its loop.
+// LOOP-scoped self-extinguishing (dev.floors_dispatched on the developer loop). Red-first:
+// drop any and this fails.
+func TestFloorsTriggerFiresOnDeveloperTerminal(t *testing.T) {
+	fl, ok := runLifecycleRules(t)["dev_from_task_floors_trigger"]
 	if !ok {
-		t.Fatal("missing dev_from_task_measure_developed rule")
-	}
-	const marker = "dev.measured"
-	if !meas.hasAbsenceGuard(marker) {
-		t.Errorf("measure trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate measure loop (publish_agent is not idempotent)", marker)
-	}
-	if !meas.hasTriple(marker) {
-		t.Errorf("measure trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
-	}
-	if !meas.markerBeforePublish(marker) {
-		t.Errorf("measure trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
-	}
-	if !meas.forcesFunction("measure_task") {
-		t.Error("measure trigger must force the measure_task call (tool_choice mode=function, function_name=measure_task)")
-	}
-	// It must fire on the developer loop's SUCCESSFUL terminal — outcome=success
-	// excludes a failed apply (measuring an unapplied checkout is theater).
-	if c, ok := meas.condition("agent.loop.role"); !ok || c.Value != "developer" {
-		t.Error("measure trigger must fire on a developer loop (agent.loop.role == developer)")
-	}
-	if c, ok := meas.condition("agent.loop.outcome"); !ok || c.Value != "success" {
-		t.Error("measure trigger must fire ONLY on agent.loop.outcome == success — a failed apply must not be measured")
-	}
-	// It must append the per-task attempt counter so the group-7D budget gate can count it.
-	if !meas.hasTriple("task.attempt.0") {
-		t.Error("measure trigger must append task.attempt.0 (the attempt counter the budget/retry gate counts against task.spec.0.budget)")
-	}
-}
-
-// The floors station (dev-from-task/06, group 7C): on the MEASURE loop terminal
-// (chained via the dev.measure_done loop marker, warn-free — NOT a field-to-field run
-// fact, #519), run the structural floors. Like every publish_agent spawn rule it MUST
-// be self-extinguishing — LOOP-scoped: a fired-once dev.floors_dispatched marker
-// stamped BEFORE the publish, guarded by length_eq 0. It must fire on the marker (not
-// re-derive), force check_floors, and require role=coordinator to distinguish the
-// measure loop. Red-first: drop any and this fails.
-func TestFloorsTriggerIsSelfExtinguishing(t *testing.T) {
-	fl, ok := runLifecycleRules(t)["dev_from_task_check_floors"]
-	if !ok {
-		t.Fatal("missing dev_from_task_check_floors rule")
+		t.Fatal("missing dev_from_task_floors_trigger rule")
 	}
 	const marker = "dev.floors_dispatched"
-	if !fl.hasAbsenceGuard(marker) {
-		t.Errorf("floors trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate floors loop (publish_agent is not idempotent)", marker)
-	}
-	if !fl.hasTriple(marker) {
-		t.Errorf("floors trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
-	}
-	if !fl.markerBeforePublish(marker) {
-		t.Errorf("floors trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
+	if !fl.hasAbsenceGuard(marker) || !fl.hasTriple(marker) || !fl.markerBeforePublish(marker) {
+		t.Errorf("floors trigger must be self-extinguishing (%s guard + add_triple before the publish)", marker)
 	}
 	if !fl.forcesFunction("check_floors") {
-		t.Error("floors trigger must force the check_floors call (tool_choice mode=function, function_name=check_floors)")
+		t.Error("floors trigger must force check_floors (a forced coordinator loop, NOT in Amelia's loop)")
 	}
-	// It fires on the MEASURE loop, distinguished by the tool-stamped dev.measure_done
-	// marker (present only on the measure loop) — NOT a field-to-field condition (#519).
-	if c, ok := fl.condition("dev.measure_done"); !ok || c.Operator != "ne" {
-		t.Error("floors trigger must fire on the measure loop's dev.measure_done marker (ne \"\") — the warn-free loop-marker chain")
+	if !fl.declaresTools() {
+		t.Error("floors trigger must declare an explicit tools allowlist ([check_floors])")
 	}
-	if c, ok := fl.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
-		t.Error("floors trigger must require agent.loop.role == coordinator (the measure loop is a coordinator loop; the marker distinguishes it from other coordinator loops)")
+	// Fires on the DEVELOPER loop terminal (measure moved in-loop, so there is no measure
+	// loop and no dev.measure_done chain). role=developer + outcome-present is the terminal.
+	if c, ok := fl.condition("agent.loop.role"); !ok || c.Value != "developer" {
+		t.Error("floors trigger must fire on the DEVELOPER loop (agent.loop.role == developer) — measure moved in-loop")
 	}
-	// The trigger is honest only if measure_task actually stamps dev.measure_done. That
-	// producer is measure_task (a tool), covered by its own unit pin; here we assert the
-	// condition value form stays warn-free (no $entity.triple field-to-field, #519).
-	if c, ok := fl.condition("dev.measure_done"); ok {
-		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
-			t.Errorf("floors trigger condition on dev.measure_done uses the warn-flooding $entity.triple form (#519) — the loop-marker chain must compare to a literal")
-		}
+	if c, ok := fl.condition("agent.loop.outcome"); !ok || c.Operator != "ne" {
+		t.Error("floors trigger must fire on the terminal (agent.loop.outcome ne \"\") — for BOTH success and failed; routing reads the harness facts, not the loop outcome")
+	}
+	if _, ok := fl.condition("dev.measure_done"); ok {
+		t.Error("floors trigger must NOT chain off dev.measure_done — measure moved into Amelia's loop; there is no measure loop")
 	}
 }
 
-// The gate station (dev-from-task/07, group 7D): on the FLOORS loop terminal (chained
-// via the dev.floors_done loop marker, warn-free — NOT a field-to-field run fact,
-// #519), force check_gate. Like every publish_agent spawn rule it MUST be
-// self-extinguishing — LOOP-scoped: a fired-once dev.gate_dispatched marker stamped
-// BEFORE the publish, guarded by length_eq 0. It must fire on the marker (not
-// re-derive), force check_gate, and require role=coordinator. Red-first: drop any and
-// this fails.
-func TestGateTriggerIsSelfExtinguishing(t *testing.T) {
-	g, ok := runLifecycleRules(t)["dev_from_task_gate_decision"]
-	if !ok {
-		t.Fatal("missing dev_from_task_gate_decision rule")
-	}
-	const marker = "dev.gate_dispatched"
-	if !g.hasAbsenceGuard(marker) {
-		t.Errorf("gate trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate gate loop (publish_agent is not idempotent)", marker)
-	}
-	if !g.hasTriple(marker) {
-		t.Errorf("gate trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
-	}
-	if !g.markerBeforePublish(marker) {
-		t.Errorf("gate trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
-	}
-	if !g.forcesFunction("check_gate") {
-		t.Error("gate trigger must force the check_gate call (tool_choice mode=function, function_name=check_gate)")
-	}
-	// Fires on the FLOORS loop, distinguished by the tool-stamped dev.floors_done marker
-	// (present only on the floors loop) — NOT a field-to-field condition (#519).
-	if c, ok := g.condition("dev.floors_done"); !ok || c.Operator != "ne" {
-		t.Error("gate trigger must fire on the floors loop's dev.floors_done marker (ne \"\") — the warn-free loop-marker chain")
-	}
-	if c, ok := g.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
-		t.Error("gate trigger must require agent.loop.role == coordinator (the floors loop is a coordinator loop; the marker distinguishes it)")
-	}
-	if c, ok := g.condition("dev.floors_done"); ok {
-		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
-			t.Errorf("gate trigger condition on dev.floors_done uses the warn-flooding $entity.triple form (#519) — the loop-marker chain must compare to a literal")
-		}
-	}
-}
-
-// The gate routers (dev-from-task/08a/b/c, group 7D): three rules firing on the
-// check_gate loop, mutually exclusive on the single dev.gate_decision value (literal
-// eq — snapshot-race-immune, #519-immune). EVERY router must be self-extinguishing via
-// the shared LOOP-scoped dev.routed marker (critical for the retry router, whose
-// publish_agent is not idempotent — a re-fire spawns a duplicate developer), stamped
-// BEFORE any publish. Red-first: drop the guard/marker/eq on any and this fails.
-func TestGateRoutersAreSelfExtinguishing(t *testing.T) {
+// The FLOORS ROUTE (dev-from-task/06a-d, the reshape group 5): the rule-native replacement
+// for check_gate. It fires on the check_floors loop reading the route.* mirror.
+//   - 06a advance: route.passed=true AND route.rejected=false → spawn Quinn (reviewer).
+//   - 06b not_clean: logic:OR (route.passed=false OR route.rejected=true) → route.not_clean.
+//   - 06c retry: route.not_clean=true AND route.attempt.0 length_lt 3 → re-dispatch Amelia.
+//   - 06d escalate: route.not_clean=true AND route.attempt.0 length_gt 2 → park.
+//
+// TOTALITY: advance covers (true,false); not_clean is its exact OR-complement; retry/escalate
+// partition the count (length_lt 3 / length_gt 2, no gap). Red-first: break any and this fails.
+func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	rules := runLifecycleRules(t)
-	const marker = "dev.routed"
-	routers := []struct {
-		id       string
-		decision string
-	}{
-		{"dev_from_task_route_advance", "advance"},
-		{"dev_from_task_route_retry", "retry"},
-		{"dev_from_task_route_escalate", "escalate"},
+	const marker = "route.routed"
+
+	adv, ok := rules["dev_from_task_route_advance"]
+	if !ok {
+		t.Fatal("missing dev_from_task_route_advance rule")
 	}
-	for _, rt := range routers {
-		r, ok := rules[rt.id]
+	if c, ok := adv.condition("route.passed"); !ok || c.Operator != "eq" || c.Value != "true" || c.Required {
+		t.Errorf("advance must require route.passed eq \"true\" (required:false — a scalar eq with required:true ERRORS on entities lacking the field), got %+v", c)
+	}
+	if c, ok := adv.condition("route.rejected"); !ok || c.Operator != "eq" || c.Value != "false" || c.Required {
+		t.Errorf("advance must require route.rejected eq \"false\" (required:false), got %+v", c)
+	}
+	if !adv.hasAbsenceGuard(marker) || !adv.hasTriple(marker) || !adv.markerBeforePublish(marker) {
+		t.Errorf("advance must be self-extinguishing (%s guard + add_triple before the reviewer publish)", marker)
+	}
+	spawnsReviewer := false
+	for _, a := range adv.OnEnter {
+		if a.Type == "publish_agent" && a.Role == "reviewer" {
+			spawnsReviewer = true
+		}
+	}
+	if !spawnsReviewer || !adv.usesToolChoiceAuto() || !adv.declaresTools() {
+		t.Error("advance must spawn Quinn's bounded multi-turn reviewer loop (role=reviewer, tool_choice=auto, an explicit allowlist)")
+	}
+
+	// The not-clean OR-collapse is TWO GUARDED pure-AND rules (not one logic:or rule): a
+	// guardless OR rule would re-fire and re-append unbounded (the graph-ingest ADD path
+	// bumps the version with no nothing-changed skip). Each branch carries the route.not_clean
+	// length_eq 0 self-extinguish guard (which an AND rule can, an OR rule cannot).
+	notCleanRules := map[string]string{
+		"dev_from_task_route_not_clean_red":   "route.passed",   // measured red
+		"dev_from_task_route_not_clean_floor": "route.rejected", // a floor rejected
+	}
+	for id, signalField := range notCleanRules {
+		nc, ok := rules[id]
 		if !ok {
-			t.Fatalf("missing %s rule", rt.id)
+			t.Fatalf("missing %s rule (the not-clean OR-collapse is two guarded AND rules)", id)
 		}
-		if !r.hasAbsenceGuard(marker) {
-			t.Errorf("%s must guard on %s length_eq 0 (fired-once) — else a re-scan re-fires the router (the retry router would spawn a duplicate developer)", rt.id, marker)
+		if nc.Logic == "or" {
+			t.Errorf("%s must be a GUARDED pure-AND rule, NOT logic:or — a guardless OR rule would re-fire and re-append route.not_clean unbounded", id)
 		}
-		if !r.hasTriple(marker) {
-			t.Errorf("%s must add_triple %s in on_enter to extinguish its own trigger", rt.id, marker)
+		if !nc.hasTriple("route.not_clean") {
+			t.Errorf("%s must stamp route.not_clean (the intermediate the retry/escalate rules AND with the budget)", id)
 		}
-		if !r.markerBeforePublish(marker) && rt.decision == "retry" {
-			t.Errorf("%s (a publish_agent router) must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", rt.id, marker)
+		if !nc.hasAbsenceGuard("route.not_clean") {
+			t.Errorf("%s must self-extinguish via route.not_clean length_eq 0 — else it re-fires every rescan (unbounded append)", id)
 		}
-		// Each router matches exactly one decision value via a LITERAL eq (no
-		// field-to-field #519 form, and mutually exclusive on the single value).
-		c, ok := r.condition("dev.gate_decision")
-		if !ok || c.Operator != "eq" || c.Value != rt.decision {
-			t.Errorf("%s must fire on dev.gate_decision eq %q (literal, #519-immune), got %+v", rt.id, rt.decision, c)
-		}
-		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
-			t.Errorf("%s condition on dev.gate_decision uses the warn-flooding $entity.triple form (#519)", rt.id)
-		}
-		if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
-			t.Errorf("%s must require agent.loop.role == coordinator (it fires on the coordinator gate loop)", rt.id)
+		if _, ok := nc.condition(signalField); !ok {
+			t.Errorf("%s must fire on its signal %q", id, signalField)
 		}
 	}
 
-	// The advance router hands off to clean-room verify; the escalate router parks; the
-	// retry router re-dispatches. Assert each router's substantive action.
-	if adv, ok := rules["dev_from_task_route_advance"]; ok && !adv.hasTriple("dev.task_cleared.0") {
-		t.Error("advance router must stamp dev.task_cleared.0 (the signal the clean-room verify station chains on)")
+	ret, ok := rules["dev_from_task_route_retry"]
+	if !ok {
+		t.Fatal("missing dev_from_task_route_retry rule")
 	}
-	if esc, ok := rules["dev_from_task_route_escalate"]; ok {
-		if !esc.hasTriple("run.awaiting_human") {
-			t.Error("escalate router must stamp run.awaiting_human (park the exhausted task toward the human)")
-		}
-		if esc.firesTransition() {
-			t.Error("escalate router must fire NO lifecycle transition (G2) — it records a fact and posts to the user bus")
-		}
+	if c, ok := ret.condition("route.not_clean"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("retry must require route.not_clean eq \"true\", got %+v", c)
 	}
-	if ret, ok := rules["dev_from_task_route_retry"]; ok && !ret.forcesFunction("apply_patch") {
-		t.Error("retry router must re-dispatch a developer forced to apply_patch (re-arm the whole chain)")
+	if c, ok := ret.condition("route.attempt.0"); !ok || c.Operator != "length_lt" {
+		t.Errorf("retry must require route.attempt.0 length_lt <budget> (budget remains), got %+v", c)
+	}
+	if !ret.hasAbsenceGuard(marker) || !ret.markerBeforePublish(marker) || !ret.hasTriple("task.attempt.0") {
+		t.Error("retry must be self-extinguishing (route.routed before the developer publish) and append task.attempt.0 at spawn (R3)")
+	}
+
+	esc, ok := rules["dev_from_task_route_escalate"]
+	if !ok {
+		t.Fatal("missing dev_from_task_route_escalate rule")
+	}
+	if c, ok := esc.condition("route.not_clean"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("escalate must require route.not_clean eq \"true\", got %+v", c)
+	}
+	if c, ok := esc.condition("route.attempt.0"); !ok || c.Operator != "length_gt" {
+		t.Errorf("escalate must require route.attempt.0 length_gt <budget-1> (fail-closed: catches an over-count, and partitions the count with retry's length_lt), got %+v", c)
+	}
+	if !esc.hasTriple("run.awaiting_human") || esc.firesTransition() {
+		t.Error("escalate must park (run.awaiting_human) with NO lifecycle transition (G2)")
+	}
+	// The budget literals must partition the count with no gap: retry length_lt N, escalate
+	// length_gt N-1. Assert they use the SAME budget so no count falls through both.
+	retC, _ := ret.condition("route.attempt.0")
+	escC, _ := esc.condition("route.attempt.0")
+	retN, escN := toFloat(retC.Value), toFloat(escC.Value)
+	if retN != escN+1 {
+		t.Errorf("retry length_lt %v and escalate length_gt %v must partition the count with no gap (lt N, gt N-1) — a count could otherwise fall through both or match both", retN, escN)
 	}
 }
 
-// The SERIALIZATION INVARIANT (group-7D, load-bearing): "one developer loop in flight
-// per task; ONLY dispatch-developer (dev-from-task/04) and the gate's retry branch
-// (dev-from-task/08b) may spawn a role=developer loop into a run." Dropping the token
-// handshake made this the guarantee that measure and floors evaluated the SAME frozen
-// checkout — a third developer-spawner would let two attempts race the shared checkout
-// and mis-count the budget. This pin asserts EXACTLY those two spawners exist. Red-first:
-// add a role=developer publish_agent to any other rule and this fails.
+// The REVIEW ROUTE (dev-from-task/07a-d, the reshape group 5): fires on Quinn's review loop
+// reading the route.verdict mirror.
+//   - 07a approved → spawn verify_artifact.
+//   - 07b changes_requested + budget → re-dispatch Amelia (D16 re-entry).
+//   - 07c changes_requested + exhausted → park.
+//   - 07d no-verdict (terminated, route.verdict absent) → park (fail-closed totality catch).
+func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
+	rules := runLifecycleRules(t)
+	const marker = "route.routed"
+
+	app, ok := rules["dev_from_task_review_approved"]
+	if !ok {
+		t.Fatal("missing dev_from_task_review_approved rule")
+	}
+	if c, ok := app.condition("route.verdict"); !ok || c.Operator != "eq" || c.Value != "approved" || c.Required {
+		t.Errorf("review-approved must require route.verdict eq \"approved\" (required:false), got %+v", c)
+	}
+	if !app.forcesFunction("verify_artifact") || !app.hasAbsenceGuard(marker) || !app.markerBeforePublish(marker) {
+		t.Error("review-approved must force verify_artifact and be self-extinguishing (route.routed before the publish)")
+	}
+
+	ret, ok := rules["dev_from_task_review_retry"]
+	if !ok {
+		t.Fatal("missing dev_from_task_review_retry rule (D16 re-entry)")
+	}
+	if c, ok := ret.condition("route.verdict"); !ok || c.Value != "changes_requested" {
+		t.Errorf("review-retry must fire on route.verdict changes_requested, got %+v", c)
+	}
+	if c, ok := ret.condition("route.attempt.0"); !ok || c.Operator != "length_lt" {
+		t.Errorf("review-retry must require route.attempt.0 length_lt <budget> (the SHARED attempt budget, R4), got %+v", c)
+	}
+	if !ret.hasTriple("task.attempt.0") || !ret.markerBeforePublish(marker) {
+		t.Error("review-retry must append task.attempt.0 at spawn (shared budget) and self-extinguish before the developer publish")
+	}
+	// D16: it must re-enter DEVELOPMENT (spawn a developer), not verify.
+	spawnsDev := false
+	for _, a := range ret.OnEnter {
+		if a.Type == "publish_agent" && a.Role == "developer" {
+			spawnsDev = true
+		}
+	}
+	if !spawnsDev {
+		t.Error("review-retry must re-enter DEVELOPMENT (spawn a role=developer loop) — D16: rejection re-enters dev, not verify→park")
+	}
+
+	park, ok := rules["dev_from_task_review_park"]
+	if !ok {
+		t.Fatal("missing dev_from_task_review_park rule")
+	}
+	if c, ok := park.condition("route.attempt.0"); !ok || c.Operator != "length_gt" {
+		t.Errorf("review-park must fire on route.attempt.0 length_gt <budget-1> (exhausted), got %+v", c)
+	}
+	if !park.hasTriple("run.awaiting_human") || park.firesTransition() {
+		t.Error("review-park must park with no transition (G2)")
+	}
+
+	nv, ok := rules["dev_from_task_review_no_verdict"]
+	if !ok {
+		t.Fatal("missing dev_from_task_review_no_verdict rule (fail-closed totality catch)")
+	}
+	if c, ok := nv.condition("agent.loop.role"); !ok || c.Value != "reviewer" {
+		t.Error("review-no-verdict must fire on the reviewer loop (route.verdict is absent, so role is the discriminator)")
+	}
+	if c, ok := nv.condition("route.verdict"); !ok || c.Operator != "length_eq" {
+		t.Error("review-no-verdict must require route.verdict ABSENT (length_eq 0) — the terminated-without-a-verdict case")
+	}
+	if !nv.hasTriple("run.awaiting_human") {
+		t.Error("review-no-verdict must park (no verdict is not approval, fail-closed SB5)")
+	}
+}
+
+// The DELIVERY ROUTE (dev-from-task/08a/08b, the reshape group 5): the rule-native
+// replacement for check_coherence. It fires on the RUN (delivery is terminal, so a
+// run-scoped delivery.routed guard is correct — no per-attempt reset, no mirror).
+//   - 08a coherent: verify.result=pass AND review.verdict.0=approved AND openspec.validated
+//     present → open_pr.
+//   - 08b blocked: verify.result=fail → park.
+//
+// A verify.result of "retry" matches NEITHER (a flake never triggers delivery).
+func TestDeliveryRouteTotalityAndSelfExtinguish(t *testing.T) {
+	rules := runLifecycleRules(t)
+	const marker = "delivery.routed"
+
+	pr, ok := rules["dev_from_task_delivery_open_pr"]
+	if !ok {
+		t.Fatal("missing dev_from_task_delivery_open_pr rule")
+	}
+	if c, ok := pr.condition("verify.result"); !ok || c.Operator != "eq" || c.Value != "pass" || c.Required {
+		t.Errorf("delivery-open-pr must require verify.result eq \"pass\" (required:false — absent = false, no premature fire), got %+v", c)
+	}
+	if c, ok := pr.condition("review.verdict.0"); !ok || c.Operator != "eq" || c.Value != "approved" {
+		t.Errorf("delivery-open-pr must require review.verdict.0 eq \"approved\" (defense in depth), got %+v", c)
+	}
+	if c, ok := pr.condition("openspec.validated"); !ok || c.Operator != "length_gt" {
+		t.Errorf("delivery-open-pr must require openspec.validated present (length_gt 0; a revision-match eq lands with #519's .value), got %+v", c)
+	}
+	if !pr.forcesFunction("open_pr") || !pr.hasAbsenceGuard(marker) || !pr.markerBeforePublish(marker) {
+		t.Error("delivery-open-pr must force open_pr and be self-extinguishing via a RUN-scoped delivery.routed BEFORE the publish (open_pr is not idempotent)")
+	}
+
+	park, ok := rules["dev_from_task_delivery_park"]
+	if !ok {
+		t.Fatal("missing dev_from_task_delivery_park rule")
+	}
+	if c, ok := park.condition("verify.result"); !ok || c.Operator != "eq" || c.Value != "fail" {
+		t.Errorf("delivery-park must fire on verify.result eq \"fail\" (mutually exclusive with the coherent route on the verify value; a \"retry\" matches neither), got %+v", c)
+	}
+	if !park.hasTriple("run.awaiting_human") || park.firesTransition() {
+		t.Error("delivery-park must park with no transition (G2)")
+	}
+	if !park.hasAbsenceGuard(marker) {
+		t.Errorf("delivery-park must self-extinguish via %s (shared with the coherent route; delivery is terminal so a run-scoped guard is correct)", marker)
+	}
+}
+
+// The SERIALIZATION INVARIANT (the reshape, load-bearing): "one developer loop in flight
+// per task; ONLY dispatch-developer (04), the floors-retry route (06c), and the review-retry
+// route (07b) may spawn a role=developer loop." This is what guarantees floors evaluated the
+// SAME frozen checkout the attempt measured. Red-first: add a role=developer publish_agent to
+// any other rule and this fails.
 func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 	rules, err := loadRules(repoRoot(t))
 	if err != nil {
@@ -635,38 +735,30 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 	}
 	sanctioned := map[string]bool{
 		"dev_from_task_dispatch_developer": true, // 04 — the initial dispatch
-		"dev_from_task_route_retry":        true, // 08b — the gate's retry branch
+		"dev_from_task_route_retry":        true, // 06c — the floors-route retry
+		"dev_from_task_review_retry":       true, // 07b — the review-route retry (D16)
 	}
 	var spawners []string
 	for _, r := range rules {
 		for _, a := range r.OnEnter {
-			// A developer spawn is either an explicit role=developer OR the developer
-			// task subject (agent.task.developer) — catch BOTH so a rule that omits the
-			// explicit role but targets the developer subject cannot evade the invariant
-			// (defense in depth on a load-bearing pin).
 			if a.Type != "publish_agent" || (a.Role != "developer" && a.Subject != "agent.task.developer") {
 				continue
 			}
 			spawners = append(spawners, r.ID)
 			if !sanctioned[r.ID] {
-				t.Errorf("rule %q spawns a developer loop (role=%q subject=%q) but is not a sanctioned spawner — the one-developer-in-flight serialization invariant (which replaced the token handshake) permits ONLY dispatch-developer (04) and the gate retry router (08b)", r.ID, a.Role, a.Subject)
+				t.Errorf("rule %q spawns a developer loop (role=%q subject=%q) but is not a sanctioned spawner — the one-developer-in-flight serialization invariant permits ONLY dispatch-developer (04), the floors-retry route (06c), and the review-retry route (07b)", r.ID, a.Role, a.Subject)
 			}
 		}
 	}
-	// And both sanctioned spawners must actually exist (a rename must not silently drop
-	// the retry path, leaving the loop unable to retry).
 	for id := range sanctioned {
 		if !slices.Contains(spawners, id) {
-			t.Errorf("sanctioned developer-spawner %q does not spawn a role=developer loop — the retry/dispatch chain is broken", id)
+			t.Errorf("sanctioned developer-spawner %q does not spawn a role=developer loop — the dispatch/retry chain is broken", id)
 		}
 	}
 }
 
-// open_pr is NON-IDEMPOTENT (a second spawn = a duplicate PR), so — like the developer
-// spawners — ONLY the coherent router (dev-from-task/12a) may force it. This pin catches a
-// future second open_pr spawner that the shared dev.pr_routed guard would not (a distinct
-// rule with its own guard could still open a second PR). Red-first: force open_pr from any
-// other rule and this fails.
+// open_pr is NON-IDEMPOTENT (a second spawn = a duplicate PR), so ONLY the coherent
+// delivery route (dev-from-task/08a) may force it.
 func TestOnlySanctionedOpenPRSpawners(t *testing.T) {
 	rules, err := loadRules(repoRoot(t))
 	if err != nil {
@@ -676,31 +768,31 @@ func TestOnlySanctionedOpenPRSpawners(t *testing.T) {
 	for _, r := range rules {
 		if r.forcesFunction("open_pr") {
 			spawners = append(spawners, r.ID)
-			if r.ID != "dev_from_task_route_open_pr" {
-				t.Errorf("rule %q forces open_pr but is not the sanctioned spawner — open_pr is non-idempotent (a re-spawn opens a duplicate PR); ONLY the coherent router (dev-from-task/12a) may force it", r.ID)
+			if r.ID != "dev_from_task_delivery_open_pr" {
+				t.Errorf("rule %q forces open_pr but is not the sanctioned spawner — open_pr is non-idempotent; ONLY the coherent delivery route (08a) may force it", r.ID)
 			}
 		}
 	}
-	if !slices.Contains(spawners, "dev_from_task_route_open_pr") {
-		t.Error("the coherent router (dev-from-task/12a) does not force open_pr — the delivery path is broken")
+	if !slices.Contains(spawners, "dev_from_task_delivery_open_pr") {
+		t.Error("the coherent delivery route (08a) does not force open_pr — the delivery path is broken")
 	}
 }
 
 // run.awaiting_human is ONE logical park writer (G5) realized by a SANCTIONED SET of rule
-// files (rules carry no Source, so the tool-Source cross-check can't see them — this pin is
-// what keeps the four realizations from silently growing a fifth that means something
-// subtly different). Every rule that stamps run.awaiting_human must be in the set. Red-first:
-// add an add_triple run.awaiting_human to any other rule and this fails.
+// files. Every rule that stamps it must be in the set (rules carry no Source, so the
+// tool-Source cross-check can't see them — this pin keeps the realizations honest).
 func TestOnlySanctionedParkWriters(t *testing.T) {
 	rules, err := loadRules(repoRoot(t))
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
 	sanctioned := map[string]bool{
-		"run_park_awaiting_human":        true, // run-lifecycle/03 — a coordinator ask_human decision
-		"sandbox_park_unprovable":        true, // sandbox/02 — an unprovable sandbox
-		"dev_from_task_route_escalate":   true, // 08c — the dev-loop budget exhausted
-		"dev_from_task_route_incoherent": true, // 12b — the delivery signals do not cohere
+		"run_park_awaiting_human":         true, // run-lifecycle/03 — a coordinator ask_human decision
+		"sandbox_park_unprovable":         true, // sandbox/02 — an unprovable sandbox
+		"dev_from_task_route_escalate":    true, // 06d — the dev-loop budget exhausted
+		"dev_from_task_review_park":       true, // 07c — the review budget exhausted
+		"dev_from_task_review_no_verdict": true, // 07d — the reviewer produced no verdict
+		"dev_from_task_delivery_park":     true, // 08b — the delivery signals do not cohere
 	}
 	var writers []string
 	for _, r := range rules {
@@ -718,157 +810,83 @@ func TestOnlySanctionedParkWriters(t *testing.T) {
 	}
 }
 
-// The review station (dev-from-task/09, group 8C): on the gate loop's ADVANCE decision,
-// Quinn reviews the cleared task. Like every publish_agent spawn rule it MUST be
-// self-extinguishing — LOOP-scoped: a fired-once dev.review_dispatched marker stamped
-// BEFORE the publish, guarded by length_eq 0. It must fire on the advance decision (a
-// literal eq loop marker), force submit_review, and spawn a role=reviewer loop (Quinn's
-// D16 gate). Red-first: drop any and this fails.
-func TestReviewTriggerIsSelfExtinguishing(t *testing.T) {
-	r, ok := runLifecycleRules(t)["dev_from_task_review_cleared"]
-	if !ok {
-		t.Fatal("missing dev_from_task_review_cleared rule")
+// The CONFIG LINT (the reshape, task 4.6): every model-publishing spawn declares an
+// explicit tools allowlist — no allowlist-less spawn advertises the whole tool surface to
+// the model. And every declared tool is in the agentic-tools allowed_tools gate. Red-first:
+// drop the tools from any spawn rule and this fails.
+func TestEveryModelSpawnDeclaresToolsAllowlist(t *testing.T) {
+	root := repoRoot(t)
+	rules, err := loadRules(root)
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
 	}
-	const marker = "dev.review_dispatched"
-	if !r.hasAbsenceGuard(marker) {
-		t.Errorf("review trigger must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate review loop (publish_agent is not idempotent)", marker)
+	cfg, err := loadBootstrap(root)
+	if err != nil {
+		t.Fatalf("load bootstrap: %v", err)
 	}
-	if !r.hasTriple(marker) {
-		t.Errorf("review trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
+	allowed := make(map[string]bool)
+	for _, tool := range cfg.Components.AgenticTools.Config.AllowedTools {
+		allowed[tool] = true
 	}
-	if !r.markerBeforePublish(marker) {
-		t.Errorf("review trigger must stamp %s BEFORE its publish_agent — else a publish failure leaves the run duplicable", marker)
+	if len(allowed) == 0 {
+		t.Fatal("allowed_tools is empty — the per-spawn allowlists have no gate to be a subset of (the config-lint would pass vacuously)")
 	}
-	if !r.forcesFunction("submit_review") {
-		t.Error("review trigger must force the submit_review call (tool_choice mode=function, function_name=submit_review)")
-	}
-	// It fires on the gate loop's ADVANCE decision (only a cleared task is reviewed).
-	if c, ok := r.condition("dev.gate_decision"); !ok || c.Operator != "eq" || c.Value != "advance" {
-		t.Errorf("review trigger must fire on dev.gate_decision eq advance (a cleared task), got %+v", c)
-	}
-	if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
-		t.Error("review trigger must fire on the coordinator gate loop (agent.loop.role == coordinator)")
-	}
-	// It spawns a role=reviewer loop — Quinn's D16 gate, the one non-coordinator role.
-	spawnsReviewer := false
-	for _, a := range r.OnEnter {
-		if a.Type == "publish_agent" && a.Role == "reviewer" {
-			spawnsReviewer = true
+	sawSpawn := false
+	for _, r := range rules {
+		for _, a := range r.OnEnter {
+			if a.Type != "publish_agent" {
+				continue
+			}
+			sawSpawn = true
+			if len(a.Tools) == 0 {
+				t.Errorf("rule %q has a model-publishing spawn with NO tools allowlist — every spawn must scope its tools (task 4.6), so a real model is not handed the whole tool surface", r.ID)
+			}
+			for _, tool := range a.Tools {
+				if !allowed[tool] {
+					t.Errorf("rule %q spawns tool %q not in agentic-tools allowed_tools", r.ID, tool)
+				}
+			}
 		}
 	}
-	if !spawnsReviewer {
-		t.Error("review trigger must spawn a role=reviewer loop (Quinn reviews, D16)")
+	if !sawSpawn {
+		t.Fatal("no publish_agent spawns found; the config-lint would pass vacuously")
 	}
 }
 
-// The verify station (dev-from-task/10, group 8D): on the REVIEW loop terminal (chained
-// via the dev.reviewed loop marker, warn-free), run the clean-room cold verify. Like every
-// publish_agent spawn rule it MUST be self-extinguishing — LOOP-scoped: a fired-once
-// dev.verify_dispatched marker stamped BEFORE the publish, guarded by length_eq 0. It must
-// fire on the reviewed marker, force verify_artifact, and require role=reviewer (the review
-// loop). Red-first: drop any and this fails.
-func TestVerifyTriggerIsSelfExtinguishing(t *testing.T) {
-	v, ok := runLifecycleRules(t)["dev_from_task_verify_reviewed"]
-	if !ok {
-		t.Fatal("missing dev_from_task_verify_reviewed rule")
-	}
-	const marker = "dev.verify_dispatched"
-	if !v.hasAbsenceGuard(marker) {
-		t.Errorf("verify trigger must guard on %s length_eq 0 (fired-once) — else a graph replay re-spawns a duplicate verify loop", marker)
-	}
-	if !v.hasTriple(marker) {
-		t.Errorf("verify trigger must add_triple %s in on_enter to extinguish its own trigger", marker)
-	}
-	if !v.markerBeforePublish(marker) {
-		t.Errorf("verify trigger must stamp %s BEFORE its publish_agent", marker)
-	}
-	if !v.forcesFunction("verify_artifact") {
-		t.Error("verify trigger must force the verify_artifact call (tool_choice mode=function, function_name=verify_artifact)")
-	}
-	// Fires on the REVIEW loop, distinguished by the tool-stamped dev.reviewed marker.
-	if c, ok := v.condition("dev.reviewed"); !ok || c.Operator != "ne" {
-		t.Error("verify trigger must fire on the review loop's dev.reviewed marker (ne \"\") — the warn-free loop-marker chain")
-	}
-	if c, ok := v.condition("agent.loop.role"); !ok || c.Value != "reviewer" {
-		t.Error("verify trigger must require agent.loop.role == reviewer (the review loop; verify chains off Quinn's review)")
-	}
-	if c, ok := v.condition("dev.reviewed"); ok {
-		if s, isStr := c.Value.(string); isStr && strings.Contains(s, "$entity.triple.") {
-			t.Errorf("verify trigger condition on dev.reviewed uses the warn-flooding $entity.triple form (#519)")
+// G2 WIDENED (the reshape, task 5.6): zero Go-DERIVED ROUTING TOKENS. The route-token layer
+// (check_gate/check_coherence and their dev.gate_decision/dev.coherence_decided/pr.coherence
+// decision facts) is DELETED — routing is now rules over harness-stamped facts (R1). This
+// pin fails if a route-DECISION predicate (a Go-derived advance/retry/escalate/coherent/
+// blocked token consumed by a rule dispatch condition) reappears in the vocabulary OR a rule
+// condition, or if the deleted decider packages return. The raw route.* mirror facts (passed/
+// rejected/verdict) are NOT decisions — they are harness copies the RULES compose the route
+// from — so they are allowed; only a single-fact DECISION token is banned.
+func TestNoGoDerivedRoutingTokens(t *testing.T) {
+	// Banned route-DECISION predicates: a Go tool that stamps one of these, consumed by a
+	// rule's dispatch condition, is exactly the check_gate/check_coherence pattern (B1).
+	banned := []string{"dev.gate_decision", "dev.coherence_decided", "pr.coherence.decision", "dev.gate.0.decision"}
+	for _, name := range banned {
+		if _, ok := vocab.WriterOf(name); ok {
+			t.Errorf("vocabulary declares a route-decision token %q — the reshape deleted the Go route-token layer (check_gate/check_coherence); routing is rules over raw facts (R1/G2)", name)
 		}
 	}
-}
-
-// The coherence gate (dev-from-task/11, group 8D): on the verify loop terminal, roll up
-// the delivery gate. Self-extinguishing (dev.coherence_dispatched before publish), forces
-// check_coherence, fires on the dev.verified marker.
-func TestCoherenceTriggerIsSelfExtinguishing(t *testing.T) {
-	r, ok := runLifecycleRules(t)["dev_from_task_coherence_gate"]
-	if !ok {
-		t.Fatal("missing dev_from_task_coherence_gate rule")
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
 	}
-	const marker = "dev.coherence_dispatched"
-	if !r.hasAbsenceGuard(marker) || !r.hasTriple(marker) || !r.markerBeforePublish(marker) {
-		t.Errorf("coherence trigger must be self-extinguishing (%s guard + add_triple + marker-before-publish)", marker)
-	}
-	if !r.forcesFunction("check_coherence") {
-		t.Error("coherence trigger must force the check_coherence call")
-	}
-	if c, ok := r.condition("dev.verified"); !ok || c.Operator != "ne" {
-		t.Error("coherence trigger must fire on the verify loop's dev.verified marker (ne \"\")")
-	}
-	if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
-		t.Error("coherence trigger must fire on the coordinator verify loop")
-	}
-}
-
-// The delivery routers (dev-from-task/12a/b, group 8D): fire on the coherence loop's
-// dev.coherence_decided marker (literal eq, mutually exclusive), self-extinguishing via the
-// shared dev.pr_routed marker. 12a (coherent) spawns open_pr (a publish_agent — the marker is
-// load-bearing since open_pr is not idempotent); 12b (blocked) parks run.awaiting_human (the
-// fourth park realization) with NO transition (G2).
-func TestDeliveryRoutersAreSelfExtinguishing(t *testing.T) {
-	rules := runLifecycleRules(t)
-	const marker = "dev.pr_routed"
-	routers := []struct {
-		id       string
-		decision string
-	}{
-		{"dev_from_task_route_open_pr", "coherent"},
-		{"dev_from_task_route_incoherent", "blocked"},
-	}
-	for _, rt := range routers {
-		r, ok := rules[rt.id]
-		if !ok {
-			t.Fatalf("missing %s rule", rt.id)
-		}
-		if !r.hasAbsenceGuard(marker) || !r.hasTriple(marker) {
-			t.Errorf("%s must self-extinguish via %s (guard + add_triple)", rt.id, marker)
-		}
-		c, ok := r.condition("dev.coherence_decided")
-		if !ok || c.Operator != "eq" || c.Value != rt.decision {
-			t.Errorf("%s must fire on dev.coherence_decided eq %q (literal), got %+v", rt.id, rt.decision, c)
-		}
-		if c, ok := r.condition("agent.loop.role"); !ok || c.Value != "coordinator" {
-			t.Errorf("%s must fire on the coordinator coherence loop", rt.id)
+	for _, r := range rules {
+		for _, c := range r.Conditions {
+			for _, name := range banned {
+				if c.Field == name {
+					t.Errorf("rule %q dispatches on a Go-derived route-decision token %q — routing must compose from RAW harness facts (route.passed/route.rejected/route.verdict/verify.result), never a single derived decision (G2, the widened census)", r.ID, name)
+				}
+			}
 		}
 	}
-	// 12a coherent → open_pr (marker before the non-idempotent publish).
-	if openpr, ok := rules["dev_from_task_route_open_pr"]; ok {
-		if !openpr.forcesFunction("open_pr") {
-			t.Error("coherent router must force open_pr")
-		}
-		if !openpr.markerBeforePublish(marker) {
-			t.Errorf("coherent router must stamp %s BEFORE its publish (open_pr is not idempotent — a re-fire opens a duplicate PR)", marker)
-		}
-	}
-	// 12b blocked → park, no transition.
-	if park, ok := rules["dev_from_task_route_incoherent"]; ok {
-		if !park.hasTriple("run.awaiting_human") {
-			t.Error("blocked router must stamp run.awaiting_human (the fourth park realization)")
-		}
-		if park.firesTransition() {
-			t.Error("blocked router must fire NO lifecycle transition (G2)")
+	// The decider packages themselves must be gone.
+	for _, pkg := range []string{"internal/tools/checkgate", "internal/tools/checkcoherence"} {
+		if _, err := os.Stat(filepath.Join(repoRoot(t), pkg)); err == nil {
+			t.Errorf("the Go route-decider package %s still exists — the reshape deletes check_gate/check_coherence; routing is rule-native (R1)", pkg)
 		}
 	}
 }

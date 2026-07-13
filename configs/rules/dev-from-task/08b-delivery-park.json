@@ -1,0 +1,40 @@
+{
+  "id": "dev_from_task_delivery_park",
+  "type": "expression",
+  "name": "Delivery route → BLOCKED: the cold verify failed → park toward the human",
+  "description": "The blocked delivery route (design R1/D16/SB5, group 5). When the clean-room cold verify FAILED (verify.result=fail) — the committed artifact did not prove cold (not self-contained, a warm-cache-masked fabrication survived, or a forbidden build-file pattern) — the run cannot deliver a coherent PR. PARK toward the human. A run that cannot prove its delivery signals NEVER ships a PR (the class both predecessors faked, inverted).\n\nWHY verify.result=fail IS THE BLOCK: only APPROVED work is cold-verified (07a fires on approved), and openspec.validated is required to have reached the approval gate — so by the time verify runs, review + validation are green invariants, and the only signal that can block delivery is the cold verify. So blocked = verify.result eq \"fail\" (fail-closed for the realistic case). A 'retry' verify (transient flake) matches neither this nor 08a — it re-runs rather than parking a good run.\n\nTRIGGER (on the RUN, like 08a): verify.result eq \"fail\" (required:false) AND delivery.routed length_eq 0 (self-extinguish). Mutually exclusive with the coherent route (08a, verify.result=pass) on the verify result.\n\nWRITER: run.awaiting_human — a sanctioned park realization (G5), same meaning as the others. SELF-EXTINGUISHING: delivery.routed on the run (shared with 08a; a run-scoped guard is correct since delivery is terminal). It fires on the run, so the park marker stamps $entity.id (the run) directly — no subject-override.",
+  "enabled": true,
+  "conditions": [
+    { "field": "verify.result", "operator": "eq", "value": "fail", "required": false },
+    { "field": "delivery.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "delivery.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "run.awaiting_human",
+      "object": "the clean-room cold verify of the committed artifact failed; the run cannot deliver a coherent PR"
+    },
+    {
+      "type": "publish",
+      "subject": "user.response.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "park",
+    "station": "delivery blocked → park (R1/D16/SB5, group 5)",
+    "trigger_rationale": "verify.result=fail — the only blocking signal at delivery (review + validation are green invariants by the time verify runs). A 'retry' matches neither delivery route.",
+    "writer_note": "run.awaiting_human — a sanctioned park realization (G5). It fires on the run, so the marker stamps $entity.id directly.",
+    "restart_safe": "SELF-EXTINGUISHING via the RUN-scoped delivery.routed marker (shared with 08a)."
+  }
+}

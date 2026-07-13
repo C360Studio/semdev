@@ -25,6 +25,7 @@
       "subject": "agent.task.coordinator",
       "role": "coordinator",
       "model": "coordinator",
+      "tools": ["project_tasks"],
       "tool_choice": { "mode": "function", "function_name": "project_tasks" },
       "properties": {
         "phase": "project"

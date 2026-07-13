@@ -22,9 +22,7 @@ import (
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
-	"github.com/c360studio/semdev/internal/tools/checkcoherence"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
-	"github.com/c360studio/semdev/internal/tools/checkgate"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
@@ -32,6 +30,8 @@ import (
 	"github.com/c360studio/semdev/internal/tools/openpr"
 	"github.com/c360studio/semdev/internal/tools/projecttasks"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
+	"github.com/c360studio/semdev/internal/tools/readdiff"
+	"github.com/c360studio/semdev/internal/tools/readworkspace"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semdev/internal/tools/verifyartifact"
@@ -179,6 +179,15 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		// stood up and measure/verify read, so the developer's authored diff lands in the
 		// checkout the loop then measures.
 		patcher applypatch.Patcher
+		// read_workspace/read_diff (multi-turn dev loop, design simplify-m0-execution-rail
+		// R7/tasks 4.2-4.3) are Amelia's and Quinn's read-only windows into the SAME
+		// checkout instance apply_patch mutates: read_workspace resolves the checkout root
+		// (mirroring measure_task's Workspace seam) and read_diff resolves base..HEAD over
+		// it. Neither writes a fact or fires a transition (G3/G2) — they exist only because
+		// no existing primitive can put checkout bytes or the authored diff into a loop
+		// (G1).
+		rwWorkspace readworkspace.Workspace
+		rdDiffer    readdiff.Differ
 	)
 	if deps.NATSClient != nil {
 		checkouts, cerr := runspace.NewCheckouts("", cliexec.OSRunner{})
@@ -202,6 +211,11 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		// git apply runs on the host checkout root (= the container's /work bind-mount),
 		// so the plain os/exec runner authors into the sandbox the loop measures.
 		patcher = runspace.NewPatcher(checkouts, cliexec.OSRunner{}, factReader)
+		// read_workspace/read_diff share this SAME *runspace.Checkouts instance — the
+		// checkout apply_patch mutates and provision materializes is exactly the one they
+		// read from.
+		rwWorkspace = checkouts
+		rdDiffer = checkouts
 	}
 
 	// measure_task (harness-measurement) runs a projected task's IMMUTABLE
@@ -214,7 +228,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// the outcome is of the artifact built cold in the operator-declared image, never a
 	// host process over an unproven environment. Each nil dep makes Execute fail loudly;
 	// an unprovisioned sandbox makes Resolve fail closed (park) — never a silent host exec.
-	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, changeWriter, deps.Platform, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
 	}
 
@@ -241,42 +255,21 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// clone. It writes via the shared OwnedFactWriter (its own Source, verify-harness —
 	// G5-safe). store is nil at M0 (no governed secrets). Execute fails loudly if any nil
 	// seam is missing; a proof that cannot run is retryable, never a silent green.
-	if err := reg.RegisterExecutor(verifyartifact.New(verifyClones, manifests, verifyartifact.DefaultProver(), nil, deps.Platform, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(verifyartifact.New(verifyClones, manifests, verifyartifact.DefaultProver(), nil, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
 	}
 
 	// check_floors (dev-from-task) is the floor-tools wrapper: it runs the pure floor
-	// library over a task's current attempt and stamps floor.finding. WHICH files the
-	// attempt authored is the runspace Attempts seam wired above (it reads the task's
-	// declared target files from the run's checkout). It writes via the shared
-	// OwnedFactWriter (its own Source, floor-tools — G5-safe). Execute fails loudly if
-	// either seam is missing.
-	if err := reg.RegisterExecutor(checkfloors.New(attempts, changeWriter, deps.Platform, deps.Logger)); err != nil {
+	// library over a task's current attempt and stamps floor.finding, AND (the reshape,
+	// R1) mirrors the routing inputs onto its own loop — route.passed (the measurement it
+	// reads via the shared changefacts.Reader), route.rejected (its aggregate), route.attempt
+	// (the append-mirror of task.attempt) — under a distinct route-mirror Source so the
+	// rule-native floors route (advance/not_clean/retry/escalate) fires on them. WHICH files
+	// the attempt authored is the runspace Attempts seam wired above. It writes via the shared
+	// OwnedFactWriter (floor.finding under floor-tools, the mirror under route-mirror — G5-safe).
+	// deps.Platform builds the floors loop's entity id for the mirror. Each nil dep fails loud.
+	if err := reg.RegisterExecutor(checkfloors.New(attempts, factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", checkfloors.ToolName, err)
-	}
-
-	// check_gate (dev-from-task, group 7D) is the dev loop's budget-and-route gate: it
-	// reads the recorded measurement.result/floor.finding verdicts and the distinct
-	// attempt count against task.spec.<i>.budget (all off the run via the shared
-	// changefacts.Reader) and derives advance/retry/escalate in Go — the model supplies
-	// only the task index (G3), and it fails CLOSED (escalate) on a missing judgment
-	// fact. It fires no lifecycle transition (G2): it stamps the decision as dev.gate.*
-	// evidence + a dev.gate_decision loop marker (its own Source, gate-tools — G5-safe),
-	// and three router rules act on the marker. deps.Platform builds the gate loop's
-	// entity id for the marker. Each nil dep makes Execute fail loudly.
-	if err := reg.RegisterExecutor(checkgate.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", checkgate.ToolName, err)
-	}
-
-	// check_coherence (dev-from-task, group 8D) is the open_pr coherence gate: it rolls up
-	// verify.result + openspec.validated + every projected task's review.verdict (all off
-	// the run via the shared changefacts.Reader) and derives coherent/blocked in Go — the
-	// model supplies nothing (G3), and it fails CLOSED (any non-pass/absent signal blocks).
-	// It fires no transition (G2): it stamps pr.coherence.* evidence + a dev.coherence_decided
-	// loop marker (its own Source, coherence-tools — G5-safe), and two router rules act on
-	// the marker. deps.Platform builds the coherence loop's entity id. Each nil dep fails loud.
-	if err := reg.RegisterExecutor(checkcoherence.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", checkcoherence.ToolName, err)
 	}
 
 	// open_pr (forge-io, group 8D) is the run's delivery step: on a coherent run a router
@@ -311,6 +304,29 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// verify + read_diff target. Nil patcher/writer (the census) makes Execute fail loudly.
 	if err := reg.RegisterExecutor(applypatch.New(patcher, changeWriter, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", applypatch.ToolName, err)
+	}
+
+	// read_workspace (multi-turn dev loop, design simplify-m0-execution-rail R7/task 4.2)
+	// is the read sibling of apply_patch's write guard: it reads a repo-relative file or
+	// directory listing out of the run's checkout, path-guarded through the SAME
+	// containment (runspace.SafeJoin) the patcher enforces, paginated under the tool-result
+	// byte cap. It is READ-ONLY — no writer, no fact, no transition (G3/G2) — and its G1
+	// justification is that no existing primitive can put checkout bytes into a model's
+	// turn (a rule only routes/aggregates facts; prompt templating carries triples, not
+	// file contents). Nil workspace (the census) makes Execute fail loudly.
+	if err := reg.RegisterExecutor(readworkspace.New(rwWorkspace, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", readworkspace.ToolName, err)
+	}
+
+	// read_diff (multi-turn dev loop, design simplify-m0-execution-rail R7/task 4.3) is the
+	// reviewer's (Quinn's) window onto the cumulative authored change: `git diff
+	// <base>..HEAD` over the run's committed checkout, which under the M0 one-in-flight
+	// serialization invariant is exactly base..attempt.commit. READ-ONLY — no writer, no
+	// fact, no transition (G3/G2) — and its G1 justification is the same as
+	// read_workspace's: no existing primitive can put the authored diff into a loop. Nil
+	// differ (the census) makes Execute fail loudly.
+	if err := reg.RegisterExecutor(readdiff.New(rdDiffer, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", readdiff.ToolName, err)
 	}
 
 	return nil

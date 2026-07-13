@@ -1,0 +1,45 @@
+{
+  "id": "dev_from_task_floors_trigger",
+  "type": "expression",
+  "name": "Developer loop terminated → run the structural floors (check_floors)",
+  "description": "The floors station (design R1, group 5). When Amelia's bounded dev loop TERMINATES (success or failed), run semdev's deterministic structural floors over her authored diff — did she author a test at all, is it vacuous, did she ship a stub, does the source parse, did she 'test' only a mock, and (H1) did she author ANY declared target. check_floors also MIRRORS the routing inputs onto its own loop (route.passed = the run's measurement, fail-closed 'false' if absent; route.rejected = its aggregate; route.attempt.0 = the append-mirror of task.attempt.0) so the floors ROUTE (06a-d) can fire on them (a rule reads only the firing entity's triples, and the route rules fire on this floors loop). G2: this fires no lifecycle transition; check_floors measures + mirrors, the route rules decide.\n\nTRIGGER = the DEVELOPER loop's TERMINAL, not a measure loop (measure moved INTO Amelia's loop, R2). It fires on agent.loop.role=developer (stamped at spawn) AND agent.loop.outcome ne \"\" (stamped at completion — present iff the loop terminated, for BOTH success and failed). Gating on outcome-present (not outcome=success) is deliberate: a failed loop (max-iteration cap) is still a completed attempt the route must handle (retry/escalate on the harness-stamped facts, R2) — routing does not trust the loop's success/failure, it reads measurement.result + floor.finding. Each attempt mints a FRESH developer loop, so this re-fires per attempt for free.\n\nRUN BINDING: run_scope=inherit reads the developer loop's agent.run and binds the check_floors loop's RunID to the same run, so check_floors resolves THIS run's checkout (the bytes Amelia committed) and reads its measurement/attempt facts for the mirror.\n\nROLE = coordinator (design roster: Sarah owns the harness tools; check_floors is NOT in Amelia's loop — it runs in its own forced single-turn coordinator loop, like project_tasks/provision). tool_choice=function forces check_floors and the allowlist scopes the loop to it; the loop calls it and StopLoops, writing floor.finding.* (run) + the route.* mirror (loop). check_floors takes only task_index (G3).\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps dev.floors_dispatched=$entity.instance on the DEVELOPER loop (the firing entity), guarded by dev.floors_dispatched length_eq 0. House pattern (publish_agent is not idempotent; role+outcome stay stamped, so without this a replay would re-spawn a duplicate floors loop). Marker stamped BEFORE the publish. A fresh developer loop per attempt carries no marker, so floors re-run per attempt for free.",
+  "enabled": true,
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "developer", "required": true },
+    { "field": "agent.loop.outcome", "operator": "ne", "value": "", "required": true },
+    { "field": "agent.run.entity_id", "operator": "ne", "value": "", "required": true },
+    { "field": "dev.floors_dispatched", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.floors_dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.coordinator",
+      "role": "coordinator",
+      "model": "coordinator",
+      "tools": ["check_floors"],
+      "tool_choice": { "mode": "function", "function_name": "check_floors" },
+      "properties": {
+        "phase": "floors"
+      },
+      "prompt": "SEMDEV — the developer's bounded dev loop terminated. Run the structural floors on the authored diff: call check_floors with task_index 0. The harness runs the deterministic floors (tests-must-exist, vacuous-test, stub, source-build, anti-mock, presence) over the run's checkout and records the findings, and mirrors the routing inputs onto this loop for the floors route — you supply no verdict. Calling check_floors completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "check_floors — run the structural floors on the developer-loop terminal (R1, group 5)",
+    "trigger_rationale": "fires on the DEVELOPER loop's terminal (role=developer stamped at spawn; outcome ne \"\" stamped at completion — present for both success and failed). Routing keys on the harness facts, not the loop outcome, so floors run on any terminal. Replaces the old measure-loop chain (measure moved in-loop, R2).",
+    "role_rationale": "coordinator (Sarah's harness tool; check_floors runs in a forced single-turn loop, NOT Amelia's multi-turn loop). tool_choice=function:check_floors + a scoped [check_floors] allowlist forces the call.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.floors_dispatched marker + length_eq 0 guard, stamped BEFORE the publish. A fresh developer loop per attempt re-arms floors.",
+    "chain_note": "check_floors mirrors route.passed/route.rejected/route.attempt.0 onto ITS loop; the floors route (06a advance / 06b not_clean / 06c retry / 06d escalate) fires on those mirror facts (design R1 — the rule-native routing that replaced check_gate)."
+  }
+}
