@@ -918,6 +918,58 @@ func TestOnlySanctionedDeliveryPublishers(t *testing.T) {
 	}
 }
 
+// convertedStationTools are the six deterministic stations converted from a forced
+// single-turn coordinator loop into a publish-triggered COMPONENT in group 6 (R6). Their
+// tool executors are DELETED (6E); each station calls the surviving shared core off a plain
+// `publish`. No rule may force any of them as a model turn ever again.
+var convertedStationTools = []string{
+	"validate_change",   // → validation-station
+	"project_tasks",     // → projection-station
+	"check_floors",      // → floors-station
+	"verify_artifact",   // → verify-station
+	"open_pr",           // → delivery-station
+	"provision_sandbox", // → provision-station
+}
+
+// The GROUP-6 MODEL-TURN CENSUS (R6, task 6.5): every deterministic station — change
+// validation, task projection, structural floors, clean-room verify, delivery, and sandbox
+// provisioning — was converted from a forced coordinator turn (a publish_agent with
+// tool_choice=function calling a harness tool, or that tool sitting in a spawn's allowlist)
+// into a publish-triggered COMPONENT. Under a real LLM each such forced turn was a paid model
+// call that decided nothing (the outcome is harness-derived, G3), and the executors are now
+// deleted (6E). This pin makes their re-growth fail the build: NO rule may force ANY of the
+// six converted tools as a model turn, nor advertise one in a spawn's tools allowlist (which
+// global discovery + tool_choice=auto could otherwise let a model call). The forced model
+// turns that legitimately REMAIN are the PERSONA turns — the coordinator's decide/create_change
+// (Sarah authors the change), Amelia's developer loop, Quinn's reviewer loop — plus measure_task,
+// which STAYS a tool by design (R6: Amelia's in-loop feedback channel, not a deterministic station).
+func TestNoRuleForcesAConvertedStationTool(t *testing.T) {
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	if len(rules) == 0 {
+		t.Fatal("no rules loaded; the model-turn census would pass vacuously")
+	}
+	for _, r := range rules {
+		for _, name := range convertedStationTools {
+			if r.forcesFunction(name) {
+				t.Errorf("rule %q forces the %q tool as a model turn — it was converted to a publish-triggered component in group 6 (R6) and its executor deleted (6E); a deterministic station fires via `publish`, never a paid forced turn (the outcome is harness-derived, G3)", r.ID, name)
+			}
+		}
+		for _, a := range r.OnEnter {
+			if a.Type != "publish_agent" {
+				continue
+			}
+			for _, tool := range a.Tools {
+				if slices.Contains(convertedStationTools, tool) {
+					t.Errorf("rule %q advertises the converted deterministic-station tool %q in a publish_agent tools allowlist — those tools are components now (R6) with deleted executors (6E); a model must not be able to call one", r.ID, tool)
+				}
+			}
+		}
+	}
+}
+
 // run.awaiting_human is ONE logical park writer (G5) realized by a SANCTIONED SET of rule
 // files. Every rule that stamps it must be in the set (rules carry no Source, so the
 // tool-Source cross-check can't see them — this pin keeps the realizations honest).

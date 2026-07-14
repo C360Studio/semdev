@@ -28,19 +28,13 @@ import (
 	"github.com/c360studio/semdev/internal/station/validation"
 	stationverify "github.com/c360studio/semdev/internal/station/verify"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
-	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
-	"github.com/c360studio/semdev/internal/tools/openpr"
-	"github.com/c360studio/semdev/internal/tools/projecttasks"
-	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
 	"github.com/c360studio/semdev/internal/tools/readdiff"
 	"github.com/c360studio/semdev/internal/tools/readworkspace"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
-	"github.com/c360studio/semdev/internal/tools/validatechange"
-	"github.com/c360studio/semdev/internal/tools/verifyartifact"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
@@ -119,7 +113,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 // station components capture the SAME instances these tools use. The census passes
 // nil for both, so those seams stay literal-nil and the tools register schema-only;
 // the live boot passes the shared instances.
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, sandboxSourceDir string, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -160,15 +154,10 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", writechange.ToolName, err)
 	}
 
-	// validate_change shells the real OpenSpec CLI as the compatibility oracle and
-	// stamps openspec.validated from the real exit code (harness-measured, G3). The
-	// exec runner is a plain os/exec seam (no NATS); the owned-fact writer stamps/
-	// clears the marker and is nil without a client (schema-only census). It reuses
-	// the same OwnedFactWriter transport as create_change — each tool stamps its own
-	// Source per triple (G5), so sharing the transport is safe.
-	if err := reg.RegisterExecutor(validatechange.New(factReader, cliexec.OSRunner{}, changeWriter, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", validatechange.ToolName, err)
-	}
+	// (validate_change was CONVERTED to the validation-station COMPONENT in group 6 (R6):
+	// its executor is deleted; the validation station calls the shared validatechange.Validate
+	// core off a rule publish, so no forced tool turn remains. Its OpenSpec CLI oracle runs
+	// with ZERO model turns now.)
 
 	// github_list_comments (forge-io) reads an issue/PR thread via the semdev
 	// GitHub client, built from the injected githubToken. Without a token the tool
@@ -181,56 +170,38 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	} else if err := reg.RegisterExecutor(listcomments.New(nil, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", listcomments.ToolName, err)
 	}
-	// project_tasks (dev-from-task) reads a run's approved change task facts, projects
-	// them through devtask.Project, and stamps the immutable task.spec. It reads via
-	// the shared changefacts.Reader and writes task.spec via the shared OwnedFactWriter
-	// (its own Source, task-projector — sharing the transport is G5-safe). Both nil in
-	// the census (schema-only); Execute fails loudly if either is missing.
-	if err := reg.RegisterExecutor(projecttasks.New(factReader, changeWriter, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", projecttasks.ToolName, err)
-	}
+	// (project_tasks was CONVERTED to the projection-station COMPONENT in group 6 (R6):
+	// its executor is deleted; the projection station calls the shared projecttasks.Project
+	// core off a rule publish. The deterministic-station tools converted in group 6 —
+	// validate/project/floors/verify/provision/open_pr — no longer register here; only
+	// measure_task (Amelia's in-loop feedback channel) stays a tool of that family.)
 
-	// The run's CHECKOUT + everything the dev-loop/verify tools read from it are the
-	// runspace seams (group 4): Checkouts (the per-run materialized working copy —
-	// measure_task/verify_artifact's Workspace), Manifests (the declared image + run
-	// fields — verify_artifact's semdev-init seam), and Attempts (the authored files for
-	// the floors). They are the concrete forge-io-checkout / semdev-init implementations
-	// the tools declared nil at M0. Wired only with a live client so the schema-scanning
-	// censuses keep a LITERAL-nil interface (a typed-nil would slip past the tools'
-	// nil-checks); Execute fails loudly if a seam is missing, and each seam fails closed
-	// when a run has no checkout (park toward the human, never a silent host-path guess).
+	// The run's CHECKOUT + the dev-loop seams that read/mutate it (group 4): the WARM
+	// sandbox registry measure_task Execs into, the apply_patch patcher that MUTATES the
+	// checkout, and read_workspace/read_diff's read-only windows onto it. They are the
+	// concrete forge-io-checkout implementations the tools declared nil at M0. Wired only
+	// with a live client so the schema-scanning censuses keep a LITERAL-nil interface (a
+	// typed-nil would slip past the tools' nil-checks); Execute fails loudly if a seam is
+	// missing, and each fails closed when a run has no checkout (park toward the human,
+	// never a silent host-path guess). The checkout/verify/floors/provision reads moved
+	// to the R6 station components, which capture boot's SAME shared runspace instances.
 	var (
-		verifyClones verifyartifact.VerifyClones // verify_artifact's fresh cold clone of the committed artifact
-		manifests    verifyartifact.Manifests    // verify_artifact's reproducibility manifest
-		attempts     checkfloors.Attempts        // check_floors' authored-attempt files
 		// measure_task (group 7B) runs the frozen test command IN the run's WARM sandbox
-		// container — provision_sandbox stood it up over the checkout. The warm-sandbox
-		// registry is the SAME *runspace.Sandboxes instance provision writes to and
-		// measure reads from (one run, one warm container), passed in so the runtime can
+		// container the provision STATION stood up over the checkout. The warm-sandbox
+		// registry is the SAME *runspace.Sandboxes instance the provision station writes to
+		// and measure reads from (one run, one warm container), passed in so the runtime can
 		// reap it on Stop.
 		measureSandboxes measuretask.Sandboxes
-		// provision_sandbox (group 5/7B) stands the checkout UP and, on a proven-cold
-		// baseline, stands the WARM dev container up: it materializes the run's fresh
-		// copy from its source (provCheckouts, from provSources), cold-proves the
-		// declared image, then leaves the warm container Up (provWarmers) for the loop.
-		// It shares the SAME *runspace.Checkouts instance the Workspace seams use, so the
-		// checkout it materializes is exactly the one measure_task/verify later resolve —
-		// one run, one on-disk working copy.
-		provSources   provisionsandbox.Sources
-		provCheckouts provisionsandbox.Checkouts
-		provManifests provisionsandbox.Manifests
-		provWarmers   provisionsandbox.Warmers
-		// apply_patch (group 6) MUTATES the run's checkout — the same instance provision
-		// stood up and measure/verify read, so the developer's authored diff lands in the
+		// apply_patch (group 6) MUTATES the run's checkout — the same instance the provision
+		// station stood up and measure reads, so the developer's authored diff lands in the
 		// checkout the loop then measures.
 		patcher applypatch.Patcher
 		// read_workspace/read_diff (multi-turn dev loop, design simplify-m0-execution-rail
 		// R7/tasks 4.2-4.3) are Amelia's and Quinn's read-only windows into the SAME
 		// checkout instance apply_patch mutates: read_workspace resolves the checkout root
-		// (mirroring measure_task's Workspace seam) and read_diff resolves base..HEAD over
-		// it. Neither writes a fact or fires a transition (G3/G2) — they exist only because
-		// no existing primitive can put checkout bytes or the authored diff into a loop
-		// (G1).
+		// and read_diff resolves base..HEAD over it. Neither writes a fact or fires a
+		// transition (G3/G2) — they exist only because no existing primitive can put checkout
+		// bytes or the authored diff into a loop (G1).
 		rwWorkspace readworkspace.Workspace
 		rdDiffer    readdiff.Differ
 	)
@@ -242,26 +213,15 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		if checkouts == nil {
 			return fmt.Errorf("register tools: live NATS client but nil run checkouts (wiring fault — the shared instance must be created before RegisterTools)")
 		}
-		verifyClones = checkouts
-		manifests = runspace.Manifests{}
-		attempts = runspace.NewAttempts(factReader, checkouts)
 		// The warm-sandbox registry (created by the runtime and passed in so Stop can
-		// reap it) is shared by provision (writer) and measure (reader).
+		// reap it) is shared by the provision station (writer) and measure (reader).
 		measureSandboxes = sandboxes
-		provWarmers = sandboxes
-		// The run's SOURCE (what to materialize the checkout from) is a StaticSource at
-		// M0 — the operator-configured target dir (the in-repo fixture the journey
-		// drives); forge-io's per-run `--recursive` PR clone lands behind this seam at
-		// M2. An empty sandboxSourceDir makes Resolve fail closed → the run parks (SB5).
-		provSources = runspace.StaticSource{Dir: sandboxSourceDir}
-		provCheckouts = checkouts
-		provManifests = runspace.Manifests{}
 		// git apply runs on the host checkout root (= the container's /work bind-mount),
 		// so the plain os/exec runner authors into the sandbox the loop measures.
 		patcher = runspace.NewPatcher(checkouts, cliexec.OSRunner{}, factReader)
 		// read_workspace/read_diff share this SAME *runspace.Checkouts instance — the
-		// checkout apply_patch mutates and provision materializes is exactly the one they
-		// read from.
+		// checkout apply_patch mutates and the provision station materializes is exactly the
+		// one they read from.
 		rwWorkspace = checkouts
 		rdDiffer = checkouts
 	}
@@ -291,57 +251,13 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}
 
-	// verify_artifact (clean-room-verify) is the G4 gate — the THIRD sandbox instance
-	// (design SB4.3): it CLONES the run's committed artifact into a fresh dir
-	// (verifyClones = the same *runspace.Checkouts, non-destructive of the warm checkout),
-	// builds the declared image and runs resolve then the artifact's own tests cold (the
-	// test step compiles the artifact) in a fresh throwaway
-	// container with a fresh dependency cache (DefaultProver → coldproof.ProveArtifact),
-	// judges the evidence with verify.Decide, and stamps verify.result. The fresh clone +
-	// fresh cache is what makes a cache-masked fabrication or a harness-only fixup FAIL
-	// here (SB3, the semspec grave). HOW to prove it (manifests) is resolved from the
-	// clone. It writes via the shared OwnedFactWriter (its own Source, verify-harness —
-	// G5-safe). store is nil at M0 (no governed secrets). Execute fails loudly if any nil
-	// seam is missing; a proof that cannot run is retryable, never a silent green.
-	if err := reg.RegisterExecutor(verifyartifact.New(verifyClones, manifests, verifyartifact.DefaultProver(), nil, changeWriter, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", verifyartifact.ToolName, err)
-	}
-
-	// check_floors (dev-from-task) is the floor-tools wrapper: it runs the pure floor
-	// library over a task's current attempt and stamps floor.finding, AND (the reshape,
-	// R1) mirrors the routing inputs onto its own loop — route.passed (the measurement it
-	// reads via the shared changefacts.Reader), route.rejected (its aggregate), route.attempt
-	// (the append-mirror of task.attempt) — under a distinct route-mirror Source so the
-	// rule-native floors route (advance/not_clean/retry/escalate) fires on them. WHICH files
-	// the attempt authored is the runspace Attempts seam wired above. It writes via the shared
-	// OwnedFactWriter (floor.finding under floor-tools, the mirror under route-mirror — G5-safe).
-	// deps.Platform builds the floors loop's entity id for the mirror. Each nil dep fails loud.
-	if err := reg.RegisterExecutor(checkfloors.New(attempts, factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", checkfloors.ToolName, err)
-	}
-
-	// open_pr (forge-io, group 8D) is the run's delivery step: on a coherent run a router
-	// rule forces it to record pr.ref. At M0 pr.ref is a deterministic LOCAL delivery stub
-	// (the real forge-io PR is M2); the coherence gate that got here genuinely passed, only
-	// the delivery target is stubbed (NOT semspec's placeholder-pass). G3 (no args), G2 (no
-	// transition), single writer pr.ref (open-pr). Nil writer fails loud.
-	if err := reg.RegisterExecutor(openpr.New(changeWriter, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", openpr.ToolName, err)
-	}
-
-	// provision_sandbox (sandbox) is the provision-and-prove-cold station: on an
-	// approved run a rule forces it to materialize the run's checkout (provCheckouts,
-	// from provSources), build the operator-declared image (provManifests), prove the
-	// repo builds COLD (DefaultProver → coldproof.ProveBaseline), and — on a proven
-	// baseline — stand up the WARM dev container the loop measures in (provWarmers, the
-	// shared Sandboxes), then stamp the derived sandbox.ready/attestation or a
-	// sandbox.blocked reason (G3). It shares the run's changefacts.Reader (idempotency
-	// guard) and the OwnedFactWriter (its own Source, sandbox-provisioner — G5-safe).
-	// store is nil at M0 (no governed secrets, SB2c). Each nil seam makes Execute fail
-	// loudly — a sandbox it cannot prove or stand up is a park, never a silent skip (SB5).
-	if err := reg.RegisterExecutor(provisionsandbox.New(provSources, provCheckouts, provManifests, provWarmers, provisionsandbox.DefaultProver(), nil, factReader, changeWriter, deps.Logger)); err != nil {
-		return fmt.Errorf("register %s: %w", provisionsandbox.ToolName, err)
-	}
+	// (verify_artifact, check_floors, open_pr, and provision_sandbox were CONVERTED to the
+	// verify-station / floors-station / delivery-station / provision-station COMPONENTS in
+	// group 6 (R6): their executors are deleted; each station calls the shared core
+	// (verifyartifact.RunVerify / checkfloors.RunFloors / openpr.Deliver / provisionsandbox.Provision)
+	// off a rule publish, capturing boot's shared runspace instances via RegisterAll. No forced
+	// deterministic-station tool turn remains — only measure_task (below) stays a tool of that
+	// family, Amelia's in-loop feedback channel.)
 
 	// apply_patch (sandbox, SB6) is the developer's code-authoring tool: it applies a
 	// unified diff to the run's checkout path-guarded to inside it (never the host),

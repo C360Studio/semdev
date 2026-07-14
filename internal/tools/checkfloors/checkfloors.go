@@ -1,25 +1,25 @@
-// Package checkfloors is the check_floors tool (dev-from-task, tasks 6.5/6.6): the
-// floor-tools wrapper. It runs semdev's deterministic floor library over a task's
-// current dev-loop attempt and stamps each finding as a floor.finding fact, so the
-// loop can route on harness-computed structural facts — did the attempt author a
-// test, is that test vacuous, did it ship a stub, does the source parse, did it
-// "test" only a mock of the code under test — rather than the persona's claim about
-// its own work.
+// Package checkfloors is the shared FLOORS CORE (RunFloors): it runs semdev's
+// deterministic floor library over a task's current dev-loop attempt, stamps each
+// finding as a floor.finding fact, and mirrors the routing inputs onto the caller's
+// loop entity, so the loop can route on harness-computed structural facts — did the
+// attempt author a test, is that test vacuous, did it ship a stub, does the source
+// parse, did it "test" only a mock of the code under test — rather than the
+// persona's claim about its own work. Post-reshape (R6) this core is called by the
+// floors STATION (internal/station/floors), a publish-triggered component; there is
+// no forced coordinator tool turn.
 //
-// The floors are the pure core (internal/floors); this tool only WRAPS them with
+// The floors are the pure core (internal/floors); RunFloors only WRAPS them with
 // fact-stamping, which is what keeps the checks offline-testable and G5-clean (the
 // floors package writes no facts). The verdict is COMPUTED by the deterministic
-// floors, never supplied (G3 — the schema takes only the task index; floor.finding
+// floors, never supplied (G3 — RunFloors takes only the task index; floor.finding
 // carries a harness-derived passed, not a model outcome). It stamps the findings and
 // returns whether any floor rejected; it fires no lifecycle transition (G2) — the
-// loop-gate that blocks advance-to-review on a rejecting floor.finding is a rule
-// (task 6.6, wired with the bounded dev loop). Single G5 writer of floor.finding.*
-// (floor-tools).
+// loop-gate that blocks advance-to-review on a rejecting floor.finding is a rule.
+// Single G5 writer of floor.finding.* (floor-tools).
 package checkfloors
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -28,14 +28,9 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/floors"
 	"github.com/c360studio/semdev/internal/measurement"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
-	"github.com/c360studio/semstreams/types"
 )
-
-// ToolName is the registered tool name and the dev loop's floor-check handler.
-const ToolName = "check_floors"
 
 // Source is stamped on every floor.finding triple. It MUST equal the writer declared for
 // floor.finding.* in internal/vocab (G5) — a conformance pin cross-checks it.
@@ -67,35 +62,9 @@ const (
 // contents) and the task's declared target files — from the run's checkout, into the
 // pure floors.Attempt the deterministic checks consume. It is the seam over the
 // checkout (which files this iteration authored is git/workspace state the forge-io
-// checkout owns); its production implementation lands with the bounded dev loop. nil
-// at M0 (schema-only, like write_change's resolver); Execute fails loudly if absent.
+// checkout owns).
 type Attempts interface {
 	Resolve(ctx context.Context, runEntityID string, taskIndex int) (floors.Attempt, error)
-}
-
-// Executor runs the floors over a task's attempt and stamps the findings.
-type Executor struct {
-	attempts Attempts
-	reader   changefacts.Reader // reads the run's measurement + attempt facts to MIRROR onto the floors loop
-	writer   agentictools.OwnedFactWriter
-	platform types.PlatformMeta // builds the floors loop's entity id for the route mirror
-	logger   *slog.Logger
-}
-
-// New builds the check_floors executor. attempts/reader/writer may be nil for schema-only
-// registration (the censuses inspect ListTools without a live checkout or NATS client);
-// Execute fails loudly if any is nil. reader reads the run's measurement.result.<i>.passed
-// and task.attempt.<i> to mirror onto the floors loop; platform builds that loop's entity id.
-func New(attempts Attempts, reader changefacts.Reader, writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Executor{attempts: attempts, reader: reader, writer: writer, platform: platform, logger: logger}
-}
-
-type payload struct {
-	// TaskIndex is a pointer so an ABSENT argument is distinguishable from index 0.
-	TaskIndex *int `json:"task_index"`
 }
 
 // FloorResult reports the floors outcome for a task attempt.
@@ -105,75 +74,13 @@ type FloorResult struct {
 	AttemptID string
 }
 
-// Execute resolves the task's attempt, runs every floor, and stamps the findings as
-// floor.finding.<task_index>.<floor> facts on the run entity, mirroring the routing
-// inputs onto its own loop. It is a thin wrapper over the shared RunFloors core (also
-// called by the floors station, R6). The verdicts are the deterministic floors' own.
-func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.attempts == nil || e.reader == nil || e.writer == nil {
-		return errResult(call, agentic.ToolErrorInternal, "check_floors: harness not fully wired (attempts/reader/writer)")
-	}
-	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
-	if !ok || runEntityID == "" {
-		return errResult(call, agentic.ToolErrorInternal, "check_floors: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
-	}
-
-	var p payload
-	raw, err := json.Marshal(call.Arguments)
-	if err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "check_floors: encode arguments: %v", err)
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "check_floors: decode arguments: %v", err)
-	}
-	if p.TaskIndex == nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "check_floors: task_index is required")
-	}
-	idx := *p.TaskIndex
-	if idx < 0 {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "check_floors: task_index must be non-negative, got %d", idx)
-	}
-
-	// The tool mirrors the route onto ITS OWN loop (call.LoopID). This is a DEAD path
-	// post-reshape — the floors station replaced the forced check_floors coordinator turn
-	// (R6), so no rule spawns this tool and call.LoopID is never populated in production —
-	// but it is kept correct (and skipped with a warn when absent) until the executor is
-	// deleted in the group-6 tool-cleanup slice.
-	routeLoopEntityID := ""
-	if call.LoopID == "" {
-		e.logger.Warn("check_floors: no loop_id on the tool call — skipping the route mirror; the floors route will not fire",
-			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
-	} else {
-		var lerr error
-		routeLoopEntityID, lerr = agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
-		if lerr != nil {
-			return errResult(call, agentic.ToolErrorInternal, "check_floors: construct floors loop entity id: %v", lerr)
-		}
-	}
-
-	res, err := RunFloors(ctx, e.attempts, e.reader, e.writer, e.logger, runEntityID, routeLoopEntityID, idx)
-	if err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "%v", err)
-	}
-
-	summary, _ := json.Marshal(map[string]any{
-		"task_index": idx,
-		"rejected":   res.Rejected,
-		"findings":   res.Findings,
-	})
-	// StopLoop: the (dead) forced floors loop ends after this call. A rejecting verdict is
-	// DATA, not a tool error; the floors ROUTE reads the stamped route.passed/route.rejected
-	// mirror, not this StopLoop, to decide advance/retry.
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
-}
-
 // RunFloors runs the deterministic floors over the task's current attempt, stamps
 // floor.finding.<idx>.* on the run, and MIRRORS the routing inputs
 // (route.passed/route.rejected/route.attempt.<idx>) onto routeLoopEntityID for the
-// rule-native floors route. Shared core of the check_floors tool and the floors station
-// (R6). routeLoopEntityID is the entity the floors-route rules fire on: for the station
-// it is the DEVELOPER loop L_n (the published dispatch entity_id, fresh per attempt); the
-// mirror is skipped when it is "" (the dead tool path with no loop, or a unit test).
+// rule-native floors route. Called by the floors station (R6). routeLoopEntityID is
+// the entity the floors-route rules fire on — the DEVELOPER loop L_n (the published
+// dispatch entity_id, fresh per attempt); the mirror is skipped when it is "" (a
+// unit test with no loop to mirror onto).
 //
 // The mirror is RAW copies (never a derived route decision, G2): route.passed (the
 // measurement, fail-closed "false" when absent OR bound to a stale snapshot — the g4+5
@@ -379,13 +286,4 @@ func clearFindings(ctx context.Context, writer agentictools.OwnedFactWriter, run
 		return nil
 	}
 	return writer.ReplaceTriples(ctx, runEntityID, nil, preds)
-}
-
-func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
-	return agentic.ToolResult{
-		CallID:    call.ID,
-		Name:      ToolName,
-		Error:     fmt.Sprintf(format, args...),
-		ErrorKind: kind,
-	}, nil
 }

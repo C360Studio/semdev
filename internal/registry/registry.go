@@ -42,18 +42,17 @@ var Entries = []Entry{
 	{Name: "floors-station", Kind: KindComponent, Capability: "dev-from-task", AlignmentNote: "deterministic-station-component"},
 	{Name: "verify-station", Kind: KindComponent, Capability: "clean-room-verify", AlignmentNote: "deterministic-station-component"},
 	{Name: "provision-station", Kind: KindComponent, Capability: "sandbox", AlignmentNote: "deterministic-station-component"},
+	// The deterministic-station tools (validate_change/project_tasks/verify_artifact/
+	// check_floors/open_pr/provision_sandbox) were CONVERTED to the R6 station components
+	// above in group 6 and their executors deleted (6E) — they are no longer registered
+	// tools, so they carry no KindTool entry. Each station imports the surviving CORE from
+	// the same package (Validate/Project/RunVerify/RunFloors/Deliver/Provision).
 	{Name: "create_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "create-change-author-tool"},
 	{Name: "render_openspec", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "render-openspec-hydrate-tool"},
 	{Name: "write_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "write-change-workspace-tool"},
-	{Name: "validate_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "validate-change-cli-oracle"},
 	{Name: "github_list_comments", Kind: KindTool, Capability: "forge-io", AlignmentNote: "github-list-comments-tool"},
-	{Name: "project_tasks", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "project-tasks-tool"},
 	{Name: "measure_task", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "measurement-tool"},
 	{Name: "submit_review", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "submit-review-tool"},
-	{Name: "verify_artifact", Kind: KindTool, Capability: "clean-room-verify", AlignmentNote: "verify-artifact-tool"},
-	{Name: "check_floors", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "floor-tools-wrapper"},
-	{Name: "open_pr", Kind: KindTool, Capability: "forge-io", AlignmentNote: "open-pr-tool"},
-	{Name: "provision_sandbox", Kind: KindTool, Capability: "sandbox", AlignmentNote: "provision-sandbox-tool"},
 	{Name: "apply_patch", Kind: KindTool, Capability: "sandbox", AlignmentNote: "apply-patch-tool"},
 	// read_workspace / read_diff (the reshape, group 4): the developer/reviewer loops are
 	// bounded multi-turn; no framework primitive can put checkout bytes (read_workspace) or

@@ -70,17 +70,22 @@ func bootstrapConfigPath(t *testing.T) string {
 // from schema-only registration — RegisterExecutor records the name either way; the
 // live-NATS path is proven separately by wantHealthyComponents reaching healthy,
 // which those processors cannot do without a real NATS client.)
+//
+// The six deterministic-station tools (validate_change/project_tasks/verify_artifact/
+// check_floors/open_pr/provision_sandbox) were converted to R6 COMPONENTS and their
+// executors deleted in group 6 (6E) — they are no longer registered tools, so they are
+// NOT advertised. The surviving tools are the persona/author/dev-loop tools plus the
+// dev-loop read/write seams.
 var wantAdvertisedTools = []string{
 	"create_change",
 	"render_openspec",
 	"write_change",
-	"validate_change",
 	"github_list_comments",
-	"project_tasks",
 	"measure_task",
 	"submit_review",
-	"verify_artifact",
-	"check_floors",
+	"apply_patch",
+	"read_workspace",
+	"read_diff",
 }
 
 // wantHealthyComponents are the processors the runtime must bring to healthy: the

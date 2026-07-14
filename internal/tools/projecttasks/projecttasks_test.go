@@ -3,12 +3,12 @@ package projecttasks
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -65,15 +65,6 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) 
 	return w.owned, nil
 }
 
-func callFor(slug string) agentic.ToolCall {
-	return agentic.ToolCall{
-		ID:        "c1",
-		Name:      ToolName,
-		Metadata:  map[string]any{agentic.MetadataKeyRunEntityID: runEntity},
-		Arguments: map[string]any{"slug": slug},
-	}
-}
-
 func changeFact(i int, field, obj string) message.Triple {
 	return message.Triple{
 		Predicate: fmt.Sprintf("openspec.change.demo.task.%d.%s", i, field),
@@ -110,25 +101,23 @@ func withField(facts []message.Triple, i int, field, obj string) []message.Tripl
 	return append(withoutField(facts, field), changeFact(i, field, obj))
 }
 
-// run executes the tool and returns the stamped task.spec as a predicate→object
-// map (empty when nothing was stamped) plus the tool result.
-func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string, agentic.ToolResult) {
+// run calls the Project core directly and returns the stamped task.spec as a
+// predicate→object map (empty when nothing was stamped), plus Project's own
+// return values.
+func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string, int, error) {
 	t.Helper()
 	// Seed the run's validated marker AND demo's current content revision as an
 	// EQUAL pair, so the fixtures reach the projection logic; the mismatch cases
 	// (unvalidated / re-authored / alternate) are pinned separately below.
 	facts = append(facts, validatedAt(demoRevision), slugRevisionAt("demo", demoRevision))
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
+	count, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
 	idx := map[string]string{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			idx[tr.Predicate] = tr.Object.(string)
 		}
 	}
-	return idx, res
+	return idx, count, err
 }
 
 // Task 3.3 red-first: a task whose test_command runs `go test` but whose target_files
@@ -138,12 +127,12 @@ func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string
 func TestProjectParksWhenTargetFilesOmitTest(t *testing.T) {
 	w := &fakeWriter{}
 	facts := withField(validTaskFacts(0), 0, "target_files", `["h.go"]`) // source only, no *_test.go
-	_, res := run(t, facts, w)
-	if res.Error == "" {
+	_, _, err := run(t, facts, w)
+	if err == nil {
 		t.Fatal("a go-test task whose target_files omit every *_test.go must park toward the human, not project")
 	}
-	if !strings.Contains(res.Error, "test") {
-		t.Errorf("the park reason should name the missing test-file contract, got: %s", res.Error)
+	if !strings.Contains(err.Error(), "test") {
+		t.Errorf("the park reason should name the missing test-file contract, got: %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("projection must stamp NOTHING when the test-file contract is violated (atomic)")
@@ -154,12 +143,12 @@ func TestProjectParksWhenTargetFilesOmitTest(t *testing.T) {
 // task.spec.<i>.<field> on the run entity, stamped with the task-projector Source.
 func TestProjectStampsTaskSpec(t *testing.T) {
 	w := &fakeWriter{}
-	idx, res := run(t, validTaskFacts(0), w)
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	idx, count, err := run(t, validTaskFacts(0), w)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
 	}
-	if !res.StopLoop {
-		t.Error("projection result must set StopLoop — projection is single-shot; without it the forced-function loop takes another turn and re-refuses the now-immutable spec")
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
 	}
 	if len(w.replaces) != 1 {
 		t.Fatalf("expected one replace, got %d", len(w.replaces))
@@ -191,9 +180,9 @@ func TestProjectStampsTaskSpec(t *testing.T) {
 
 // The budget is clamped at projection: an authored 9 stamps as 5.
 func TestProjectClampsBudget(t *testing.T) {
-	idx, res := run(t, withField(validTaskFacts(0), 0, "budget", "9"), &fakeWriter{})
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	idx, _, err := run(t, withField(validTaskFacts(0), 0, "budget", "9"), &fakeWriter{})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
 	}
 	if idx["task.spec.0.budget"] != "5" {
 		t.Errorf("budget = %q, want clamped to 5", idx["task.spec.0.budget"])
@@ -201,13 +190,13 @@ func TestProjectClampsBudget(t *testing.T) {
 }
 
 // Presence preserved on READ: an ABSENT assumptions fact reconstructs a nil field
-// (a gap) and projection fails toward the human — the tool surfaces the gap and
+// (a gap) and projection fails toward the human — Project surfaces the gap and
 // stamps nothing.
 func TestProjectAbsentFieldFailsTowardHuman(t *testing.T) {
 	w := &fakeWriter{}
-	_, res := run(t, withoutField(validTaskFacts(0), "assumptions"), w)
-	if res.Error == "" || !strings.Contains(res.Error, "assumptions") {
-		t.Fatalf("absent assumptions must gap (fail toward human), got error %q", res.Error)
+	_, _, err := run(t, withoutField(validTaskFacts(0), "assumptions"), w)
+	if err == nil || !strings.Contains(err.Error(), "assumptions") {
+		t.Fatalf("absent assumptions must gap (fail toward human), got error %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a failed projection must stamp nothing")
@@ -217,9 +206,9 @@ func TestProjectAbsentFieldFailsTowardHuman(t *testing.T) {
 // A missing test_command likewise fails toward the human (the spec scenario).
 func TestProjectMissingTestCommandFailsTowardHuman(t *testing.T) {
 	w := &fakeWriter{}
-	_, res := run(t, withoutField(validTaskFacts(0), "test_command"), w)
-	if res.Error == "" || !strings.Contains(res.Error, "test_command") {
-		t.Fatalf("missing test_command must fail toward human, got %q", res.Error)
+	_, _, err := run(t, withoutField(validTaskFacts(0), "test_command"), w)
+	if err == nil || !strings.Contains(err.Error(), "test_command") {
+		t.Fatalf("missing test_command must fail toward human, got %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a failed projection must stamp nothing")
@@ -230,9 +219,9 @@ func TestProjectMissingTestCommandFailsTowardHuman(t *testing.T) {
 // happy path already carries non_goals "[]"); prove an authored-empty assumptions
 // also passes.
 func TestProjectAuthoredEmptyListPasses(t *testing.T) {
-	_, res := run(t, withField(validTaskFacts(0), 0, "assumptions", "[]"), &fakeWriter{})
-	if res.Error != "" {
-		t.Fatalf("authored-empty assumptions must pass, got %q", res.Error)
+	_, _, err := run(t, withField(validTaskFacts(0), 0, "assumptions", "[]"), &fakeWriter{})
+	if err != nil {
+		t.Fatalf("authored-empty assumptions must pass, got %v", err)
 	}
 }
 
@@ -240,9 +229,9 @@ func TestProjectAuthoredEmptyListPasses(t *testing.T) {
 // — the dev loop converges on the facts, it does not redefine them.
 func TestProjectRejectsReProjection(t *testing.T) {
 	w := &fakeWriter{owned: []string{"task.spec.0.goal", "task.spec.0.budget"}}
-	_, res := run(t, validTaskFacts(0), w)
-	if res.Error == "" || !strings.Contains(res.Error, "immutable") {
-		t.Fatalf("re-projection onto existing task.spec must be rejected, got %q", res.Error)
+	_, _, err := run(t, validTaskFacts(0), w)
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("re-projection onto existing task.spec must be rejected, got %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a rejected re-projection must stamp nothing")
@@ -256,12 +245,9 @@ func TestProjectRejectsReProjection(t *testing.T) {
 func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
 	facts := append(validTaskFacts(0), slugRevisionAt("demo", demoRevision))
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" || !strings.Contains(res.Error, "validated") {
-		t.Fatalf("an unvalidated slug must be refused, got %q", res.Error)
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	if err == nil || !strings.Contains(err.Error(), "validated") {
+		t.Fatalf("an unvalidated slug must be refused, got %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a refused projection must stamp nothing")
@@ -275,12 +261,9 @@ func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
 func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
 	facts := append(validTaskFacts(0), validatedAt("sha256:other-content"), slugRevisionAt("demo", demoRevision))
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" || !strings.Contains(res.Error, "validated") {
-		t.Fatalf("an alternate validated slug must be refused, got %q", res.Error)
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	if err == nil || !strings.Contains(err.Error(), "validated") {
+		t.Fatalf("an alternate validated slug must be refused, got %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a refused projection must stamp nothing")
@@ -298,12 +281,9 @@ func TestProjectRejectsReauthoredUnrevalidatedChange(t *testing.T) {
 		slugRevisionAt("demo", "sha256:demo-content-v2"), // re-author bumped to v2
 	)
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), callFor("demo"))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" || !strings.Contains(res.Error, "current content") {
-		t.Fatalf("a re-authored-since-validation change must be refused, got %q", res.Error)
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	if err == nil || !strings.Contains(err.Error(), "current content") {
+		t.Fatalf("a re-authored-since-validation change must be refused, got %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a refused projection must stamp nothing")
@@ -313,8 +293,8 @@ func TestProjectRejectsReauthoredUnrevalidatedChange(t *testing.T) {
 // No task facts (the change was not authored, or the slug is wrong) is an error,
 // not an empty projection.
 func TestProjectNoTaskFactsErrors(t *testing.T) {
-	_, res := run(t, nil, &fakeWriter{})
-	if res.Error == "" {
+	_, _, err := run(t, nil, &fakeWriter{})
+	if err == nil {
 		t.Fatal("expected an error when no task facts exist")
 	}
 }
@@ -322,23 +302,11 @@ func TestProjectNoTaskFactsErrors(t *testing.T) {
 // Multiple tasks project in index order, each frozen into its own task.spec.<i>.
 func TestProjectMultipleTasks(t *testing.T) {
 	facts := append(validTaskFacts(0), validTaskFacts(1)...)
-	idx, res := run(t, facts, &fakeWriter{})
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	idx, _, err := run(t, facts, &fakeWriter{})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
 	}
 	if idx["task.spec.0.goal"] == "" || idx["task.spec.1.goal"] == "" {
 		t.Errorf("both tasks must project: %v", idx)
-	}
-}
-
-// Schema-only registration (nil reader/writer) fails loudly if executed, never
-// silently drops the projection.
-func TestProjectFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil).Execute(context.Background(), callFor("demo"))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" {
-		t.Error("a nil-harness projection must fail loudly")
 	}
 }

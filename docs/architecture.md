@@ -68,15 +68,9 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `create_change` | tool | openspec-io | `create-change-author-tool` |
 | `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
 | `write_change` | tool | openspec-io | `write-change-workspace-tool` |
-| `validate_change` | tool | openspec-io | `validate-change-cli-oracle` |
 | `github_list_comments` | tool | forge-io | `github-list-comments-tool` |
-| `project_tasks` | tool | dev-from-task | `project-tasks-tool` |
 | `measure_task` | tool | harness-measurement | `measurement-tool` |
 | `submit_review` | tool | harness-measurement | `submit-review-tool` |
-| `verify_artifact` | tool | clean-room-verify | `verify-artifact-tool` |
-| `check_floors` | tool | dev-from-task | `floor-tools-wrapper` |
-| `open_pr` | tool | forge-io | `open-pr-tool` |
-| `provision_sandbox` | tool | sandbox | `provision-sandbox-tool` |
 | `apply_patch` | tool | sandbox | `apply-patch-tool` |
 | `read_workspace` | tool | dev-from-task | `read-workspace-tool` |
 | `read_diff` | tool | dev-from-task | `read-diff-tool` |

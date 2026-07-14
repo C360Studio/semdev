@@ -20,10 +20,7 @@
     },
     {
       "type": "publish",
-      "subject": "component.delivery-station.dispatch",
-      "properties": {
-        "phase": "deliver"
-      }
+      "subject": "component.delivery-station.dispatch"
     }
   ],
   "on_exit": [],

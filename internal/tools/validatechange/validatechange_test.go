@@ -2,6 +2,7 @@ package validatechange
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -10,15 +11,14 @@ import (
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/vocab"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
 
 // sampleRevision is the content revision create_change would have stamped at
-// openspec.change.revision. validate_change echoes it into openspec.validated
-// (it does not recompute), so any sentinel serves — the value is opaque here.
+// openspec.change.revision. Validate echoes it into openspec.validated (it does
+// not recompute), so any sentinel serves — the value is opaque here.
 const sampleRevision = "sha256:0123456789abcdef"
 
 // fakeReader serves the triples create_change would have stamped, honoring the
@@ -68,8 +68,8 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) 
 }
 
 // stamped returns the triples create_change would have written for a change: its
-// content facts plus the slug-scoped content revision validate_change reads and
-// echoes into openspec.validated.
+// content facts plus the slug-scoped content revision Validate reads and echoes
+// into openspec.validated.
 func stamped(runEntityID string, c *openspec.Change) []message.Triple {
 	var out []message.Triple
 	for _, f := range c.Facts() {
@@ -95,34 +95,21 @@ func sampleChange() *openspec.Change {
 	}
 }
 
-func call(slug string) agentic.ToolCall {
-	return agentic.ToolCall{
-		ID:        "c1",
-		Name:      ToolName,
-		Metadata:  map[string]any{agentic.MetadataKeyRunEntityID: runEntity},
-		Arguments: map[string]any{"slug": slug},
-	}
-}
-
-func newExec(reader *fakeReader, runner *fakeRunner, writer *fakeWriter) *Executor {
-	return New(reader, runner, writer, nil)
-}
-
-// On a CLI pass (exit 0) the harness stamps openspec.validated=<content revision>
-// on the run entity with the vocab writer Source, and it shells the exact
-// non-interactive invocation. The model supplied no verdict. The marker's VALUE is
-// the revision create_change stamped (echoed, not recomputed) — not the slug —
-// so it binds to the exact content the CLI blessed (D15 #0).
+// On a CLI pass (exit 0) Validate stamps openspec.validated=<content revision> on
+// the run entity with the vocab writer Source, and it shells the exact
+// non-interactive invocation. The marker's VALUE is the revision create_change
+// stamped (echoed, not recomputed) — not the slug — so it binds to the exact
+// content the CLI blessed (D15 #0).
 func TestValidatePassStampsMarker(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	runner := &fakeRunner{res: cliexec.Result{ExitCode: 0, Stdout: `{"valid":true}`}}
 	w := &fakeWriter{}
-	res, err := newExec(r, runner, w).Execute(context.Background(), call("fix-null-deref"))
+	res, err := Validate(context.Background(), r, runner, w, runEntity, "fix-null-deref")
 	if err != nil {
-		t.Fatalf("execute: %v", err)
+		t.Fatalf("validate: %v", err)
 	}
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	if !res.Validated {
+		t.Fatalf("want Validated true on a CLI pass, got %+v", res)
 	}
 
 	// Invocation shape: openspec validate <slug> --strict --json --no-interactive.
@@ -146,50 +133,51 @@ func TestValidatePassStampsMarker(t *testing.T) {
 	if tr.Object != sampleRevision {
 		t.Errorf("openspec.validated = %q, want the content revision %q (not the slug)", tr.Object, sampleRevision)
 	}
+	if res.Revision != sampleRevision {
+		t.Errorf("Result.Revision = %q, want %q", res.Revision, sampleRevision)
+	}
 	writer, _ := vocab.WriterOf(ValidatedPredicate)
 	if tr.Source != Source || Source != writer {
 		t.Errorf("Source %q must equal the vocab writer %q for %s (G5)", tr.Source, writer, ValidatedPredicate)
 	}
-	if strings.Contains(res.Content, "false") {
-		t.Errorf("pass result should not report validated:false: %s", res.Content)
-	}
 }
 
-// On a CLI failure (non-zero exit) the harness stamps NO pass marker — it clears
-// any stale one — and returns the validator's own issues for correction. An
-// invalid change thus cannot reach the approval gate (marker absent).
+// On a CLI failure (non-zero exit) Validate stamps NO pass marker — it clears any
+// stale one — and returns the validator's own issues for correction. An invalid
+// change thus cannot reach the approval gate (marker absent).
 func TestValidateFailClearsMarkerAndReturnsIssues(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	issues := `{"valid":false,"issues":["missing scenario"]}`
 	runner := &fakeRunner{res: cliexec.Result{ExitCode: 1, Stdout: issues}}
 	w := &fakeWriter{}
-	res, err := newExec(r, runner, w).Execute(context.Background(), call("fix-null-deref"))
+	res, err := Validate(context.Background(), r, runner, w, runEntity, "fix-null-deref")
 	if err != nil {
-		t.Fatalf("execute: %v", err)
+		t.Fatalf("a failed validation is a verdict, not an error: %v", err)
 	}
-	if res.Error != "" {
-		t.Fatalf("a failed validation is a verdict, not a tool error: %s", res.Error)
+	if res.Validated {
+		t.Fatalf("want Validated false on a CLI failure, got %+v", res)
 	}
 	if len(w.replaces) != 1 || len(w.replaces[0].add) != 0 || len(w.replaces[0].remove) != 1 || w.replaces[0].remove[0] != ValidatedPredicate {
 		t.Fatalf("fail must clear (remove) the marker, not stamp it: %+v", w.replaces)
 	}
-	if !strings.Contains(res.Content, "missing scenario") {
-		t.Errorf("failure result should carry the validator's issues, got: %s", res.Content)
+	if !strings.Contains(res.Issues, "missing scenario") {
+		t.Errorf("failure result should carry the validator's issues, got: %s", res.Issues)
 	}
 }
 
 // If the oracle cannot be run at all (binary missing / timeout), it's a transport
-// failure — no verdict is recorded (neither stamp nor clear).
+// failure — no verdict is recorded (neither stamp nor clear) — and the error wraps
+// ErrOracleUnrunnable so callers can classify it as retryable.
 func TestValidateRunnerErrorRecordsNothing(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	runner := &fakeRunner{err: exec.ErrNotFound}
 	w := &fakeWriter{}
-	res, _ := newExec(r, runner, w).Execute(context.Background(), call("fix-null-deref"))
-	if res.Error == "" {
-		t.Error("expected a transport error when the CLI cannot be run")
+	_, err := Validate(context.Background(), r, runner, w, runEntity, "fix-null-deref")
+	if err == nil {
+		t.Fatal("expected a transport error when the CLI cannot be run")
 	}
-	if res.ErrorKind != agentic.ToolErrorNetwork {
-		t.Errorf("runner-run failure kind = %v, want network (retryable)", res.ErrorKind)
+	if !errors.Is(err, ErrOracleUnrunnable) {
+		t.Errorf("runner-run failure must wrap ErrOracleUnrunnable (retryable), got: %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Errorf("a run failure must record no verdict, got %+v", w.replaces)
@@ -197,13 +185,13 @@ func TestValidateRunnerErrorRecordsNothing(t *testing.T) {
 }
 
 // D15 #0 red-first: a change present on the run but carrying NO content revision
-// (openspec.change.revision absent) is refused before the CLI runs — the harness
-// will not stamp a content-unbound marker, since a bare-slug marker would reopen
-// the stale-same-slug false-green. create_change always stamps the revision, so an
+// (openspec.change.revision absent) is refused before the CLI runs — Validate will
+// not stamp a content-unbound marker, since a bare-slug marker would reopen the
+// stale-same-slug false-green. create_change always stamps the revision, so an
 // absent one is an authoring/ordering gap.
 func TestValidateFailsWithoutRevision(t *testing.T) {
 	// Seed the change CONTENT facts but strip the slug-scoped revision fact
-	// validate_change reads (run-level may remain — validate binds to the slug's own).
+	// Validate reads (run-level may remain — validate binds to the slug's own).
 	slugRev := createchange.SlugRevisionPredicate(sampleChange().Slug)
 	var content []message.Triple
 	for _, tr := range stamped(runEntity, sampleChange()) {
@@ -213,9 +201,9 @@ func TestValidateFailsWithoutRevision(t *testing.T) {
 	}
 	r := &fakeReader{triples: content}
 	runner := &fakeRunner{}
-	res, _ := newExec(r, runner, &fakeWriter{}).Execute(context.Background(), call("fix-null-deref"))
-	if res.Error == "" || !strings.Contains(res.Error, "revision") {
-		t.Fatalf("a change with no content revision must be refused, got %q", res.Error)
+	_, err := Validate(context.Background(), r, runner, &fakeWriter{}, runEntity, "fix-null-deref")
+	if err == nil || !strings.Contains(err.Error(), "revision") {
+		t.Fatalf("a change with no content revision must be refused, got %v", err)
 	}
 	if runner.calls != 0 {
 		t.Error("the CLI must not run when the change carries no content revision")
@@ -226,8 +214,8 @@ func TestValidateFailsWithoutRevision(t *testing.T) {
 func TestValidateFailsOnEmptyChange(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	runner := &fakeRunner{}
-	res, _ := newExec(r, runner, &fakeWriter{}).Execute(context.Background(), call("never-authored"))
-	if res.Error == "" {
+	_, err := Validate(context.Background(), r, runner, &fakeWriter{}, runEntity, "never-authored")
+	if err == nil {
 		t.Error("expected an error validating a change with no facts")
 	}
 	if runner.calls != 0 {
@@ -237,8 +225,8 @@ func TestValidateFailsOnEmptyChange(t *testing.T) {
 
 func TestValidateRejectsUnsafeSlug(t *testing.T) {
 	runner := &fakeRunner{}
-	res, _ := newExec(&fakeReader{}, runner, &fakeWriter{}).Execute(context.Background(), call("../../etc"))
-	if res.Error == "" {
+	_, err := Validate(context.Background(), &fakeReader{}, runner, &fakeWriter{}, runEntity, "../../etc")
+	if err == nil {
 		t.Error("expected a rejection for a traversal slug")
 	}
 	if runner.calls != 0 {
@@ -246,58 +234,20 @@ func TestValidateRejectsUnsafeSlug(t *testing.T) {
 	}
 }
 
-func TestValidateFailsWithoutRunEntity(t *testing.T) {
-	c := call("fix-null-deref")
-	c.Metadata = nil
-	res, _ := newExec(&fakeReader{}, &fakeRunner{}, &fakeWriter{}).Execute(context.Background(), c)
-	if res.Error == "" {
-		t.Error("expected an error when agent.run_entity_id is missing")
-	}
-}
-
-func TestValidateFailsWhenNotWired(t *testing.T) {
-	if res, _ := New(nil, &fakeRunner{}, &fakeWriter{}, nil).Execute(context.Background(), call("x")); res.Error == "" {
-		t.Error("expected an error with a nil reader")
-	}
-	if res, _ := New(&fakeReader{}, nil, &fakeWriter{}, nil).Execute(context.Background(), call("x")); res.Error == "" {
-		t.Error("expected an error with a nil runner")
-	}
-	if res, _ := New(&fakeReader{}, &fakeRunner{}, nil, nil).Execute(context.Background(), call("x")); res.Error == "" {
-		t.Error("expected an error with a nil writer")
-	}
-}
-
-// The schema advertises content-only input — slug, no outcome/valid/pass field (G3).
-func TestSchemaHasNoOutcomeField(t *testing.T) {
-	defs := New(nil, nil, nil, nil).ListTools()
-	if len(defs) != 1 || defs[0].Name != ToolName {
-		t.Fatalf("want one tool %q, got %+v", ToolName, defs)
-	}
-	props, _ := defs[0].Parameters["properties"].(map[string]any)
-	if _, ok := props["slug"]; !ok {
-		t.Error("schema is missing the slug property")
-	}
-	for _, forbidden := range []string{"valid", "validated", "pass", "passed", "outcome", "success", "exit_code", "result"} {
-		if _, ok := props[forbidden]; ok {
-			t.Errorf("schema exposes forbidden outcome field %q (G3)", forbidden)
-		}
-	}
-}
-
 // End-to-end against the REAL OpenSpec CLI (skipped if not installed): a valid
-// hydrated change passes the oracle and the harness stamps openspec.validated.
+// hydrated change passes the oracle and Validate stamps openspec.validated.
 func TestValidateEndToEndWithRealCLI(t *testing.T) {
 	if _, err := exec.LookPath("openspec"); err != nil {
 		t.Skip("openspec CLI not on PATH; skipping the real-oracle e2e")
 	}
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	w := &fakeWriter{}
-	res, err := New(r, cliexec.OSRunner{}, w, nil).Execute(context.Background(), call("fix-null-deref"))
+	res, err := Validate(context.Background(), r, cliexec.OSRunner{}, w, runEntity, "fix-null-deref")
 	if err != nil {
-		t.Fatalf("execute: %v", err)
+		t.Fatalf("validate: %v", err)
 	}
-	if res.Error != "" {
-		t.Fatalf("real-CLI validation errored: %s", res.Error)
+	if !res.Validated {
+		t.Fatalf("real-CLI validation should pass a valid change, got %+v", res)
 	}
 	if len(w.replaces) != 1 || len(w.replaces[0].add) != 1 || w.replaces[0].add[0].Predicate != ValidatedPredicate {
 		t.Fatalf("a valid change should stamp openspec.validated via the real CLI, got %+v", w.replaces)

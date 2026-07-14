@@ -1,24 +1,23 @@
-// Package provisionsandbox is the provision_sandbox tool (sandbox capability, G3
-// — the provision-and-prove-cold station). On an approved run a rule forces this
-// tool (design SB2/SB4/SB7): it materializes the run's target checkout, builds the
-// operator-DECLARED image, and proves the repo resolves its base dependencies and
-// BUILDS cold in a fresh per-run container — BEFORE the dev loop relies on the
-// environment. It stamps a harness-DERIVED readiness/attestation package
-// (sandbox.ready + the digest-pinned image + the proven sandbox-scope tier) or, on
-// any failure to prove cold, a sandbox.blocked reason a park rule routes to the
-// human (SB5). This is the make-or-break both predecessors lacked: neither ever
-// proved a project builds cold in a fresh environment.
+// Package provisionsandbox is the shared PROVISION CORE (sandbox capability, G3 — the
+// provision-and-prove-cold station, design simplify-m0-execution-rail R6). On an approved+
+// projected run the provision-station component (internal/station/provision) calls Provision:
+// it materializes the run's target checkout, builds the operator-DECLARED image, and proves
+// the repo resolves its base dependencies and BUILDS cold in a fresh per-run container — BEFORE
+// the dev loop relies on the environment. It stamps a harness-DERIVED readiness/attestation
+// package (sandbox.ready + the digest-pinned image + the proven sandbox-scope tier) or, on any
+// failure to prove cold, a sandbox.blocked reason a park rule routes to the human (SB5). This is
+// the make-or-break both predecessors lacked: neither ever proved a project builds cold in a
+// fresh environment.
 //
-// It fires no lifecycle transition (G2): the provision rule forces the tool, the
-// readiness-gate rule reads sandbox.ready, and a park rule reads sandbox.blocked —
-// the tool only measures and stamps. Its facts' single writer is sandbox-provisioner
-// (G5). The schema takes no input (G3): the model may TRIGGER the proof, never
-// supply the environment or the outcome — readiness is proven cold, not asserted.
+// Provision fires no lifecycle transition (G2): the provision rule fires the station, the
+// readiness-gate rule reads sandbox.ready, and a park rule reads sandbox.blocked — this package
+// only measures and stamps. Its facts' single writer is sandbox-provisioner (G5). Readiness is
+// harness-DERIVED (proven cold), never model-supplied (G3) — this package has no schema and no
+// model-facing surface; only the provision station calls it.
 package provisionsandbox
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -30,15 +29,11 @@ import (
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
-// ToolName is the registered tool name and the run's provisioning handler.
-const ToolName = "provision_sandbox"
-
-// Source is stamped on every sandbox.* triple this tool owns. It MUST equal the
+// Source is stamped on every sandbox.* triple this package owns. It MUST equal the
 // writer declared for the sandbox facts in internal/vocab (G5) — a conformance pin
 // cross-checks it.
 const Source = "sandbox-provisioner"
@@ -130,42 +125,6 @@ func (coldProver) ProveBaseline(ctx context.Context, docker, repoRoot string, m 
 // DefaultProver returns the production cold-proof Prover for boot to wire.
 func DefaultProver() Prover { return coldProver{} }
 
-// Executor provisions the run's sandbox, proves it cold, and stamps the readiness
-// package.
-type Executor struct {
-	sources   Sources
-	checkouts Checkouts
-	manifests Manifests
-	warmers   Warmers
-	prover    Prover
-	store     secrets.Store // governed creds-refs (SB2c); nil at M0 (no secrets)
-	reader    changefacts.Reader
-	writer    agentictools.OwnedFactWriter
-	// dockerCheck probes the docker daemon before provisioning so an absent daemon
-	// parks the HUMAN with an honest reason (SB5), distinct from a declared image
-	// that cannot build (which parks the operator). Defaulted to
-	// cleanroom.DockerAvailable in New; a field so a unit test can bypass the real
-	// daemon (the fake Prover exercises the proof path without docker).
-	dockerCheck func(ctx context.Context, docker string) error
-	logger      *slog.Logger
-}
-
-// New builds the provision_sandbox executor. prover is always supplied (a pure
-// adapter — DefaultProver in production, a fake in tests); sources/checkouts/
-// manifests/warmers/reader/writer are nil for schema-only registration (the
-// censuses scan ListTools without a live checkout or NATS client). store is nil at
-// M0 (no governed secrets). Execute fails loudly if any required dependency is
-// missing — a provisioning that cannot prove is a park, never a silent skip (SB5).
-func New(sources Sources, checkouts Checkouts, manifests Manifests, warmers Warmers, prover Prover, store secrets.Store, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if prover == nil {
-		prover = DefaultProver()
-	}
-	return &Executor{sources: sources, checkouts: checkouts, manifests: manifests, warmers: warmers, prover: prover, store: store, reader: reader, writer: writer, dockerCheck: cleanroom.DockerAvailable, logger: logger}
-}
-
 // ProvisionResult reports the provisioning outcome for the caller to shape (the tool's
 // JSON summary / the station's log). A blocked run is a STAMPED result (sandbox.blocked),
 // not an error: Ready is false and Reason carries the (scrubbed) block reason a park rule
@@ -179,8 +138,8 @@ type ProvisionResult struct {
 }
 
 // ProvisionDeps bundles the harness seams the shared Provision core needs — grouped into a
-// struct (rather than a long parameter list) because there are many. Both the
-// provision_sandbox tool Executor and the provision station (R6) hold one and pass it.
+// struct (rather than a long parameter list) because there are many. The provision station
+// (internal/station/provision, R6) constructs one and passes it to Provision.
 type ProvisionDeps struct {
 	Sources   Sources
 	Checkouts Checkouts
@@ -200,9 +159,8 @@ type ProvisionDeps struct {
 // Provision materializes the run's checkout, builds the operator-DECLARED image and proves
 // the repo resolves+builds COLD in a fresh container, stands up the WARM dev container the
 // bounded loop measures in, and stamps sandbox.ready (+attestation) or sandbox.blocked.
-// Shared core of the provision_sandbox tool AND the provision station (design
-// simplify-m0-execution-rail R6) — one writer of sandbox.* (sandbox-provisioner, G5), so the
-// two callers cannot drift.
+// The shared provision core the provision station (design simplify-m0-execution-rail R6)
+// calls — the sole writer of sandbox.* (sandbox-provisioner, G5).
 //
 // It returns:
 //   - ProvisionResult{Ready:true,...}, nil — proven cold + warm container up (readiness stamped)
@@ -215,9 +173,9 @@ type ProvisionDeps struct {
 // harness-DERIVED from the cold proof, never model-supplied (G3). Fires no lifecycle
 // transition (G2).
 //
-// CONTRACT: Sources/Checkouts/Manifests/Warmers/Reader/Writer must be non-nil — both callers
-// guarantee it (the tool Execute nil-checks first; the station factory constructs them and
-// fails loud on a nil seam). Nil Prover/DockerCheck/Logger are defaulted.
+// CONTRACT: Sources/Checkouts/Manifests/Warmers/Reader/Writer must be non-nil — the caller
+// (the provision station factory) constructs them and fails loud on a nil seam. Nil
+// Prover/DockerCheck/Logger are defaulted.
 func Provision(ctx context.Context, deps ProvisionDeps, runEntityID string) (ProvisionResult, error) {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
@@ -288,54 +246,6 @@ func Provision(ctx context.Context, deps ProvisionDeps, runEntityID string) (Pro
 		return block(ctx, deps, runEntityID, fmt.Sprintf("proved the repo builds cold but could not stand up the warm dev container: %v — retryable infra fault (park toward the human)", err))
 	}
 	return ready(ctx, deps, runEntityID, baseline.Image.Digest, tier)
-}
-
-// Execute is the (transitional) provision_sandbox tool body: it reads the run entity from
-// the tool-call metadata, runs the shared Provision core, and shapes the forced-loop tool
-// result. Any failure to prove cold is a stamped BLOCK (a park downstream), never a silent
-// pass — the recorded readiness is DERIVED from the cold proof, not supplied by the model (G3).
-//
-// This is a DEAD path post-reshape — the provision STATION (internal/station/provision)
-// replaced the forced provision coordinator turn (R6), so no rule spawns this tool in
-// production — but it is kept correct (and its tests green) until the executor is deleted in
-// 6E. A graph-WRITE fault's error-kind collapses to ReadErrorKind (the sibling tools' idiom).
-func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.sources == nil || e.checkouts == nil || e.manifests == nil || e.warmers == nil || e.reader == nil || e.writer == nil {
-		return errResult(call, agentic.ToolErrorInternal, "provision_sandbox: harness not fully wired (sources/checkouts/manifests/warmers/reader/writer)")
-	}
-	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
-	if !ok || runEntityID == "" {
-		return errResult(call, agentic.ToolErrorInternal, "provision_sandbox: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
-	}
-
-	res, err := Provision(ctx, e.deps(), runEntityID)
-	if err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "%v", err)
-	}
-	if res.NoOp {
-		return okResult(call, map[string]any{"ready": true, "note": "already provisioned"})
-	}
-	if res.Ready {
-		return okResult(call, map[string]any{"ready": true, "image": res.Image, "tier": res.Tier})
-	}
-	return okResult(call, map[string]any{"ready": false, "reason": res.Reason})
-}
-
-// deps assembles the shared ProvisionDeps from the executor's fields, so a test that
-// overrides e.dockerCheck before calling Execute is still honored.
-func (e *Executor) deps() ProvisionDeps {
-	return ProvisionDeps{
-		Sources:     e.sources,
-		Checkouts:   e.checkouts,
-		Manifests:   e.manifests,
-		Warmers:     e.warmers,
-		Prover:      e.prover,
-		Store:       e.store,
-		Reader:      e.reader,
-		Writer:      e.writer,
-		DockerCheck: e.dockerCheck,
-		Logger:      e.logger,
-	}
 }
 
 // alreadyReady reports whether the run already carries sandbox.ready == "true". A read error
@@ -439,19 +349,4 @@ func notReadyReason(b coldproof.Baseline) string {
 	default:
 		return fmt.Sprintf("no sandbox-scope tier proves the %q claim — only an operator-ci/lab tier can, so the claim is deferred toward the operator (never gated in-sandbox, SB5)", baselineClaim)
 	}
-}
-
-// okResult ends the forced provisioning turn with a JSON summary (StopLoop).
-func okResult(call agentic.ToolCall, summary map[string]any) (agentic.ToolResult, error) {
-	body, _ := json.Marshal(summary)
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(body), StopLoop: true}, nil
-}
-
-func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
-	return agentic.ToolResult{
-		CallID:    call.ID,
-		Name:      ToolName,
-		Error:     fmt.Sprintf(format, args...),
-		ErrorKind: kind,
-	}, nil
 }

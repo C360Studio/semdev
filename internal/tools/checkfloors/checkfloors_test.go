@@ -3,17 +3,17 @@ package checkfloors
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/floors"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/types"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
+const loopEntity = "org.plat.agent.chain.execution.floors-loop-1"
 
 type fakeAttempts struct {
 	attempt floors.Attempt
@@ -81,15 +81,6 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]stri
 	return w.owned, nil
 }
 
-func callFor(idx int) agentic.ToolCall {
-	return agentic.ToolCall{
-		ID:        "c1",
-		Name:      ToolName,
-		Metadata:  map[string]any{agentic.MetadataKeyRunEntityID: runEntity},
-		Arguments: map[string]any{"task_index": idx},
-	}
-}
-
 // passingAttempt authors production source plus a real test that asserts on computed
 // behavior of the target — it clears all five floors.
 func passingAttempt() floors.Attempt {
@@ -114,28 +105,27 @@ func vacuousAttempt() floors.Attempt {
 	}
 }
 
-func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[string]string, agentic.ToolResult) {
+// run calls RunFloors with no route mirror (routeLoopEntityID="", the unit-test path)
+// and collapses the writer's stamped triples into a predicate->object map for assertions.
+func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[string]string, FloorResult, error) {
 	t.Helper()
-	res, err := New(fakeAttempts{attempt: attempt}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(idx))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
+	res, err := RunFloors(context.Background(), fakeAttempts{attempt: attempt}, fakeReader{}, w, slog.Default(), runEntity, "", idx)
 	facts := map[string]string{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			facts[tr.Predicate] = tr.Object.(string)
 		}
 	}
-	return facts, res
+	return facts, res, err
 }
 
 // Happy path: every floor passes → each floor stamps a passed=true finding on the
 // run entity under floor.finding.<i>.<floor>, with the floor-tools Source.
 func TestCheckFloorsAllPassStampsFindings(t *testing.T) {
 	w := &fakeWriter{}
-	facts, res := run(t, passingAttempt(), w, 0)
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	facts, _, err := run(t, passingAttempt(), w, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
 	}
 	for _, floor := range []string{floors.FloorPresence, floors.FloorTestsMustExist, floors.FloorVacuousTest, floors.FloorStub, floors.FloorSourceBuild, floors.FloorAntiMock} {
 		key := floors.FindingPrefix + "0." + floor + "." + floors.FactPassed
@@ -163,9 +153,9 @@ func TestCheckFloorsAllPassStampsFindings(t *testing.T) {
 // finding stamps passed=false with a detail, and the result flags rejected.
 func TestCheckFloorsVacuousTestRejected(t *testing.T) {
 	w := &fakeWriter{}
-	facts, res := run(t, vacuousAttempt(), w, 0)
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	facts, res, err := run(t, vacuousAttempt(), w, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
 	}
 	if facts[floors.FindingPrefix+"0."+floors.FloorVacuousTest+"."+floors.FactPassed] != "false" {
 		t.Errorf("vacuous-test finding must be passed=false")
@@ -173,10 +163,10 @@ func TestCheckFloorsVacuousTestRejected(t *testing.T) {
 	if facts[floors.FindingPrefix+"0."+floors.FloorVacuousTest+"."+floors.FactDetail] == "" {
 		t.Errorf("a rejecting finding must carry a detail (legible park)")
 	}
-	if !strings.Contains(res.Content, "\"rejected\":true") {
-		t.Errorf("result must flag rejected=true, got %s", res.Content)
+	if !res.Rejected {
+		t.Errorf("result must flag Rejected=true")
 	}
-	// The STAMPED aggregate fact (what the gate reads, not the tool's Content) must be true.
+	// The STAMPED aggregate fact (what the gate reads, not the returned struct) must be true.
 	if got := facts[floors.FindingPrefix+"0."+floors.FactRejected]; got != "true" {
 		t.Errorf("%s0.%s = %q, want true (a rejecting floor sets the aggregate)", floors.FindingPrefix, floors.FactRejected, got)
 	}
@@ -185,9 +175,9 @@ func TestCheckFloorsVacuousTestRejected(t *testing.T) {
 // Findings are keyed per task: task 2's findings land under floor.finding.2.*, never
 // clobbering another task's.
 func TestCheckFloorsPerTaskKeying(t *testing.T) {
-	facts, res := run(t, passingAttempt(), &fakeWriter{}, 2)
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	facts, _, err := run(t, passingAttempt(), &fakeWriter{}, 2)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
 	}
 	if _, ok := facts[floors.FindingPrefix+"2."+floors.FloorSourceBuild+"."+floors.FactPassed]; !ok {
 		t.Errorf("expected findings keyed under floor.finding.2.*, got %v", facts)
@@ -205,7 +195,7 @@ func TestCheckFloorsReEvalUpserts(t *testing.T) {
 	}
 	for _, rm := range w.removes {
 		if len(rm) != 0 {
-			t.Errorf("check_floors cleared predicates %v; the fixed floor set should upsert without clears", rm)
+			t.Errorf("RunFloors cleared predicates %v; the fixed floor set should upsert without clears", rm)
 		}
 	}
 }
@@ -216,7 +206,7 @@ func TestCheckFloorsReEvalUpserts(t *testing.T) {
 // current after attempt 2 changes the source.
 func TestCheckFloorsBindsAttemptIdentity(t *testing.T) {
 	w1 := &fakeWriter{}
-	facts1, _ := run(t, passingAttempt(), w1, 0)
+	facts1, _, _ := run(t, passingAttempt(), w1, 0)
 	id1 := facts1[floors.FindingPrefix+"0."+floors.FactAttempt]
 	if id1 == "" {
 		t.Fatal("finding set must stamp floor.finding.0.attempt (the evaluated-source identity)")
@@ -229,14 +219,14 @@ func TestCheckFloorsBindsAttemptIdentity(t *testing.T) {
 	changed := passingAttempt()
 	changed.Files[0].Content += "\nfunc Sub(a, b int) int { return a - b }\n"
 	w2 := &fakeWriter{}
-	facts2, _ := run(t, changed, w2, 0)
+	facts2, _, _ := run(t, changed, w2, 0)
 	if id2 := facts2[floors.FindingPrefix+"0."+floors.FactAttempt]; id2 == id1 {
 		t.Errorf("a changed attempt must produce a different attempt id (got %q for both)", id2)
 	}
 }
 
 // Codex P1: a resolve/check failure must NOT leave a prior attempt's pass readable.
-// The tool clears the task's stale findings (clear-my-prefix) and surfaces the error,
+// RunFloors clears the task's stale findings (clear-my-prefix) and surfaces the error,
 // so semantic-review eligibility cannot read the stale pass as current.
 func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 	stale := []string{
@@ -245,11 +235,8 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 		floors.FindingPrefix + "0." + floors.FloorVacuousTest + "." + floors.FactPassed,
 	}
 	w := &fakeWriter{owned: stale}
-	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" {
+	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, slog.Default(), runEntity, "", 0)
+	if err == nil {
 		t.Fatal("a failed resolve must surface an error")
 	}
 	// The stale findings must have been cleared (removed), and nothing new stamped.
@@ -269,30 +256,11 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 	}
 }
 
-// A negative task index is rejected before any resolve or stamp.
-func TestCheckFloorsRejectsNegativeIndex(t *testing.T) {
-	w := &fakeWriter{}
-	res, err := New(fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(-1))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" {
-		t.Fatal("expected an error for a negative task index")
-	}
-	if len(w.replaces) != 0 {
-		t.Error("a rejected index must stamp nothing")
-	}
-}
-
-// An attempt that cannot be resolved (checkout read fault) is a tool error, not a
-// silent pass.
+// An attempt that cannot be resolved (checkout read fault) is an error, not a silent pass.
 func TestCheckFloorsResolveErrorFails(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" {
+	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, slog.Default(), runEntity, "", 0)
+	if err == nil {
 		t.Fatal("a failed attempt resolve must error")
 	}
 	if len(w.replaces) != 0 {
@@ -300,47 +268,15 @@ func TestCheckFloorsResolveErrorFails(t *testing.T) {
 	}
 }
 
-// Schema-only registration (nil attempts/writer) fails loudly if executed.
-func TestCheckFloorsFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), callFor(0))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" {
-		t.Error("a nil-harness check must fail loudly")
-	}
-}
-
-// G3: the schema takes only the task selector — no outcome/passed field. The floor
-// verdicts are computed by the deterministic floors, not supplied.
-func TestCheckFloorsSchemaTakesOnlyTaskSelector(t *testing.T) {
-	defs := (&Executor{}).ListTools()
-	if len(defs) != 1 {
-		t.Fatalf("want one tool definition, got %d", len(defs))
-	}
-	props, _ := defs[0].Parameters["properties"].(map[string]any)
-	if len(props) != 1 {
-		t.Errorf("schema exposes %d properties, want exactly 1 (task_index): %v", len(props), props)
-	}
-	if _, ok := props["task_index"]; !ok {
-		t.Errorf("schema must expose task_index; has %v", props)
-	}
-	for _, banned := range []string{"passed", "pass", "rejected", "outcome", "findings", "floor"} {
-		if _, present := props[banned]; present {
-			t.Errorf("schema accepts a floor-outcome field %q (G3): floors are computed, not supplied", banned)
-		}
-	}
-}
-
-// The ROUTE MIRROR: check_floors copies the routing inputs onto ITS OWN floors loop so
-// the rule-native floors route (advance / not_clean → retry / escalate) can fire on
-// them. route.passed = the run's measurement, route.rejected = its own aggregate, and
-// route.attempt.<i> = the append-mirror of task.attempt.<i>. All carry the route-mirror
-// Source (a distinct writer from floor-tools, so no predicate gains two writers, G5). It
-// is stamped for a REJECTING run too (the route decides retry).
+// The ROUTE MIRROR: RunFloors copies the routing inputs onto the caller-supplied
+// routeLoopEntityID so the rule-native floors route (advance / not_clean → retry /
+// escalate) can fire on them. route.passed = the run's measurement, route.rejected =
+// its own aggregate, and route.attempt.<i> = the append-mirror of task.attempt.<i>.
+// All carry the route-mirror Source (a distinct writer from floor-tools, so no
+// predicate gains two writers, G5). It is stamped for a REJECTING run too (the route
+// decides retry).
 func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 	w := &fakeWriter{}
-	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
 	// The run measured GREEN but the floors REJECT (vacuous test) — route.passed=true,
 	// route.rejected=true (the "cache-masked fabrication that passes warm" shape). Two
 	// attempts already counted (task.attempt.0 has two objects). The measurement is bound to
@@ -352,18 +288,12 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 		attemptFact(0, "dev-loop-1"),
 		attemptFact(0, "dev-loop-2"),
 	}}
-	call := callFor(0)
-	call.LoopID = "floors-loop-abc"
-	res, err := New(fakeAttempts{attempt: vacuousAttempt()}, reader, w, platform, nil).Execute(context.Background(), call)
+	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
-		t.Fatalf("execute: %v", err)
+		t.Fatalf("RunFloors: %v", err)
 	}
-	if res.Error != "" {
-		t.Fatalf("a rejecting floors run is data, not a tool error: %s", res.Error)
-	}
-	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, call.LoopID)
-	if err != nil {
-		t.Fatalf("loop entity id: %v", err)
+	if !res.Rejected {
+		t.Fatalf("want a rejecting floors verdict, got Rejected=false")
 	}
 	var passed, rejected string
 	attemptObjs := map[string]bool{}
@@ -371,8 +301,8 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 		for _, tr := range batch {
 			switch tr.Predicate {
 			case RoutePassedPredicate, RouteRejectedPredicate, RouteAttemptPrefix + "0":
-				if tr.Subject != loopEntityID {
-					t.Errorf("route mirror %q stamped on %q, want the floors LOOP entity %q", tr.Predicate, tr.Subject, loopEntityID)
+				if tr.Subject != loopEntity {
+					t.Errorf("route mirror %q stamped on %q, want the floors LOOP entity %q", tr.Predicate, tr.Subject, loopEntity)
 				}
 				if tr.Source != RouteMirrorSource {
 					t.Errorf("route mirror %q Source = %q, want %q (G5)", tr.Predicate, tr.Source, RouteMirrorSource)
@@ -403,13 +333,10 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 // route.passed is copied as "false" — the route treats it as a red attempt, not green.
 func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 	w := &fakeWriter{}
-	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
-	call := callFor(0)
-	call.LoopID = "floors-loop-xyz"
 	// No measurement fact seeded → route.passed must fail closed to "false".
-	res, err := New(fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, platform, nil).Execute(context.Background(), call)
-	if err != nil || res.Error != "" {
-		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, slog.Default(), runEntity, loopEntity, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
 	}
 	var sawPassed bool
 	for _, batch := range w.replaces {
@@ -423,7 +350,7 @@ func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 		}
 	}
 	if !sawPassed {
-		t.Error("check_floors must always stamp route.passed (fail-closed) so the route can fire")
+		t.Error("RunFloors must always stamp route.passed (fail-closed) so the route can fire")
 	}
 }
 
@@ -433,18 +360,15 @@ func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 // mirrors "false" so the route treats it as red (not-clean → retry), never a stale advance.
 func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 	w := &fakeWriter{}
-	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
-	call := callFor(0)
-	call.LoopID = "floors-loop-stale"
 	// Green measurement bound to sha-a, but the run has since been re-applied to sha-b.
 	reader := fakeReader{facts: []message.Triple{
 		measuredPassed(0, "true"),
 		measuredCommit(0, "sha-a"),
 		attemptCommitFact("sha-b"),
 	}}
-	res, err := New(fakeAttempts{attempt: passingAttempt()}, reader, w, platform, nil).Execute(context.Background(), call)
-	if err != nil || res.Error != "" {
-		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
 	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -455,29 +379,30 @@ func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 	}
 }
 
-// Without a LoopID (unit/registration path) the findings still land but the route
-// mirror is skipped — a missing mirror never fails a recorded findings write.
+// Without a routeLoopEntityID (a unit test, or any caller with no loop to mirror onto)
+// the findings still land but the route mirror is skipped — a missing mirror never
+// fails a recorded findings write.
 func TestCheckFloorsWithoutLoopIDSkipsMirrorButRecords(t *testing.T) {
 	w := &fakeWriter{}
-	facts, res := run(t, passingAttempt(), w, 0) // callFor sets no LoopID
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	facts, _, err := run(t, passingAttempt(), w, 0) // routeLoopEntityID=""
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
 	}
 	if _, ok := facts[RoutePassedPredicate]; ok {
-		t.Errorf("no LoopID → the route mirror must be skipped, but %s was stamped", RoutePassedPredicate)
+		t.Errorf("no routeLoopEntityID → the route mirror must be skipped, but %s was stamped", RoutePassedPredicate)
 	}
 	if facts[floors.FindingPrefix+"0."+floors.FactRejected] != "false" {
 		t.Error("the findings must still be recorded when the mirror is skipped")
 	}
 }
 
-// Sanity: the pure floors agree with what the tool stamps (the wrapper does not
+// Sanity: the pure floors agree with what RunFloors stamps (the wrapper does not
 // re-derive or alter the verdict).
 func TestCheckFloorsMatchesPureVerdict(t *testing.T) {
 	att := vacuousAttempt()
 	want := floors.CheckAll(att)
 	w := &fakeWriter{}
-	facts, _ := run(t, att, w, 0)
+	facts, _, _ := run(t, att, w, 0)
 	for _, f := range want {
 		key := floors.FindingPrefix + "0." + f.Floor + "." + floors.FactPassed
 		if facts[key] != strconv.FormatBool(f.Passed) {

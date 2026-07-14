@@ -402,7 +402,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		Platform:   platform,
 		Logger:     logger,
 	}
-	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, opts.SandboxSourceDir, checkouts, sandboxes); err != nil {
+	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, checkouts, sandboxes); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 

@@ -1,19 +1,26 @@
-// Package projecttasks is the project_tasks tool (dev-from-task, task 6.1): the
-// reader half of the create_change → openspec.change.* → devtask.Project →
-// task.spec seam. It reads an approved change's execution-rich task facts off the
-// run entity, reconstructs each into a devtask.RawTask (honoring the nil-vs-
-// authored-empty presence distinction the writer preserved), runs devtask.Project
-// (Karpathy schema + budget clamp), and stamps the result as the IMMUTABLE
-// task.spec.* facts the dev loop converges on.
+// Package projecttasks is the shared PROJECTION CORE (dev-from-task, task 6.1) that
+// the projection station (internal/station/projection, R6) calls: the reader half of
+// the create_change → openspec.change.* → devtask.Project → task.spec seam. Project
+// reads an approved change's execution-rich task facts off the run entity,
+// reconstructs each into a devtask.RawTask (honoring the nil-vs-authored-empty
+// presence distinction the writer preserved), runs devtask.Project (Karpathy schema +
+// budget clamp), and stamps the result as the IMMUTABLE task.spec.* facts the dev
+// loop converges on.
 //
-// It plans nothing — create_change authored the tasks; this tool enforces and
-// FREEZES them. Immutability is structural: it refuses to re-project onto a run
-// that already carries task.spec (the loop redefines nothing — dev-from-task spec).
-// A task missing a required field is NOT stamped: devtask.Project returns a schema
-// error and the tool fails toward the human (surfacing the gap as a tool error; the
-// PARK is a rule's job, G2 — this tool fires no lifecycle transition). It stamps no
-// outcome (G3): task.spec is the task definition, not a result. Single G5 writer of
+// It plans nothing — create_change authored the tasks; Project enforces and FREEZES
+// them. Immutability is structural: it refuses to re-project onto a run that already
+// carries task.spec (the loop redefines nothing — dev-from-task spec). A task missing
+// a required field is NOT stamped: devtask.Project returns a schema error and Project
+// returns it as a plain error, so the caller fails toward the human (surfacing the gap;
+// the PARK is a rule's job, G2 — this package fires no lifecycle transition). It stamps
+// no outcome (G3): task.spec is the task definition, not a result. Single G5 writer of
 // task.spec.* (Source == task-projector).
+//
+// The project_tasks TOOL executor that used to wrap this core in a forced coordinator
+// turn was deleted in group 6 (R6) when the projection station took over — a forced
+// model turn to call a deterministic projector decided nothing and burned a paid call
+// for zero reason (G1). This package is now a pure library: no agentic.ToolCall/
+// ToolResult surface, no LLM-facing schema.
 package projecttasks
 
 import (
@@ -31,13 +38,9 @@ import (
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
-
-// ToolName is the registered tool name and the dev_from_task projection handler.
-const ToolName = "project_tasks"
 
 // Source is stamped on every task.spec triple. It MUST equal the single writer
 // declared for task.spec.* in internal/vocab (G5) — a conformance pin cross-checks.
@@ -48,77 +51,14 @@ const Source = "task-projector"
 // round-trip test pins it).
 const thinTextKey = "text"
 
-// Executor reads a run's change task facts and stamps the projected task.spec.
-type Executor struct {
-	reader changefacts.Reader
-	writer agentictools.OwnedFactWriter
-	logger *slog.Logger
-}
-
-// New builds the project_tasks executor. reader/writer may be nil for schema-only
-// registration (the tool censuses inspect ListTools without a live NATS client);
-// Execute fails loudly if either is nil.
-func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Executor{reader: reader, writer: writer, logger: logger}
-}
-
-type payload struct {
-	Slug string `json:"slug"`
-}
-
-// Execute reads the run's approved change task facts, projects them, and stamps the
-// immutable task.spec — or fails toward the human on a schema gap, or refuses to
-// re-project onto an already-projected run. It is a thin wrapper over the shared
-// Project core (also called by the projection station, R6).
-func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.reader == nil || e.writer == nil {
-		return errResult(call, agentic.ToolErrorInternal, "project_tasks: harness not fully wired (reader/writer)")
-	}
-	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
-	if !ok || runEntityID == "" {
-		return errResult(call, agentic.ToolErrorInternal, "project_tasks: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
-	}
-
-	var p payload
-	raw, err := json.Marshal(call.Arguments)
-	if err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "project_tasks: encode arguments: %v", err)
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "project_tasks: decode arguments: %v", err)
-	}
-
-	count, err := Project(ctx, e.reader, e.writer, e.logger, runEntityID, p.Slug)
-	if err != nil {
-		// CLASSIFICATION NOTE (dormant): the core returns author-facing refusals (schema
-		// gap, immutability, unvalidated content) as plain errors, so ReadErrorKind maps
-		// them to a coarser kind than the pre-extraction per-branch InvalidArgs. This is
-		// INERT — project_tasks is dropped from allowed_tools (uncallable) and the projection
-		// STATION ignores the kind entirely (it retries then logs); the tool executor is
-		// scheduled for deletion in the group-6 tool-cleanup slice. If it is ever re-enabled
-		// before then, restore typed kinds here (semstreams-reviewer slice-2 MEDIUM).
-		return errResult(call, changefacts.ReadErrorKind(err), "%v", err)
-	}
-	summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "tasks": count, "run_entity": runEntityID})
-	// StopLoop: projection is single-shot (task.spec is immutable, projected once).
-	// The forced-function projection loop must end after this call — without it the
-	// loop would take another turn (tool_choice re-forces the call, project_tasks then
-	// refuses the now-immutable spec), burning a model turn and cursor slot. Mirrors
-	// create_change / validate_change, the other single-shot authoring/harness tools.
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
-}
-
 // Project is the shared projection core: it reads the run's approved change task
 // facts for slug, enforces immutability + the D15#0 validated-content binding + the
 // target_files-includes-tests contract, projects via devtask.Project, and stamps the
 // IMMUTABLE task.spec. It returns the projected task count, or an error that carries
 // a human-readable refusal message (a schema gap / re-projection / unvalidated
-// change / contract violation) with NOTHING stamped (atomic). Both the project_tasks
-// tool and the projection station (R6) call it, so task.spec keeps one writer (G5)
-// and one enforcement path. reader/writer/logger must be non-nil (the callers check).
+// change / contract violation) with NOTHING stamped (atomic). The projection station
+// (R6) is the sole caller, so task.spec keeps one writer (G5) and one enforcement
+// path. reader/writer/logger must be non-nil (the caller checks).
 func Project(ctx context.Context, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger, runEntityID, slug string) (int, error) {
 	if slug == "" {
 		return 0, fmt.Errorf("project_tasks: slug is required")
@@ -375,13 +315,4 @@ func jsonArray(xs []string) string {
 	}
 	b, _ := json.Marshal(xs)
 	return string(b)
-}
-
-func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
-	return agentic.ToolResult{
-		CallID:    call.ID,
-		Name:      ToolName,
-		Error:     fmt.Sprintf(format, args...),
-		ErrorKind: kind,
-	}, nil
 }

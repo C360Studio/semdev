@@ -1,13 +1,17 @@
-// Package validatechange is the validate_change tool (openspec-io): it runs the
-// real OpenSpec CLI validator against a run's generated change as a deterministic
+// Package validatechange holds the shared VALIDATION CORE: it shells the real
+// OpenSpec CLI validator against a run's generated change as a deterministic
 // compatibility oracle, and stamps openspec.validated on the run entity ONLY when
 // the CLI passes. It is the "the sponsor's own tool blessed this" step on the way
 // in (D14) — semdev shells the oracle rather than re-implementing its rules.
 //
-// It is the measurement-harness pattern (G3): the tool's schema takes only the
-// change slug — NEVER a validation outcome — and the HARNESS (this tool's Go,
-// which actually ran `openspec validate`) stamps the result from the real process
-// exit code. The model triggers the check; it cannot supply the verdict. The
+// Validate is called by the validation station (internal/station/validation, R6)
+// as a publish-triggered component with ZERO model turns. It used to also back a
+// forced validate_change coordinator tool; that executor was deleted in the
+// group-6 reshape (slice 6E) once the station took over as sole caller.
+//
+// It is the measurement-harness pattern (G3): callers pass only the change
+// slug — NEVER a validation outcome — and this Go (which actually ran
+// `openspec validate`) stamps the result from the real process exit code. The
 // lifecycle transition it enables (executing → awaiting_approval) is fired by a
 // rule that reads openspec.validated (G2) — this Go only stamps the fact.
 //
@@ -25,7 +29,7 @@
 // judged — and echoes it into openspec.validated. So the marker binds to the exact
 // content the CLI blessed. A re-author bumps that revision, so the stale
 // openspec.validated no longer equals it — the gate rule (openspec.validated eq the
-// run's current revision) and project_tasks both refuse until validate_change runs
+// run's current revision) and project_tasks both refuse until Validate runs
 // again against the new content. Reading the SLUG-scoped revision (not the run-level
 // one) binds the marker to precisely what was validated, so a future multi-slug run
 // fails the gate closed rather than blessing whatever was last authored.
@@ -35,10 +39,8 @@ package validatechange
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -47,14 +49,9 @@ import (
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
-
-// ToolName is the registered tool name and the coordinator's validate action
-// handler.
-const ToolName = "validate_change"
 
 // Source is the value stamped on the openspec.validated triple. It MUST equal the
 // writer declared for openspec.validated in internal/vocab (G5) — a conformance
@@ -71,28 +68,10 @@ const openspecBin = "openspec"
 // validateTimeout bounds one CLI validation.
 const validateTimeout = 30 * time.Second
 
-// Executor runs the OpenSpec validator over a run's change and stamps the result.
-type Executor struct {
-	reader changefacts.Reader
-	runner cliexec.Runner
-	writer agentictools.OwnedFactWriter
-	logger *slog.Logger
-}
-
-// New builds the validate_change executor. reader/runner/writer may be nil for
-// schema-only registration (the tool censuses inspect ListTools without a live
-// NATS client); Execute fails loudly if any is nil.
-func New(reader changefacts.Reader, runner cliexec.Runner, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Executor{reader: reader, runner: runner, writer: writer, logger: logger}
-}
-
 // ErrOracleUnrunnable wraps a failure to RUN the OpenSpec CLI (binary missing,
 // timeout, cancel) — a transport fault, not a verdict, so nothing is stamped or
-// cleared and it is retryable. The tool maps it to the Network error kind; the
-// validation station logs it and the base retries.
+// cleared and it is retryable. The validation station logs it and the base
+// retries.
 var ErrOracleUnrunnable = errors.New("openspec validate could not be run")
 
 // Result reports the oracle verdict for a run's change. Validated true iff the CLI
@@ -105,59 +84,14 @@ type Result struct {
 	Issues    string
 }
 
-// Execute hydrates the run's change, runs the OpenSpec CLI oracle, and stamps/clears
-// openspec.validated from the real exit code. It is a thin wrapper over the shared
-// Validate core (also called by the validation station, R6). Terminal for the turn
-// (StopLoop); the gate rule advances the run.
-func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.reader == nil || e.runner == nil || e.writer == nil {
-		return errResult(call, agentic.ToolErrorInternal, "validate_change: harness not fully wired (reader/runner/writer)")
-	}
-	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
-	if !ok || runEntityID == "" {
-		return errResult(call, agentic.ToolErrorInternal, "validate_change: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
-	}
-
-	var p payload
-	raw, err := json.Marshal(call.Arguments)
-	if err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: encode arguments: %v", err)
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: decode arguments: %v", err)
-	}
-
-	out, err := Validate(ctx, e.reader, e.runner, e.writer, runEntityID, p.Slug)
-	if err != nil {
-		// The oracle-unrunnable transport fault stays retryable (Network). The other
-		// core refusals (missing revision, empty/unsafe change) are now classified via
-		// the shared graph-error classifier rather than the pre-extraction per-branch
-		// InvalidArgs — a coarsening that is INERT: validate_change is dropped from
-		// allowed_tools (uncallable) and the validation STATION ignores the kind (it
-		// retries then logs); the tool executor is scheduled for deletion in the group-6
-		// tool-cleanup slice (semstreams-reviewer slice-2 MEDIUM).
-		kind := changefacts.ReadErrorKind(err)
-		if errors.Is(err, ErrOracleUnrunnable) {
-			kind = agentic.ToolErrorNetwork
-		}
-		return errResult(call, kind, "%v", err)
-	}
-	if out.Validated {
-		summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": true, "revision": out.Revision, "run_entity": runEntityID})
-		return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
-	}
-	content, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": false, "issues": out.Issues})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(content), StopLoop: true}, nil
-}
-
 // Validate is the shared validation core: it hydrates the run's change, materializes
 // it to a throwaway workspace, shells `openspec validate <slug> --strict --json
 // --no-interactive`, and — from the real exit code — stamps openspec.validated (pass)
 // or clears any stale marker (fail). It returns a Result (Validated true iff the CLI
 // passed). A returned error is a wiring/authoring/transport fault (the oracle-
 // unrunnable case wraps ErrOracleUnrunnable); a CLI REJECTION is Result{Validated:
-// false, Issues:...} with a nil error. Both the validate_change tool and the
-// validation station (R6) call it, so openspec.validated keeps one writer (G5).
+// false, Issues:...} with a nil error. The validation station (R6) is the sole
+// caller, so openspec.validated keeps one writer (G5).
 func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Runner, writer agentictools.OwnedFactWriter, runEntityID, slug string) (Result, error) {
 	if slug == "" {
 		return Result{}, fmt.Errorf("validate_change: slug is required")
@@ -278,13 +212,4 @@ func validatorOutput(res cliexec.Result) string {
 // isEmpty reports whether a hydrated Change carries no artifact facts.
 func isEmpty(c *openspec.Change) bool {
 	return c.Proposal == nil && c.Design == nil && c.Tasks == nil && len(c.Deltas) == 0
-}
-
-func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
-	return agentic.ToolResult{
-		CallID:    call.ID,
-		Name:      ToolName,
-		Error:     fmt.Sprintf(format, args...),
-		ErrorKind: kind,
-	}, nil
 }

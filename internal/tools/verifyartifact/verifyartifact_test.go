@@ -8,7 +8,6 @@ import (
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -34,7 +33,7 @@ func (f fakeManifests) Resolve(_ context.Context, _ string) (harness.Manifest, e
 }
 
 // fakeProver returns a canned verdict/err — the cold proof itself is exercised
-// docker-gated in internal/coldproof; here we pin the tool's fact-stamping and
+// docker-gated in internal/coldproof; here we pin RunVerify's fact-stamping and
 // fail-closed wiring without docker.
 type fakeProver struct {
 	verdict verify.Verdict
@@ -59,50 +58,38 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]stri
 	return nil, nil
 }
 
-func callVerify() agentic.ToolCall {
-	return agentic.ToolCall{
-		ID:       "c1",
-		Name:     ToolName,
-		Metadata: map[string]any{agentic.MetadataKeyRunEntityID: runEntity},
-	}
-}
-
 func verdictOf(o verify.Outcome) verify.Verdict { return verify.Verdict{Outcome: o} }
 
-// execWith runs the tool with the given clones/prover and returns the stamped
-// verify.result (or "") plus the tool result.
-func execWith(t *testing.T, clones VerifyClones, prover Prover, w *fakeWriter) (string, agentic.ToolResult) {
+// runVerify runs RunVerify with the given clones/prover and returns the stamped
+// verify.result (or "") plus RunVerify's own return values.
+func runVerify(t *testing.T, clones VerifyClones, prover Prover, w *fakeWriter) (string, VerifyResult, error) {
 	t.Helper()
-	e := New(clones, fakeManifests{m: harness.GoProfile()}, prover, nil, w, nil)
-	res, err := e.Execute(context.Background(), callVerify())
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
+	res, err := RunVerify(context.Background(), clones, fakeManifests{m: harness.GoProfile()}, prover, nil, w, nil, runEntity)
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			if tr.Predicate == ResultPredicate {
-				return tr.Object.(string), res
+				return tr.Object.(string), res, err
 			}
 		}
 	}
-	return "", res
+	return "", res, err
 }
 
 // Happy path: the cold proof passes → verify.result = pass, stamped with the harness
-// Source on the run entity, and the tool proved the CLONE root (the committed artifact),
-// not the warm checkout.
-func TestVerifyPassStampsResult(t *testing.T) {
+// Source on the run entity, and RunVerify proved the CLONE root (the committed
+// artifact), not the warm checkout.
+func TestRunVerifyPassStampsResult(t *testing.T) {
 	w := &fakeWriter{}
 	prover := &fakeProver{verdict: verdictOf(verify.OutcomePass)}
-	got, res := execWith(t, fakeClones{root: "/verify-clone"}, prover, w)
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	got, res, err := runVerify(t, fakeClones{root: "/verify-clone"}, prover, w)
+	if err != nil {
+		t.Fatalf("RunVerify: %v", err)
 	}
 	if got != string(verify.OutcomePass) {
 		t.Fatalf("verify.result = %q, want pass", got)
 	}
-	if !res.StopLoop {
-		t.Error("verify_artifact must StopLoop (single forced turn)")
+	if res.Verdict.Outcome != verify.OutcomePass {
+		t.Errorf("VerifyResult.Verdict.Outcome = %q, want pass", res.Verdict.Outcome)
 	}
 	if prover.gotRoot != "/verify-clone" {
 		t.Errorf("prover proved %q, want the fresh clone root /verify-clone (the committed artifact, not the warm checkout)", prover.gotRoot)
@@ -119,67 +106,68 @@ func TestVerifyPassStampsResult(t *testing.T) {
 	}
 }
 
-// A genuine cold failure (fabrication / non-self-contained fix) → verify.result = fail,
-// and it StopLoops (a terminal verdict). The delivery route (08b) reads verify.result=fail
-// off the run and parks — verify_artifact stamps NO loop chaining marker (the reshape, R1).
-func TestVerifyFailStampsResultAndStopsLoop(t *testing.T) {
+// A genuine cold failure (fabrication / non-self-contained fix) → verify.result = fail.
+// The retry→re-run behavior lives in the caller (the verify station); here we only
+// assert the stamp and the returned verdict.
+func TestRunVerifyFailStampsResult(t *testing.T) {
 	w := &fakeWriter{}
-	got, res := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeFail)}, w)
+	got, res, err := runVerify(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeFail)}, w)
+	if err != nil {
+		t.Fatalf("RunVerify: %v", err)
+	}
 	if got != string(verify.OutcomeFail) {
 		t.Fatalf("verify.result = %q, want fail", got)
 	}
-	if !res.StopLoop {
-		t.Error("a terminal (fail) verdict must StopLoop — the forced verify loop is one turn")
+	if res.Verdict.Outcome != verify.OutcomeFail {
+		t.Errorf("VerifyResult.Verdict.Outcome = %q, want fail", res.Verdict.Outcome)
 	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			if tr.Predicate == "dev.verified" {
-				t.Errorf("verify_artifact must no longer stamp dev.verified (the delivery route reads verify.result on the run): saw it on %q", tr.Subject)
+				t.Errorf("RunVerify must not stamp dev.verified (the delivery route reads verify.result on the run): saw it on %q", tr.Subject)
 			}
 		}
 	}
 }
 
 // A transport fault classified by the proof → verify.result = retry (never a terminal
-// reject of a good artifact). A retry must RE-RUN, not terminate: it stamps verify.result
-// (evidence) and does NOT StopLoop — so the forced verify loop re-runs the cold proof
-// rather than parking a good artifact on a single flake. The delivery route keys on
-// verify.result eq "pass"/"fail", so a "retry" value never triggers delivery (SB5).
-func TestVerifyRetryStampsResultButDoesNotStopLoop(t *testing.T) {
+// reject of a good artifact), stamped as evidence. RunVerify returns the retry verdict
+// with no error — it is the CALLER's (the verify station's) concern to re-run rather
+// than treat this as terminal (SB5).
+func TestRunVerifyRetryStampsResultAndReturnsVerdict(t *testing.T) {
 	w := &fakeWriter{}
-	got, res := execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, w)
+	got, res, err := runVerify(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, w)
+	if err != nil {
+		t.Fatalf("RunVerify: %v", err)
+	}
 	if got != string(verify.OutcomeRetry) {
 		t.Errorf("verify.result = %q, want retry (evidence of the attempt)", got)
 	}
-	if res.StopLoop {
-		t.Error("a retry must NOT StopLoop — the forced verify loop re-runs the cold proof")
+	if res.Verdict.Outcome != verify.OutcomeRetry {
+		t.Errorf("VerifyResult.Verdict.Outcome = %q, want retry", res.Verdict.Outcome)
 	}
 }
 
-// A proof that COULD NOT RUN (image build flake, incomplete manifest) is a retryable
-// TOOL error — it stamps NO verdict (never a false green), and does not StopLoop so the
-// forced loop re-runs.
-func TestVerifyProveErrorIsRetryableToolError(t *testing.T) {
+// A proof that COULD NOT RUN (image build flake, incomplete manifest) returns an error
+// and stamps NO verdict (never a false green) — the caller decides whether to retry.
+func TestRunVerifyProveErrorStampsNothing(t *testing.T) {
 	w := &fakeWriter{}
-	_, res := execWith(t, fakeClones{root: "/c"}, &fakeProver{err: errors.New("docker build: daemon flake")}, w)
-	if res.Error == "" {
-		t.Error("a proof that could not run must surface as a tool error, not a stamped verdict")
+	_, _, err := runVerify(t, fakeClones{root: "/c"}, &fakeProver{err: errors.New("docker build: daemon flake")}, w)
+	if err == nil {
+		t.Error("a proof that could not run must return an error, not a stamped verdict")
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a proof that could not run must stamp no verify.result")
 	}
-	if res.StopLoop {
-		t.Error("a prove-error must NOT StopLoop — the forced verify loop retries")
-	}
 }
 
-// The clone step fails closed (no warm checkout) → a tool error, no stamp — the run
-// parks rather than verifying over a guessed path (SB5).
-func TestVerifyCloneFailsClosed(t *testing.T) {
+// The clone step fails closed (no warm checkout) → an error, no stamp — the run parks
+// rather than verifying over a guessed path (SB5).
+func TestRunVerifyCloneFailsClosed(t *testing.T) {
 	w := &fakeWriter{}
-	_, res := execWith(t, fakeClones{err: errors.New("no checkout materialized for run")}, &fakeProver{verdict: verdictOf(verify.OutcomePass)}, w)
-	if res.Error == "" {
-		t.Error("a failed clone must surface as a tool error")
+	_, _, err := runVerify(t, fakeClones{err: errors.New("no checkout materialized for run")}, &fakeProver{verdict: verdictOf(verify.OutcomePass)}, w)
+	if err == nil {
+		t.Error("a failed clone must return an error")
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a failed clone must stamp nothing (no verify over a guessed path)")
@@ -187,11 +175,11 @@ func TestVerifyCloneFailsClosed(t *testing.T) {
 }
 
 // Re-verify upserts the verify.result (replace-by-predicate): a passing re-run replaces
-// a prior retry, and verify writes ONLY verify.result.
-func TestVerifyReVerifyUpserts(t *testing.T) {
+// a prior retry, and RunVerify writes ONLY verify.result.
+func TestRunVerifyReVerifyUpserts(t *testing.T) {
 	w := &fakeWriter{}
-	execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, w)
-	execWith(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomePass)}, w)
+	runVerify(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomeRetry)}, w)
+	runVerify(t, fakeClones{root: "/c"}, &fakeProver{verdict: verdictOf(verify.OutcomePass)}, w)
 	if len(w.replaces) != 2 {
 		t.Fatalf("want two verify.result upserts, got %d", len(w.replaces))
 	}
@@ -201,28 +189,5 @@ func TestVerifyReVerifyUpserts(t *testing.T) {
 				t.Errorf("verify wrote %q — it must write only %q", tr.Predicate, ResultPredicate)
 			}
 		}
-	}
-}
-
-// Schema-only registration (nil clones/manifests/prover/writer) fails loudly.
-func TestVerifyFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, nil, nil, nil, nil).Execute(context.Background(), callVerify())
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.Error == "" {
-		t.Error("a nil-harness verify must fail loudly")
-	}
-}
-
-// G3: the schema takes no arguments at all — the model can only trigger the proof.
-func TestVerifySchemaTakesNoInput(t *testing.T) {
-	defs := (&Executor{}).ListTools()
-	if len(defs) != 1 {
-		t.Fatalf("want one tool definition, got %d", len(defs))
-	}
-	props, _ := defs[0].Parameters["properties"].(map[string]any)
-	if len(props) != 0 {
-		t.Errorf("schema exposes %d properties, want 0 — verify takes no input (G3): %v", len(props), props)
 	}
 }
