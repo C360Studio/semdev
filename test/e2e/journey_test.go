@@ -155,6 +155,54 @@ const journeyFixtureRetryFixDiff = "--- a/health.go\n" +
 	" \tdefault:\n" +
 	" \t\treturn Healthy\n"
 
+// journeyReviewRetryMarker is the distinctive substring of the REVIEW-RETRY re-dispatch prompt
+// (dev-from-task/07b-review-retry.json — "the reviewer (Quinn) requested changes"). "requested
+// changes" reaches the model only via 07b's developer prompt (07c is a budget-exhausted PARK
+// with no model turn) and is absent from the dispatch prompt (04) and Quinn's review prompt
+// (06a) — so the rejection journey keys attempt 2's fixtures on it, and the positional cursor
+// parks them until Quinn's rejection re-enters development.
+const journeyReviewRetryMarker = "requested changes"
+
+// journeyReviewFinding is the required change Quinn raises on her FIRST review of the rejection
+// journey. A single finding forces verdict=changes_requested even on a PASSING measurement (G3:
+// approved ⟺ measured-pass ∧ no findings) — the rejection lever. It is realistic (G8): a review
+// asking the boundary be documented so nobody "fixes" the inclusive `>=` back to `>`.
+const journeyReviewFinding = "The inclusive warning boundary (`>=`) is correct but undocumented — " +
+	"add a short comment at that case so a future reader does not regress it back to `>`."
+
+// journeyFixtureAddressDiff is Amelia's SECOND attempt in the rejection journey: a small delta
+// (relative to attempt 1's committed `>=` tree) that ADDRESSES Quinn's finding by adding the
+// requested comment. It keeps the measure GREEN (a comment changes no behavior), so Quinn's
+// second review — with no new finding — approves. Its `-` context matches attempt 1's fix line.
+const journeyFixtureAddressDiff = "--- a/health.go\n" +
+	"+++ b/health.go\n" +
+	"@@ -28,7 +28,7 @@ func Classify(cpu, mem float64) Status {\n" +
+	" \tswitch {\n" +
+	" \tcase pressure >= criticalThreshold:\n" +
+	" \t\treturn Unhealthy\n" +
+	"-\tcase pressure >= warningThreshold:\n" +
+	"+\tcase pressure >= warningThreshold: // warning boundary is inclusive by design (reviewed)\n" +
+	" \t\treturn Degraded\n" +
+	" \tdefault:\n" +
+	" \t\treturn Healthy\n"
+
+// journeyFixtureAddress2Diff is Amelia's THIRD attempt in the exhaustion journey: another
+// green-keeping comment delta (relative to attempt 2's committed tree) that still cannot satisfy
+// an ever-rejecting reviewer. Distinct from journeyFixtureAddressDiff so it applies cleanly on
+// the chained checkout. Measures GREEN (comment-only); the budget exhausts on the reviewer, not
+// the harness.
+const journeyFixtureAddress2Diff = "--- a/health.go\n" +
+	"+++ b/health.go\n" +
+	"@@ -28,7 +28,7 @@ func Classify(cpu, mem float64) Status {\n" +
+	" \tswitch {\n" +
+	" \tcase pressure >= criticalThreshold:\n" +
+	" \t\treturn Unhealthy\n" +
+	"-\tcase pressure >= warningThreshold: // warning boundary is inclusive by design (reviewed)\n" +
+	"+\tcase pressure >= warningThreshold: // boundary inclusive — re-documented per review\n" +
+	" \t\treturn Degraded\n" +
+	" \tdefault:\n" +
+	" \t\treturn Healthy\n"
+
 // entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
 // lands in (graph-ingest's kv-write output). The journey scans it for the
 // coordinator's decision.
@@ -502,15 +550,7 @@ func TestBridgeProofRetryFailThenPass(t *testing.T) {
 
 	// Drive the shared front-of-arc exactly as the bridge proof does, through human approval,
 	// projection, and the cold-proved sandbox — the retry only diverges inside the dev loop.
-	taskID := publishCoordinatorWake(ctx, t)
-	requireCoordinatorDecision(ctx, t, taskID, journeyDecideAction)
-	runEntityID := requireRunAnchor(ctx, t, taskID)
-	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
-	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
-	approveChange(ctx, t, runEntityID)
-	requireRunPhase(ctx, t, runEntityID, "executing")
-	requireTaskSpecProjected(ctx, t, runEntityID)
-	requireSandboxReady(ctx, t, runEntityID)
+	runEntityID := driveSharedFrontOfArc(ctx, t)
 
 	// Wide-window RETRY gate (the direct proof a retry fired, positioned to absorb attempt 1's
 	// COLD in-container compile): exactly TWO attempts were dispatched — dispatch-developer (04)
@@ -536,6 +576,152 @@ func TestBridgeProofRetryFailThenPass(t *testing.T) {
 	if got := mock.RequestCount(); got != 11 {
 		t.Fatalf("expected exactly 11 model turns (bridge-proof 8 + the extra failing developer loop's apply/measure/stop = 3), got %d — a mismatch means the retry route misfired, an extra loop spawned, or a turn went unscripted", got)
 	}
+}
+
+// TestBridgeProofReviewRejectionReentry drives the REVIEWER-REJECTION RE-ENTRY station (task
+// 10.2, design R10/D16): Amelia's attempt measures GREEN and reaches review, but Quinn RAISES A
+// FINDING — so the verdict is changes_requested (G3: approved ⟺ measured-pass ∧ no findings, so a
+// finding rejects even a passing measurement) — and the REVIEW route re-enters DEVELOPMENT
+// (dev-from-task/07b), not verify→park. This is the D16 fix the old rail got wrong. Amelia's
+// fresh attempt addresses the finding, Quinn's second review approves, and the run delivers.
+// Zero paid tokens.
+//
+// The re-entry comes from the REVIEW route, not the floors route: BOTH measurements pass, so the
+// floors retry (06c) can never fire — the only thing that can drive a second attempt here is
+// Quinn's rejection. So attempt count 2 IS the rejection re-entry, and the TWO Quinn reviews
+// (12 turns vs the measurement-retry's 11) are its signature. The mock keys attempt 2 on 07b's
+// distinctive "requested changes" substring (parked on the cursor until the re-entry prompt
+// arrives); the checkout chains so attempt 2's addressing diff is a delta on attempt 1's fix.
+func TestBridgeProofReviewRejectionReentry(t *testing.T) {
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(),
+		// Attempt 1 (dispatch prompt): the GOOD fix → measure GREEN → floors advance → Quinn reviews.
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}}},
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		// Quinn's FIRST review RAISES A FINDING → changes_requested → review route 07b re-dispatches
+		// Amelia (D16 re-entry) with the finding to address.
+		mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{
+			"task_index": 0, "findings": []any{journeyReviewFinding}}}},
+		// Attempt 2 (07b re-entry prompt — journeyReviewRetryMarker): a delta ADDRESSING the finding →
+		// measure GREEN → floors advance → Quinn reviews AGAIN.
+		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureAddressDiff}}},
+		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		// Quinn's SECOND review — NO findings, still-passing measurement → approved → verify → delivery.
+		mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}}},
+	)...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	startJourneyRuntime(ctx, t, mock)
+
+	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
+	runEntityID := driveSharedFrontOfArc(ctx, t)
+
+	// Wide-window RE-ENTRY gate (absorbs attempt 1's COLD compile): TWO attempts were dispatched —
+	// 04 appended #1, the REVIEW-RETRY route 07b appended #2 after Quinn's rejection. Since both
+	// measurements pass (the floors retry 06c never fires), a second attempt can ONLY come from the
+	// reviewer rejection re-entering development — so count 2 here proves the D16 re-entry.
+	requireAttemptCount(ctx, t, runEntityID, 2, 4*time.Minute)
+	t.Logf("rejection station: Quinn rejected attempt 1 (finding) → review route re-entered dev (07b) → 2 attempts on run %s", runEntityID)
+
+	// The run RECOVERED: attempt 2 addressed the finding, Quinn's SECOND review approved → verify →
+	// delivery. Use the rejection-tolerant wait — review.verdict.0 is TRANSIENTLY changes_requested
+	// (Quinn's first review) before it becomes approved, which the happy-path requireReviewApproved
+	// would (correctly, for its path) treat as a hard failure. requirePRDelivered fails loud if the
+	// run PARKED instead (a broken 07b would exhaust to the review-park 07c).
+	if sawRejection := requireReviewEventuallyApproved(ctx, t, runEntityID, 90*time.Second); sawRejection {
+		t.Logf("rejection station: observed the transient review.verdict.0=changes_requested before approval on run %s", runEntityID)
+	}
+	requireVerifyPassed(ctx, t, runEntityID)
+	requirePRDelivered(ctx, t, runEntityID)
+
+	// Turn accounting: front-of-arc 4 + attempt-1 loop (apply/measure/stop = 3) + Quinn's first
+	// review (1, terminal) + attempt-2 loop (3) + Quinn's second review (1) = 12. The TWO reviews
+	// are the rejection signature — a measurement retry (10.1) has ONE review and totals 11.
+	if got := mock.RequestCount(); got != 12 {
+		t.Fatalf("expected exactly 12 model turns (front-of-arc 4 + two dev loops 3+3 + two Quinn reviews 1+1), got %d — a mismatch means the rejection did not re-enter dev (07b), an extra loop spawned, or a turn went unscripted", got)
+	}
+}
+
+// TestBridgeProofBudgetExhaustionParks drives the BUDGET-EXHAUSTION PARK station (task 10.3,
+// design R10/SB5): when the shared per-task iteration budget (3) is exhausted without the task
+// converging, the run PARKS toward the human — it never ships a PR and never claims a green. Here
+// Quinn rejects THREE times (a finding each), so each attempt re-enters development (07b) until the
+// budget is spent, and the third rejection at count 3 triggers the review-exhaustion park (07c,
+// route.verdict=changes_requested ∧ route.attempt.0 count ≥ 3). Zero paid tokens.
+//
+// This journeys the REVIEW-exhaustion park (07c). The floors-exhaustion park (06d, three RED
+// measurements → escalate) is the SAME park writer (run.awaiting_human) with a different trigger
+// and is NOT separately journeyed: consecutive 06c floors-retry loops share one prompt, so the
+// positional mock cursor cannot cleanly separate them — whereas the review path interleaves a Quinn
+// review (a distinct marker) between Amelia's retry loops, which terminates each cleanly. All three
+// measurements PASS (comment-only deltas on the chained checkout); the budget exhausts on the
+// reviewer, not the harness.
+func TestBridgeProofBudgetExhaustionParks(t *testing.T) {
+	rejectWithFinding := mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review",
+		Args: map[string]any{"task_index": 0, "findings": []any{journeyReviewFinding}}}}
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(),
+		// Attempt 1 (dispatch): fix → measure GREEN → advance → Quinn REJECTS → 07b (count→2).
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}}},
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		rejectWithFinding,
+		// Attempt 2 (07b re-entry): address → measure GREEN → advance → Quinn REJECTS again → 07b (count→3).
+		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureAddressDiff}}},
+		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		rejectWithFinding,
+		// Attempt 3 (07b re-entry): another delta → measure GREEN → advance → Quinn REJECTS a THIRD
+		// time at count 3 → the review-exhaustion PARK (07c), NOT another re-dispatch.
+		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureAddress2Diff}}},
+		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		rejectWithFinding,
+	)...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	startJourneyRuntime(ctx, t, mock)
+
+	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
+	runEntityID := driveSharedFrontOfArc(ctx, t)
+
+	// Wide-window EXHAUSTION gate (absorbs attempt 1's COLD compile): the budget is fully spent —
+	// THREE attempts were dispatched (04 = #1, two 07b re-entries = #2/#3). The third rejection at
+	// count 3 cannot re-dispatch (07b needs count < 3); it parks (07c). Exactly three.
+	requireAttemptCount(ctx, t, runEntityID, 3, 4*time.Minute)
+	t.Logf("exhaustion station: Quinn rejected 3x → budget spent (3 attempts) on run %s", runEntityID)
+
+	// The run PARKS toward the human — no PR, no false green. requireRunParked fails loud if the run
+	// delivered (a stray delivery route) or if the cold verify ever ran on the unapproved run.
+	// 90s (matching the rejection sibling): after the count-3 gate returns, attempt 3 still has to
+	// apply + measure (warm) + floors + the third review + 07c before the park lands.
+	requireRunParked(ctx, t, runEntityID, 90*time.Second)
+	t.Logf("exhaustion station: run parked (run.awaiting_human), no pr.ref, no verify.result — fail-closed (SB5)")
+
+	// Turn accounting: front-of-arc 4 + three dev loops (3 each = 9) + three Quinn reviews (1 each =
+	// 3) = 16. A different count means the budget did not exhaust at exactly three attempts, an extra
+	// loop spawned, or a turn went unscripted.
+	if got := mock.RequestCount(); got != 16 {
+		t.Fatalf("expected exactly 16 model turns (front-of-arc 4 + three dev loops 3×3 + three Quinn reviews 1×3), got %d — a mismatch means the budget did not exhaust at three attempts (07b/07c boundary) or a turn went unscripted", got)
+	}
+}
+
+// driveSharedFrontOfArc drives the front of every negative-path journey IDENTICALLY — publish the
+// front-door wake, confirm the coordinator routed, bind the minted run, author + validate the
+// change to awaiting_approval, approve as the human, then wait through projection and the
+// cold-proved sandbox — and returns the run entity id the caller asserts against. It is the
+// driver-side mirror of journeyFrontOfArcFixtures (the mock-side prefix), so the shared front
+// cannot drift between the retry/rejection/exhaustion journeys. (The bridge proof keeps its own
+// inline, per-station-logged copy as the annotated reference walk-through.)
+func driveSharedFrontOfArc(ctx context.Context, t *testing.T) (runEntityID string) {
+	t.Helper()
+	taskID := publishCoordinatorWake(ctx, t)
+	requireCoordinatorDecision(ctx, t, taskID, journeyDecideAction)
+	runEntityID = requireRunAnchor(ctx, t, taskID)
+	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
+	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
+	approveChange(ctx, t, runEntityID)
+	requireRunPhase(ctx, t, runEntityID, "executing")
+	requireTaskSpecProjected(ctx, t, runEntityID)
+	requireSandboxReady(ctx, t, runEntityID)
+	return runEntityID
 }
 
 // startJourneyRuntime boots the REAL shared runtime against the given mock LLM and blocks
@@ -887,6 +1073,72 @@ func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string
 	}, "run entity "+runEntityID+" never gained "+verdict+"=approved — the floors advance route (dev-from-task/06a) did not fire, "+
 		"or submit_review could not derive the verdict: check check_floors mirrored route.passed=true+route.rejected=false onto its loop, the advance route spawns Quinn on that mirror, "+
 		"submit_review is advertised/scripted as a role=reviewer loop, and the task's measurement.result.0 is passing")
+}
+
+// requireReviewEventuallyApproved polls until review.verdict.0 == "approved", TOLERATING a
+// transient "changes_requested" along the way and reporting whether one was seen. The rejection
+// journey's first review rejects (a finding) before its second approves, so review.verdict.0 is
+// changes_requested for the duration of the re-entry — unlike requireReviewApproved, which treats
+// any changes_requested as a hard failure (correct for the happy/retry paths, wrong here). timeout
+// must cover attempt 2's measure + the second review. The transient verdict persists for seconds
+// (the whole re-entry cycle), so the 300ms poll observes it reliably; the caller still relies on
+// the deterministic turn count for the rejection proof, treating sawRejection as corroboration.
+func requireReviewEventuallyApproved(ctx context.Context, t *testing.T, runEntityID string, timeout time.Duration) (sawRejection bool) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const verdict = "review.verdict.0"
+	deadline := time.Now().Add(timeout)
+	for {
+		if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
+			switch tripleString(e, verdict) {
+			case "changes_requested":
+				sawRejection = true
+			case "approved":
+				return sawRejection
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s never reached %s=approved within %s (sawRejection=%v) — after Quinn's rejection "+
+				"re-entered dev (07b), attempt 2 must address the finding, measure green, and Quinn's SECOND review "+
+				"must approve; check the second submit_review fixture supplies NO findings and the re-entry loop measured",
+				runEntityID, verdict, timeout, sawRejection)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// requireRunParked polls until the run carries run.awaiting_human — the fail-closed terminal for
+// an exhausted/blocked run — while asserting it did NOT ship (no pr.ref) and never reached a false
+// green (no verify.result). It fails FAST and loud if a pr.ref appears (a parked run that somehow
+// delivered is a worse bug than a timeout). The final no-verify check catches a run that parked yet
+// had already been cold-verified — a run must not both park and carry a green verify.result.
+func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, timeout time.Duration) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	requireEventually(t, timeout, func() bool {
+		e, ok := scanEntities(ctx, client)[runEntityID]
+		if !ok {
+			return false
+		}
+		if ref := tripleString(e, "pr.ref"); ref != "" {
+			t.Fatalf("run %s DELIVERED (pr.ref=%q) but the exhausted-budget journey must PARK, never ship — "+
+				"the review-exhaustion park (dev-from-task/07c) did not fire, or a delivery route fired on an unapproved run", runEntityID, ref)
+		}
+		return tripleString(e, "run.awaiting_human") != ""
+	}, "run "+runEntityID+" never parked (run.awaiting_human absent) — the review-exhaustion park (dev-from-task/07c) "+
+		"must fire when Quinn rejects at budget count ≥ 3: check the third submit_review stamped route.verdict=changes_requested "+
+		"and route.attempt.0 reached count 3 (07b re-dispatch stops at count 3, 07c takes over)")
+
+	// No false green: an unapproved, parked run must never carry a passing cold verify.
+	if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
+		if v := tripleString(e, "verify.result"); v != "" {
+			t.Fatalf("parked run %s carries verify.result=%q — a parked (never-approved) run must never reach the cold verify (no false green, SB5)", runEntityID, v)
+		}
+	}
 }
 
 // requireVerifyPassed polls the run entity until verify.result == "pass" — the proof the

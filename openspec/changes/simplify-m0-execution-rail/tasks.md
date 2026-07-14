@@ -67,8 +67,8 @@
 ## 10. Bridge-proof journey + docs honesty
 
 - [x] 10.1 Journey station: fail-then-pass (retry actually driven e2e — the standing MEDIUM carry-forward)
-- [ ] 10.2 Journey station: reviewer rejection re-entry (Quinn rejects once, Amelia's fresh attempt carries the findings)
-- [ ] 10.3 Journey station: budget exhaustion → park toward the human
+- [x] 10.2 Journey station: reviewer rejection re-entry (Quinn rejects once, Amelia's fresh attempt carries the findings)
+- [x] 10.3 Journey station: budget exhaustion → park toward the human (drives the REVIEW-exhaustion park 07c via 3 reviewer rejections; the floors-exhaustion escalate 06d shares the run.awaiting_human park writer and is offline-pinned in `test/conformance/rules_test.go`, but is NOT driven e2e — consecutive 06c floors-retry loops share one prompt so the positional mock cursor cannot separate them; known residual e2e gap, revisit if the mock gains per-loop keying)
 - [ ] 10.4 Docker-gated restart-recovery station (DEFERRED with the R8 recovery park — both blocked on the upstream `on_recovery` routing gap, `TestTripwireOnRecoveryRoutingGate`): once the gate fix lands, kill the process mid-run, restart over the SAME durable NATS/JetStream, and assert the restart-recovery park FIRED (`run.awaiting_human` set) with NO false green (no `verify.result`/`pr.ref`) — park-not-completes, never "run completes." Until then a restarted in-flight run wedges (documented M0 gap)
 - [ ] 10.5 Docs honesty pass (G10): brief/status restate M0 completion criteria (bridge proof ≠ complete; real-forge evidence required); document the gated-DAG M1 walker seam; update CLAUDE.md status
 - [ ] 10.6 Full ladder: mock journey green, docker-gated suites green, `openspec validate --strict` green on all three changes; semstreams-reviewer pass over the reshaped rail
