@@ -198,8 +198,8 @@ func TestTripwire529UniformExhaustionReason(t *testing.T) {
 	}
 }
 
-// TestTripwireOnRecoveryRoutingGate — semstreams on_recovery routing gap (R8;
-// design group 7). The M0-correct posture for a restarted, still-in-flight run is
+// TestTripwireOnRecoveryRoutingGate — semstreams #530 (on_recovery routing gap;
+// R8, design group 7). The M0-correct posture for a restarted, still-in-flight run is
 // a rule-native FAIL-CLOSED PARK: a rule with an EMPTY on_enter (so nothing fires
 // during live operation, when a run is `executing` its whole working life) and the
 // park in `on_recovery` (which the framework's bootstrap-recovery fork fires only

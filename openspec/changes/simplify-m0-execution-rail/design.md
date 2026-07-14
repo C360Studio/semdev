@@ -248,8 +248,9 @@ that the honest park replacement is itself not yet expressible in the engine:
   likely suppresses the bootstrap recovery fork for an entity whose last write
   triggered its last eval. There is **no** end-to-end test proving `on_recovery`
   fires through the wired path. Per G2 (engine gap → file the upstream ask + park
-  toward the human, never a silent Go reconciler), this is filed upstream and
-  **deferred**, tripwired at `test/conformance/upstream_asks_test.go`
+  toward the human, never a silent Go reconciler), this is filed upstream as
+  **semstreams #530** and **deferred**, tripwired at
+  `test/conformance/upstream_asks_test.go`
   (`TestTripwireOnRecoveryRoutingGate`). **Until the fix lands, a restarted
   in-flight run WEDGES — a known, documented M0 gap, not a claimed capability.**
   A Go boot-time reconciler that swept durable state to recover runs would be
@@ -299,7 +300,7 @@ The bump rides this change (despawn primitive, lifecycle idempotency,
 `$entity.lifecycle.*`). Asks: #519 (scalar `.value`; fix drafted upstream) —
 interim constant budget; #528 (per-spawn `max_iterations`) — interim uniform
 component cap; #529 (uniform exhaustion reason) — interim route-on-outcome; and
-the **`on_recovery` routing gap** (R8/group 7) — the rule Processor's
+**#530** (the **`on_recovery` routing gap**, R8/group 7) — the rule Processor's
 `hasStatefulActions` gate (`message_handler.go`) excludes `on_recovery`, so an
 `on_recovery`-only park is never evaluated; compounded by the stale-revision guard
 suppressing the bootstrap recovery fork. Interim: the restart-recovery park is
