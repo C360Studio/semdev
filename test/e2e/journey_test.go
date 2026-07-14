@@ -35,6 +35,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -103,6 +104,52 @@ const journeyFixtureFixDiff = "--- a/health.go\n" +
 	" \tcase pressure >= criticalThreshold:\n" +
 	" \t\treturn Unhealthy\n" +
 	"-\tcase pressure > warningThreshold:\n" +
+	"+\tcase pressure >= warningThreshold:\n" +
+	" \t\treturn Degraded\n" +
+	" \tdefault:\n" +
+	" \t\treturn Healthy\n"
+
+// journeyRetryMarker is the distinctive substring of the RETRY re-dispatch prompt
+// (dev-from-task/06c-route-retry.json — "your previous attempt … did NOT pass the
+// sandbox gate"). The exact phrase "sandbox gate" is ABSENT from the initial dispatch
+// prompt (04, whose lowercase "did not pass" is a deliberate near-miss), Quinn's prompt,
+// and the dev re-wake prompt — the wording, not merely the casing, is disjoint, so a
+// future prompt edit is less likely to quietly re-couple them. This disjointness is
+// LOAD-BEARING: the fail-then-pass mock keys attempt 2's fixtures on it so the positional
+// tool cursor stays parked on those fixtures (a marker miss does not burn the cursor)
+// until the retry loop's prompt actually arrives — attempt 1's loop then ends on a
+// completion instead of consuming attempt 2's apply_patch. If it ever re-couples, the
+// RequestCount==11 assertion fails loud (it can never silently false-green).
+const journeyRetryMarker = "did NOT pass the sandbox gate"
+
+// journeyFixtureWipDiff is Amelia's FIRST (failing) attempt in the retry journey: a WIP
+// edit that COMPILES but leaves the boundary bug (keeps `>`, only appends a FIXME), so
+// the in-container measure is RED exactly like the pristine fixture. It drives the floors
+// route not_clean→retry. The checkout chains (apply_patch commits cumulatively), so the
+// corrective attempt below diffs against THIS committed line, not pristine.
+const journeyFixtureWipDiff = "--- a/health.go\n" +
+	"+++ b/health.go\n" +
+	"@@ -28,7 +28,7 @@ func Classify(cpu, mem float64) Status {\n" +
+	" \tswitch {\n" +
+	" \tcase pressure >= criticalThreshold:\n" +
+	" \t\treturn Unhealthy\n" +
+	"-\tcase pressure > warningThreshold:\n" +
+	"+\tcase pressure > warningThreshold: // FIXME(retry): boundary still excludes the threshold\n" +
+	" \t\treturn Degraded\n" +
+	" \tdefault:\n" +
+	" \t\treturn Healthy\n"
+
+// journeyFixtureRetryFixDiff is Amelia's SECOND (corrective) attempt: it transforms the
+// WIP line the first attempt committed into the real `>=` fix, so the second measure is
+// GREEN and the floors route advances. Its `-` context is byte-identical to
+// journeyFixtureWipDiff's `+` line so `git apply` matches the chained checkout.
+const journeyFixtureRetryFixDiff = "--- a/health.go\n" +
+	"+++ b/health.go\n" +
+	"@@ -28,7 +28,7 @@ func Classify(cpu, mem float64) Status {\n" +
+	" \tswitch {\n" +
+	" \tcase pressure >= criticalThreshold:\n" +
+	" \t\treturn Unhealthy\n" +
+	"-\tcase pressure > warningThreshold: // FIXME(retry): boundary still excludes the threshold\n" +
 	"+\tcase pressure >= warningThreshold:\n" +
 	" \t\treturn Degraded\n" +
 	" \tdefault:\n" +
@@ -219,45 +266,12 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 		// (dev-from-task/08a) fires a plain `publish` to the delivery-station component, which
 		// records pr.ref with ZERO model turns — so there is no open_pr fixture to script.
 	)
-	if err := mock.Start(); err != nil {
-		t.Fatalf("start mock LLM: %v", err)
-	}
-	defer func() { _ = mock.Stop() }()
-
-	// The provision station builds the fixture's declared golang image and proves it
-	// cold (real docker, real go build), and the measure station then runs `go test`
-	// in the warm container — so this journey needs a wide budget over the pure-routing
-	// stations before it.
+	// The provision station builds the fixture's declared golang image and proves it cold
+	// (real docker, real go build), and the measure station then runs `go test` in the warm
+	// container — so this journey needs a wide budget over the pure-routing stations before it.
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
-
-	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
-		ConfigPath: journeyConfigPath(t, mock.Endpoint()),
-		// The patched config lives in a temp dir, so point persona seeding at the
-		// repo's real fragment tree — otherwise the coordinator would route on the
-		// framework default persona instead of Sarah's decision contract.
-		PersonasDir: journeyPersonasDir(t),
-		// The run's target SOURCE at M0 is the committed Go fixture — the provision station
-		// materializes the run's checkout from it and cold-proves the declared image (the
-		// same value boot threads into RegisterAll so the provision-station factory captures it).
-		SandboxSourceDir: journeySandboxSourceDir(t),
-	})
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	if err := rt.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() {
-		// Teardown is best-effort — graceful shutdown is subject to the known
-		// semstreams ComponentManager deadlock (C360Studio/semstreams#508); Stop
-		// bounds it so this returns rather than hanging.
-		if stopErr := rt.Stop(5 * time.Second); stopErr != nil {
-			t.Logf("runtime Stop (best-effort teardown): %v", stopErr)
-		}
-	}()
-
-	requireAgenticHealthy(ctx, t, rt)
+	startJourneyRuntime(ctx, t, mock)
 	taskID := publishCoordinatorWake(ctx, t)
 
 	// Station 2 — the coordinator routed. Poll the graph until the coordinator's
@@ -443,6 +457,214 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// re-firing) or an unscripted turn would push this past 8.
 	if got := mock.RequestCount(); got != 8 {
 		t.Fatalf("expected exactly 8 model turns (…, Amelia's 3-turn loop, R1 review; validate/projection/provision/floors/verify/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
+	}
+}
+
+// TestBridgeProofRetryFailThenPass drives the FAIL-THEN-PASS RETRY station (task 10.1,
+// design R10 — the standing MEDIUM carry-forward): Amelia's FIRST attempt measures RED
+// in-container, the FLOORS ROUTE goes not_clean→RETRY (dev-from-task/06c) and re-dispatches
+// a FRESH developer loop, and her SECOND attempt measures GREEN and advances to review →
+// verify → delivery. This proves the retry machinery drove e2e, not merely that a green
+// attempt ships. Zero paid tokens.
+//
+// The checkout CHAINS across attempts (apply_patch commits cumulatively — a retry applies
+// on top of the prior attempt's committed tree, not a fresh pristine base, per
+// applypatch.go), so attempt 1 lands a WIP diff that compiles but leaves the boundary bug
+// (measures RED like pristine) and attempt 2 lands the corrective diff RELATIVE TO that WIP
+// line (measures GREEN). The mock keys attempt 1 on the dispatch prompt (SEMDEV DEVELOPER)
+// and attempt 2 on the RETRY prompt (journeyRetryMarker): the positional tool cursor parks
+// attempt-2's fixtures until the retry loop's prompt arrives — a marker miss does not burn
+// the cursor (ssmock tryRoleToolCall) — so attempt 1's loop ends on a completion (its 3rd
+// turn's prompt lacks the retry marker) BEFORE the route re-dispatches. Ordering, not luck.
+func TestBridgeProofRetryFailThenPass(t *testing.T) {
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(),
+		// Attempt 1 (SEMDEV DEVELOPER dispatch prompt): the WIP diff compiles but leaves the boundary
+		// bug → the in-container measure is RED → floors route not_clean → retry re-dispatch.
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureWipDiff}}},
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		// Attempt 2 (the RETRY prompt — journeyRetryMarker): the corrective diff → measure GREEN →
+		// advance. Keyed on the retry marker so it stays parked on the cursor until the retry loop
+		// arrives (attempt 1's dispatch prompt does not contain it, so attempt 1 ends first).
+		mockllm.Fixture{Marker: journeyRetryMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureRetryFixDiff}}},
+		mockllm.Fixture{Marker: journeyRetryMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		// Quinn reviews the cleared second attempt → approved → verify + delivery (both components).
+		mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}}},
+	)...)
+
+	// One extra failing developer loop over the bridge proof (a second apply + real in-container
+	// measure + the retry re-dispatch), so budget slightly wider than the happy path's 7 minutes.
+	// Both journeys share journeyIssueRef; running them in ONE `task e2e` is safe because each
+	// journey resets NATS before booting (startJourneyRuntime → resetNATS), so this test's run is
+	// the only one in a clean durable graph — no stale run from the prior journey to interfere.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	startJourneyRuntime(ctx, t, mock)
+
+	// Drive the shared front-of-arc exactly as the bridge proof does, through human approval,
+	// projection, and the cold-proved sandbox — the retry only diverges inside the dev loop.
+	taskID := publishCoordinatorWake(ctx, t)
+	requireCoordinatorDecision(ctx, t, taskID, journeyDecideAction)
+	runEntityID := requireRunAnchor(ctx, t, taskID)
+	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
+	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
+	approveChange(ctx, t, runEntityID)
+	requireRunPhase(ctx, t, runEntityID, "executing")
+	requireTaskSpecProjected(ctx, t, runEntityID)
+	requireSandboxReady(ctx, t, runEntityID)
+
+	// Wide-window RETRY gate (the direct proof a retry fired, positioned to absorb attempt 1's
+	// COLD in-container compile): exactly TWO attempts were dispatched — dispatch-developer (04)
+	// appended #1 at the first spawn, the retry route (06c) appended #2 at the re-dispatch, which
+	// only happens AFTER attempt 1 measured RED and the floors route went not_clean. Gating here
+	// (before the review gate) means the first cold `go test` compile is absorbed with a clear
+	// message rather than blamed on the review route's tighter window. Exactly two: fewer = no
+	// retry (the WIP diff wrongly passed on attempt 1); more = a misfire/loop (caught fast).
+	requireAttemptCount(ctx, t, runEntityID, 2, 4*time.Minute)
+	t.Logf("retry station: attempt 1 measured RED → floors route retried → 2 attempts dispatched on run %s", runEntityID)
+
+	// The run RECOVERED: attempt 2 measured GREEN and advanced to review → cold verify → delivery.
+	// requirePRDelivered fails loud if the run PARKED instead (run.awaiting_human, no pr.ref) — a
+	// broken retry that exhausted to a park surfaces here rather than as a bare timeout. attempt 2's
+	// measure is WARM (attempt 1 already compiled), so the review gate's tighter window suffices.
+	requireReviewApproved(ctx, t, runEntityID)
+	requireVerifyPassed(ctx, t, runEntityID)
+	requirePRDelivered(ctx, t, runEntityID)
+
+	// Turn accounting: the bridge proof's 8 turns + Amelia's EXTRA failing loop (apply, measure,
+	// stop = 3) = 11. A different count means the retry route misfired, an extra loop spawned, or
+	// a turn went unscripted.
+	if got := mock.RequestCount(); got != 11 {
+		t.Fatalf("expected exactly 11 model turns (bridge-proof 8 + the extra failing developer loop's apply/measure/stop = 3), got %d — a mismatch means the retry route misfired, an extra loop spawned, or a turn went unscripted", got)
+	}
+}
+
+// startJourneyRuntime boots the REAL shared runtime against the given mock LLM and blocks
+// until the agentic plane + deterministic stations report healthy. It registers teardown via
+// t.Cleanup (mock Stop + runtime Stop) so the bridge proof and its negative-path siblings
+// share ONE boot path. Callers create the ctx (with a wide timeout — the provision station
+// builds the fixture image and cold-proves it on real docker, and measure runs `go test` in
+// the warm container) and drive the arc after this returns.
+func startJourneyRuntime(ctx context.Context, t *testing.T, mock *mockllm.Harness) {
+	t.Helper()
+
+	// Wipe NATS so THIS journey boots against a clean durable state (see resetNATS). Multiple
+	// full-arc journeys in one `task e2e` run each need their own fresh NATS — a prior journey's
+	// runs/change-facts/streams persist in the shared JetStream and the next boot's bootstrap
+	// replay re-fires rules on those STALE entities (a leftover run gets re-validated while this
+	// test's run does not). This runs BEFORE mock.Start/boot, when nothing of this test is
+	// connected and the prior test's runtime has already been torn down by its t.Cleanup.
+	resetNATS(ctx, t)
+
+	if err := mock.Start(); err != nil {
+		t.Fatalf("start mock LLM: %v", err)
+	}
+	t.Cleanup(func() { _ = mock.Stop() })
+
+	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
+		ConfigPath: journeyConfigPath(t, mock.Endpoint()),
+		// The patched config lives in a temp dir, so point persona seeding at the repo's real
+		// fragment tree — else the coordinator routes on the framework default persona instead
+		// of Sarah's decision contract.
+		PersonasDir: journeyPersonasDir(t),
+		// The run's target SOURCE at M0 is the committed Go fixture — the provision station
+		// materializes the run's checkout from it and cold-proves the declared image (the same
+		// value boot threads into RegisterAll so the provision-station factory captures it).
+		SandboxSourceDir: journeySandboxSourceDir(t),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		// Teardown is best-effort — graceful shutdown is subject to the known semstreams
+		// ComponentManager deadlock (C360Studio/semstreams#508); Stop bounds it so this
+		// returns rather than hanging.
+		if stopErr := rt.Stop(5 * time.Second); stopErr != nil {
+			t.Logf("runtime Stop (best-effort teardown): %v", stopErr)
+		}
+	})
+
+	requireAgenticHealthy(ctx, t, rt)
+}
+
+// resetNATS wipes and restarts the JetStream NATS so the calling journey boots against clean
+// durable state — the same isolation `task nats:reset` gives, applied PER TEST. Multiple
+// full-arc journeys in one `task e2e` run each need their own durable NATS: a prior journey's
+// runs, change facts, streams, and rule state persist in the shared JetStream, and the next
+// boot's bootstrap replay re-fires rules on those stale entities (observed: a leftover run gets
+// re-validated while the current test's run is never advanced). A docker volume wipe (down -v +
+// up --wait) is the framework's real isolation boundary and guarantees completeness — no bucket
+// or stream residue a hand-rolled programmatic purge might miss. Fails the test loud on error.
+func resetNATS(ctx context.Context, t *testing.T) {
+	t.Helper()
+	compose := filepath.Join(repoRoot(t), "docker", "compose", "nats.yml")
+	for _, args := range [][]string{
+		{"compose", "-f", compose, "down", "-v"},
+		{"compose", "-f", compose, "up", "-d", "--wait"},
+	} {
+		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+			t.Fatalf("reset NATS (docker %s): %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+}
+
+// requireAttemptCount polls up to timeout until the run carries exactly want task.attempt.0
+// triples — the per-task attempt counter each developer dispatch appends at spawn
+// (dispatch-developer 04 = #1; the retry routes 06c/07b = +1 each). Exactly want proves the
+// retry machinery dispatched the expected number of attempts. The objects are distinct loop
+// instances, so storage does not dedupe them. Callers set timeout to cover whatever dev-loop
+// work must complete first (a COLD in-container compile wants minutes, not seconds). An
+// over-count fails FAST (it can only mean an errant extra spawn — waiting cannot fix it).
+func requireAttemptCount(ctx context.Context, t *testing.T, runEntityID string, want int, timeout time.Duration) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	const pred = "task.attempt.0"
+	deadline := time.Now().Add(timeout)
+	for {
+		count := 0
+		if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
+			for _, tr := range e.Triples {
+				if tr.Predicate == pred {
+					count++
+				}
+			}
+		}
+		if count == want {
+			return
+		}
+		if count > want {
+			t.Fatalf("run %s has %d %s triples, want exactly %d — MORE than expected means the retry route "+
+				"misfired or an extra developer loop spawned (each dispatch appends one at spawn)", runEntityID, count, pred, want)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s has %d %s triples, want exactly %d within %s — dispatch-developer (04) appends #1 "+
+				"and each retry re-dispatch (06c) appends +1; too few means the retry route never fired (attempt "+
+				"1's red measure did not drive a re-dispatch)", runEntityID, count, pred, want, timeout)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// journeyFrontOfArcFixtures returns the mock turns every journey drives IDENTICALLY: the
+// shared front of the issue→PR arc — front-door intake (C1) → route to author (C2) → emit the
+// change (A1) → post-approval dev kickoff (C3). validate + projection + provision are
+// publish-triggered COMPONENTS (R6), so they consume ZERO model turns and need no fixtures.
+// The negative-path journeys (retry/rejection/exhaustion) reuse this prefix and append only
+// their divergent developer/review tail. (The bridge proof keeps its own annotated inline copy
+// as the reference walk-through.)
+func journeyFrontOfArcFixtures() []mockllm.Fixture {
+	return []mockllm.Fixture{
+		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
+			"action": journeyDecideAction, "reason": "new admitted issue " + journeyIssueRef + " needs a run"}}},
+		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
+			"action": "create_change", "reason": "author the change for " + journeyIssueRef}}},
+		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()}},
+		{Marker: journeyDevRewakeMarker, Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
+			"action": journeyDevAction, "reason": "the change is approved and the run resumed; develop the run's tasks"}}},
 	}
 }
 
@@ -1048,10 +1270,11 @@ func requireEventually(t *testing.T, timeout time.Duration, cond func() bool, ms
 }
 
 // journeyConfigPath writes a copy of the real bootstrap config to a temp file with
-// two edits: the mock model endpoint URL points at the in-process mock, and the
-// rule pack paths are rewritten to absolute (so the temp-dir config still resolves
-// the repo's rules). Returns the temp path. The version is left as-is; `task e2e`
-// resets NATS so the file loads fresh regardless of the KV version.
+// two edits: the mock model endpoint URL points at the in-process mock, and the rule
+// pack paths are rewritten to absolute (so the temp-dir config still resolves the
+// repo's rules). Returns the temp path. The version is left as-is; each journey resets
+// NATS before booting (startJourneyRuntime → resetNATS), so the file always loads fresh
+// regardless of the KV version — no per-boot version bump is needed.
 func journeyConfigPath(t *testing.T, mockURL string) string {
 	t.Helper()
 	root := repoRoot(t)
