@@ -70,11 +70,9 @@ const journeyChangeSlug = "journey-spine-change"
 // approves the change — the entry to the dev-loop rail.
 const journeyDevAction = "dev_from_task"
 
-// journeyProvisionMarker is a distinctive, unique substring of the provision
-// prompt (sandbox/01-provision.json) the mock's provision turn guards on. That
-// prompt is static (the tool reads the run from call.Metadata via run_scope=inherit,
-// not the prompt), so this phrase is the stable key for the positional cursor.
-const journeyProvisionMarker = "Provision the sandbox"
+// (provision is a publish-triggered COMPONENT now, R6 group 6 — the provision rule
+// (sandbox/01) publishes the provision-station rather than forcing a provision_sandbox
+// model turn, so there is no provision prompt for the mock to guard on.)
 
 // journeyDevRewakeMarker is a distinctive substring of the dev re-wake prompt
 // (dev-from-task/02-rewake-coordinator-dev.json) that the mock's dev-decide turn
@@ -123,7 +121,7 @@ var wantAgenticHealthy = []string{
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
 	// The R6 deterministic-station components must be healthy before the arc drives into
 	// them — a mis-wired station factory fails here, not at a late-station timeout.
-	"delivery-station", "projection-station", "validation-station", "floors-station", "verify-station",
+	"delivery-station", "projection-station", "validation-station", "floors-station", "verify-station", "provision-station",
 }
 
 // TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
@@ -141,27 +139,27 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	//   1. C1 front-door coordinator → decide(issue_intake)     [mints the run]
 	//   2. C2 re-woken coordinator   → decide(create_change)    [routes to author]
 	//   3. A1 authoring coordinator  → create_change(<change>)  [emits the change]
-	//      (validate + projection are COMPONENTS now — their rules publish, no model turns)
-	//   4. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
-	//   5. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
-	//   6. D-a developer (Amelia)    → apply_patch(fix diff)    [authors the fix, tool_choice=auto]
-	//   7. D-b developer (Amelia)    → measure_task(index 0)    [measures IN-LOOP, real go test]
-	//   8. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
+	//      (validate + projection + provision are COMPONENTS now — their rules publish, no turns)
+	//   4. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
+	//   5. D-a developer (Amelia)    → apply_patch(fix diff)    [authors the fix, tool_choice=auto]
+	//   6. D-b developer (Amelia)    → measure_task(index 0)    [measures IN-LOOP, real go test]
+	//   7. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
 	//      (floors is a COMPONENT now — the floors trigger publishes it on her terminal, no turn)
-	//   9. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
+	//   8. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
 	//      (verify is a COMPONENT now — the review-approved route publishes it, no model turn)
 	//      (delivery is a COMPONENT now — the delivery route publishes it, no model turn)
-	// Turns 6-8 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
+	// Turns 5-7 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
 	// under tool_choice=auto the loop continues; her apply_patch AND measure_task turns both
-	// guard on her own prompt (journeyDeveloperMarker), and turn 8 finds no matching fixture
+	// guard on her own prompt (journeyDeveloperMarker), and turn 7 finds no matching fixture
 	// at the cursor (the next is submit_review, keyed on "SEMDEV REVIEWER" which is not in
 	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
 	// her loop (StatusComplete → outcome=success). The stations + route rules then chain the
-	// rest with NO model turns of their own: her terminal → the floors STATION (06a advance)
+	// rest with NO model turns of their own: the provision STATION cold-proves off approval →
+	// sandbox.ready releases the dev re-wake; her terminal → the floors STATION (06a advance)
 	// spawns Quinn → review route (07a approved) PUBLISHES the verify-station component →
 	// delivery route (08a coherent) PUBLISHES the delivery-station component. The
-	// validate/projection/FLOORS/verify/delivery deterministic stations are all
-	// publish-triggered components (R6), so 8 tool fixtures drive 9 model turns (turn 8 consumes
+	// validate/projection/PROVISION/FLOORS/verify/delivery deterministic stations are all
+	// publish-triggered components (R6), so 7 tool fixtures drive 8 model turns (turn 7 consumes
 	// no fixture). An unscripted turn returns UnmatchedSentinel.
 	mock := mockllm.New(
 		mockllm.Fixture{
@@ -182,16 +180,13 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 			Marker: journeyIssueRef,
 			Tool:   &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()},
 		},
-		// Validation + projection are publish-triggered COMPONENTS now (R6, group 6): the
-		// validate rule (coordinator/03) and the projection rule (dev-from-task/03) each fire
-		// a plain `publish` to their station component, which validates / freezes task.spec
-		// with ZERO model turns — so there are no validate_change / project_tasks fixtures to
-		// script. The gate rule (openspec.validated) and the provision gate (task.spec) wait
-		// on the components' stamped facts, not on a model turn.
-		mockllm.Fixture{
-			Marker: journeyProvisionMarker,
-			Tool:   &mockllm.ToolCall{Name: "provision_sandbox", Args: map[string]any{}},
-		},
+		// Validation + projection + provision are publish-triggered COMPONENTS now (R6, group 6):
+		// the validate rule (coordinator/03), the projection rule (dev-from-task/03), and the
+		// provision rule (sandbox/01) each fire a plain `publish` to their station component,
+		// which validates / freezes task.spec / cold-proves the sandbox with ZERO model turns —
+		// so there are no validate_change / project_tasks / provision_sandbox fixtures to script.
+		// The gate rule (openspec.validated), the provision gate (task.spec), and the dev re-wake
+		// gate (sandbox.ready) all wait on the components' stamped facts, not on a model turn.
 		mockllm.Fixture{
 			Marker: journeyDevRewakeMarker,
 			Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
@@ -242,8 +237,9 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 		// repo's real fragment tree — otherwise the coordinator would route on the
 		// framework default persona instead of Sarah's decision contract.
 		PersonasDir: journeyPersonasDir(t),
-		// The run's target SOURCE at M0 is the committed Go fixture — provision_sandbox
-		// materializes the run's checkout from it and cold-proves the declared image.
+		// The run's target SOURCE at M0 is the committed Go fixture — the provision station
+		// materializes the run's checkout from it and cold-proves the declared image (the
+		// same value boot threads into RegisterAll so the provision-station factory captures it).
 		SandboxSourceDir: journeySandboxSourceDir(t),
 	})
 	if err != nil {
@@ -330,16 +326,18 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 
 	// Station 8 — the make-or-break: the run's sandbox is PROVISIONED AND PROVED COLD
 	// before development. sandbox/01-provision (gated on task.spec presence, so it
-	// runs AFTER projection) does the inherit publish — a forced provision_sandbox
-	// loop that materializes the run's checkout, builds the fixture's DECLARED golang
-	// image, and proves the Go module resolves + builds cold in a fresh container,
-	// then stamps sandbox.ready + the digest-pinned attestation. This runs the REAL
-	// cold proof (docker build + go build), the exact class both predecessors faked.
-	// Assert sandbox.ready == true AND the image attestation is present — proof the
-	// provision station ran the real proof on the committed artifact and the readiness
-	// gate can release. Red-first: disable sandbox/01 and this station times out.
+	// runs AFTER projection) PUBLISHES the provision-station COMPONENT (R6, no model
+	// turn), which materializes the run's checkout off boot's SHARED checkouts, builds
+	// the fixture's DECLARED golang image, proves the Go module resolves + builds cold
+	// in a fresh container, stands up the WARM dev container in boot's SHARED sandboxes
+	// (the one measure_task later Execs into), then stamps sandbox.ready + the
+	// digest-pinned attestation. This runs the REAL cold proof (docker build + go build),
+	// the exact class both predecessors faked — zero model turns. Assert sandbox.ready ==
+	// true AND the image attestation is present — proof the provision station ran the real
+	// proof on the committed artifact and the readiness gate can release. Red-first:
+	// disable sandbox/01 (or the provision-station component) and this station times out.
 	requireSandboxReady(ctx, t, runEntityID)
-	t.Logf("station 8: sandbox provisioned + proved cold — sandbox.ready stamped (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 8: provision-station provisioned + proved cold (no model turn) — sandbox.ready stamped (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 9 — with task.spec frozen AND the sandbox proven ready, the resumed run
 	// kicks off the dev loop. dev-from-task/02 (gated on task.spec.0.test_command ne ""
@@ -367,7 +365,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Station 11 — the make-or-break payoff: the fix is MEASURED cold, IN-LOOP, in-container.
 	// The reshape moved measure INTO Amelia's bounded loop: her SECOND turn calls
 	// measure_task (no StopLoop), which Execs the task's frozen test command (`go test ./...`)
-	// IN the run's WARM sandbox container — the one provision_sandbox stood up over the SAME
+	// IN the run's WARM sandbox container — the one the provision station stood up over the SAME
 	// checkout apply_patch wrote — and stamps the harness-derived measurement.result.0 as her
 	// in-loop feedback. Because the developer's diff actually fixed the boundary bug, the
 	// in-container `go test` PASSES: assert measurement.result.0.passed == "true" — proof the
@@ -436,15 +434,15 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	requirePRDelivered(ctx, t, runEntityID)
 	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly nine model turns drove the FULL arc. The route rules chain the stations with NO
-	// model turns of their own, and the deterministic stations validate / project / FLOORS /
-	// VERIFY / deliver are publish-triggered COMPONENTS (R6), not forced turns (the reshape also
-	// deleted the check_gate/check_coherence forced turns and the separate measure loop). Turns:
-	// C1, C2, A1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, R1 review = 9 (verify is now
-	// a component, dropping the old V turn). A spurious re-spawn (a route re-firing) or an
-	// unscripted turn would push this past 9.
-	if got := mock.RequestCount(); got != 9 {
-		t.Fatalf("expected exactly 9 model turns (…, Amelia's 3-turn loop, R1 review; validate/projection/floors/verify/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
+	// Exactly eight model turns drove the FULL arc. The route rules chain the stations with NO
+	// model turns of their own, and the deterministic stations validate / project / PROVISION /
+	// FLOORS / VERIFY / deliver are publish-triggered COMPONENTS (R6), not forced turns (the
+	// reshape also deleted the check_gate/check_coherence forced turns and the separate measure
+	// loop). Turns: C1, C2, A1, C3, Amelia-apply, Amelia-measure, Amelia-stop, R1 review = 8
+	// (provision is now a component, dropping the old PS turn). A spurious re-spawn (a route
+	// re-firing) or an unscripted turn would push this past 8.
+	if got := mock.RequestCount(); got != 8 {
+		t.Fatalf("expected exactly 8 model turns (…, Amelia's 3-turn loop, R1 review; validate/projection/provision/floors/verify/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
 	}
 }
 
@@ -610,7 +608,7 @@ func requireMeasurementPassed(ctx context.Context, t *testing.T, runEntityID str
 		return tripleString(e, passed) == "true"
 	}, "run entity "+runEntityID+" never gained "+passed+"=true — Amelia did not call measure_task in her loop, "+
 		"the warm sandbox was not provisioned/resolved, or the in-container `go test` did not run: check her dispatch allowlist "+
-		"includes measure_task (tool_choice=auto), that measure_task was scripted as her second turn, and that provision_sandbox left a warm "+
+		"includes measure_task (tool_choice=auto), that measure_task was scripted as her second turn, and that the provision station left a warm "+
 		"container Up over the run's checkout")
 }
 
@@ -848,10 +846,10 @@ func requireTaskSpecProjected(ctx context.Context, t *testing.T, runEntityID str
 }
 
 // requireSandboxReady polls the run entity until sandbox.ready == "true" and the
-// image attestation is present — the proof the provision station (sandbox/01)
-// spawned a provision_sandbox loop that BUILT the declared image and proved the
-// repo builds cold, stamping the harness-derived readiness/attestation. It also
-// gates the dev re-wake (dev-from-task/02 requires sandbox.ready eq true), so
+// image attestation is present — the proof the provision rule (sandbox/01) PUBLISHED
+// the provision-station COMPONENT (R6, no model turn), which BUILT the declared image
+// and proved the repo builds cold, stamping the harness-derived readiness/attestation.
+// It also gates the dev re-wake (dev-from-task/02 requires sandbox.ready eq true), so
 // asserting it here proves the provision-before-kickoff ordering. The timeout is
 // wide: this station runs the real docker build + cold go build. Fails naming the
 // likely cause — including a sandbox.blocked reason if provisioning parked instead.
@@ -866,17 +864,17 @@ func requireSandboxReady(ctx context.Context, t *testing.T, runEntityID string) 
 			return false
 		}
 		if blocked := tripleString(e, "sandbox.blocked"); blocked != "" {
-			t.Fatalf("provision_sandbox blocked the run instead of proving it ready: %s", blocked)
+			t.Fatalf("the provision station blocked the run instead of proving it ready: %s", blocked)
 		}
 		return tripleString(e, "sandbox.ready") == "true" && tripleString(e, "sandbox.attestation.image") != ""
 	}, "run entity "+runEntityID+" never gained sandbox.ready=true + attestation — the provision rule (sandbox/01) "+
-		"did not fire or provision_sandbox could not prove the fixture cold: check the sandbox.provisioned marker/guard, "+
-		"that provision_sandbox was advertised/scripted, that SandboxSourceDir points at the fixture, and that docker can "+
+		"did not publish or the provision-station component could not prove the fixture cold: check the sandbox.provisioned marker/guard, "+
+		"that the provision-station component is healthy, that SandboxSourceDir points at the fixture, and that docker can "+
 		"build the declared golang image")
 }
 
 // journeySandboxSourceDir is the committed Go fixture the run develops at M0 —
-// provision_sandbox materializes each run's checkout from it and cold-proves the
+// the provision station materializes each run's checkout from it and cold-proves the
 // declared image. Passed explicitly (like PersonasDir) because the journey's
 // patched config lives in a temp dir.
 func journeySandboxSourceDir(t *testing.T) string {

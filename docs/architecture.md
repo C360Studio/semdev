@@ -64,6 +64,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `validation-station` | component | openspec-io | `deterministic-station-component` |
 | `floors-station` | component | dev-from-task | `deterministic-station-component` |
 | `verify-station` | component | clean-room-verify | `deterministic-station-component` |
+| `provision-station` | component | sandbox | `deterministic-station-component` |
 | `create_change` | tool | openspec-io | `create-change-author-tool` |
 | `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
 | `write_change` | tool | openspec-io | `write-change-workspace-tool` |

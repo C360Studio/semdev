@@ -387,7 +387,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	sandboxes := runspace.NewSandboxes()
 
 	componentReg := component.NewRegistry()
-	if err := RegisterAll(componentReg, checkouts, sandboxes); err != nil {
+	if err := RegisterAll(componentReg, checkouts, sandboxes, opts.SandboxSourceDir); err != nil {
 		return nil, fmt.Errorf("register components: %w", err)
 	}
 

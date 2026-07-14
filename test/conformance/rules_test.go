@@ -401,13 +401,14 @@ func TestDevRewakeGatedOnProjection(t *testing.T) {
 	}
 }
 
-// The provision-and-prove-cold station (sandbox/01-provision) is the approval-
-// triggered spawn that stands up the sandbox and cold-proves it. Like every
-// publish_agent spawn rule it MUST be self-extinguishing (house restart-safety
-// pattern): a fired-once sandbox.provisioned marker stamped in on_enter, guarded by
-// length_eq 0 — else an asymmetric RULE_STATE loss re-spawns a duplicate provision
-// loop (publish_agent is not idempotent). It must force the provision_sandbox call,
-// fire on approval, and require the run anchor for run_scope=inherit.
+// The provision-and-prove-cold station (sandbox/01-provision) is the approval-triggered
+// publish that stands up the sandbox and cold-proves it — a publish-triggered COMPONENT now
+// (R6), not a forced provision_sandbox turn. Like every station-publish rule it MUST be
+// self-extinguishing (house restart-safety pattern): a fired-once sandbox.provisioned marker
+// stamped in on_enter BEFORE the publish, guarded by length_eq 0 — else an asymmetric
+// RULE_STATE loss re-publishes a duplicate provision dispatch (the core-NATS publish is not
+// deduped). It must publish the provision station, fire on approval, and require the run
+// anchor (the run IS the dispatch entity_id).
 func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
 	prov, ok := runLifecycleRules(t)["sandbox_provision"]
 	if !ok {
@@ -415,22 +416,27 @@ func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
 	}
 	const marker = "sandbox.provisioned"
 	if !prov.hasAbsenceGuard(marker) {
-		t.Errorf("provision spawn must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate provision loop (publish_agent is not idempotent)", marker)
+		t.Errorf("provision spawn must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-publishes a duplicate provision dispatch (the core-NATS publish is not deduped)", marker)
 	}
 	if !prov.hasTriple(marker) {
 		t.Errorf("provision spawn must add_triple %s in on_enter to extinguish its own trigger", marker)
 	}
-	if !prov.markerBeforePublish(marker) {
-		t.Errorf("provision spawn must stamp %s BEFORE its publish_agent (SB7) — else a publish failure leaves the run duplicable rather than stuck-toward-human", marker)
+	if !prov.markerBeforeStationPublish(marker) {
+		t.Errorf("provision spawn must stamp %s BEFORE its publish (SB7) — else a publish failure leaves the run duplicable rather than stuck-toward-human", marker)
 	}
-	if !prov.forcesFunction("provision_sandbox") {
-		t.Error("provision spawn must force the provision_sandbox call (tool_choice mode=function, function_name=provision_sandbox)")
+	// R6: publishes the provision station (fires on the RUN, so the run is the dispatch
+	// entity_id — no property). It must NOT force the provision_sandbox tool.
+	if !prov.publishesTo("component.provision-station.dispatch") {
+		t.Error("provision spawn must publish the provision station (component.provision-station.dispatch, R6)")
+	}
+	if prov.forcesFunction("provision_sandbox") {
+		t.Error("provision spawn must NOT force the provision_sandbox tool — provisioning is a publish-triggered component now (R6)")
 	}
 	if c, ok := prov.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Error("provision spawn must fire on run.change_approved == true (provision the approved run's sandbox)")
 	}
 	if c, ok := prov.condition("agent.run"); !ok || c.Operator != "ne" {
-		t.Error("provision spawn must require the agent.run anchor (ne \"\") so run_scope=inherit binds the loop to this run")
+		t.Error("provision spawn must require the agent.run anchor (ne \"\") — it identifies the run entity the dispatch fires on")
 	}
 }
 
@@ -439,7 +445,7 @@ func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
 // projected run whose sandbox was not cold-proved (sandbox.ready never stamped)
 // cannot re-wake into dev_from_task — it parks instead (sandbox/02-park-unprovable).
 // Red-first: drop the gate and this fails. The gate is honest only if a producer
-// actually stamps sandbox.ready, so assert the provision station forces the tool.
+// actually stamps sandbox.ready, so assert the provision rule publishes the provision station.
 func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
 	rewake, ok := runLifecycleRules(t)["dev_from_task_rewake_coordinator"]
 	if !ok {
@@ -453,8 +459,8 @@ func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
 		t.Errorf("dev re-wake readiness gate must be sandbox.ready eq \"true\", got operator=%q value=%v", c.Operator, c.Value)
 	}
 	prov, ok := runLifecycleRules(t)["sandbox_provision"]
-	if !ok || !prov.forcesFunction("provision_sandbox") {
-		t.Error("the readiness gate has no producer: sandbox_provision must exist and force provision_sandbox, or sandbox.ready never becomes present and the dev loop deadlocks")
+	if !ok || !prov.publishesTo("component.provision-station.dispatch") {
+		t.Error("the readiness gate has no producer: sandbox_provision must exist and publish the provision station (R6), or sandbox.ready never becomes present and the dev loop deadlocks")
 	}
 }
 

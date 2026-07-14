@@ -1,6 +1,6 @@
 {
   "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect.",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -199,7 +199,6 @@
           "render_openspec",
           "write_change",
           "github_list_comments",
-          "provision_sandbox",
           "read_workspace",
           "read_diff",
           "apply_patch",
@@ -500,6 +499,24 @@
               "subject": "component.verify-station.>",
               "required": true,
               "description": "The review-approved route's publish target (dev-from-task/07a). Fires on Quinn's review loop Q_n, so run_entity_id travels as a property. The station cold-proves the committed artifact and stamps verify.result on the run."
+            }
+          ]
+        }
+      }
+    },
+    "provision-station": {
+      "type": "processor",
+      "name": "provision-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.provision-station.>",
+              "required": true,
+              "description": "The provision rule's publish target (sandbox/01). Fires on the RUN (after approval + projection), so the run is the payload entity_id and there is no property. The station materializes the checkout, cold-proves the declared image, stands up the warm container, and stamps sandbox.ready/blocked on the run."
             }
           ]
         }

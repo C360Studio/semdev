@@ -24,6 +24,7 @@ import (
 	"github.com/c360studio/semdev/internal/station/delivery"
 	"github.com/c360studio/semdev/internal/station/floors"
 	"github.com/c360studio/semdev/internal/station/projection"
+	"github.com/c360studio/semdev/internal/station/provision"
 	"github.com/c360studio/semdev/internal/station/validation"
 	stationverify "github.com/c360studio/semdev/internal/station/verify"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
@@ -57,15 +58,19 @@ import (
 // checkouts and sandboxes are boot's SHARED, run-scoped, PROCESS-LOCAL runspace
 // instances (the same ones RegisterTools wires into the dev-loop tools). The R6
 // deterministic-station components that read the run's checkout or warm container
-// (floors and verify, and later provision) MUST capture the SAME instance the tools use —
-// a component that built its own would get a different empty map and never find the
-// run's checkout. Self-sufficient stations (delivery/projection/validation) ignore
-// them (their deps build from the NATS client at construction). Both are nil on the
+// (floors, verify, provision) MUST capture the SAME instance the tools use — a
+// component that built its own would get a different empty map and never find the
+// run's checkout / warm container. Self-sufficient stations (delivery/projection/
+// validation) ignore them (their deps build from the NATS client at construction).
+// sandboxSourceDir is the operator-configured run SOURCE the provision station
+// materializes each checkout from (RunOptions.SandboxSourceDir — the same value
+// RegisterTools threads into provision_sandbox); an empty dir makes provisioning fail
+// closed → block → park, never a guessed target (SB5). All are zero-valued on the
 // schema-scanning census path: the checkout/sandbox factories still register (so the
 // G1 census sees them) but fail loud if ever CONSTRUCTED without the seam — which the
 // census never does (it only inspects the registry). The live boot passes the shared
-// instances, created before this call.
-func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
+// instances + source dir, created before this call.
+func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sandboxSourceDir string) error {
 	if err := componentregistry.Register(reg); err != nil {
 		return fmt.Errorf("register framework components: %w", err)
 	}
@@ -86,6 +91,11 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	}
 	if err := stationverify.Register(reg, checkouts); err != nil {
 		return fmt.Errorf("register verify station: %w", err)
+	}
+	// provision captures BOTH shared instances (it materializes the checkout AND stands up
+	// the warm container measure_task reads) plus the operator's run source dir.
+	if err := provision.Register(reg, checkouts, sandboxes, sandboxSourceDir); err != nil {
+		return fmt.Errorf("register provision station: %w", err)
 	}
 	return nil
 }

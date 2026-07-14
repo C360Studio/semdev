@@ -113,6 +113,7 @@ var wantHealthyComponents = []string{
 	"validation-station",
 	"floors-station",
 	"verify-station",
+	"provision-station",
 }
 
 // TestRuntimeStartsCleanlyAgainstLiveNATS is the NATS-gated boot smoke test (run
