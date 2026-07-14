@@ -670,7 +670,7 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 
 // The REVIEW ROUTE (dev-from-task/07a-d, the reshape group 5): fires on Quinn's review loop
 // reading the route.verdict mirror.
-//   - 07a approved → spawn verify_artifact.
+//   - 07a approved → publish the verify station (R6 component, no model turn).
 //   - 07b changes_requested + budget → re-dispatch Amelia (D16 re-entry).
 //   - 07c changes_requested + exhausted → park.
 //   - 07d no-verdict (terminated, route.verdict absent) → park (fail-closed totality catch).
@@ -685,8 +685,14 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := app.condition("route.verdict"); !ok || c.Operator != "eq" || c.Value != "approved" || c.Required {
 		t.Errorf("review-approved must require route.verdict eq \"approved\" (required:false), got %+v", c)
 	}
-	if !app.forcesFunction("verify_artifact") || !app.hasAbsenceGuard(marker) || !app.markerBeforePublish(marker) {
-		t.Error("review-approved must force verify_artifact and be self-extinguishing (route.routed before the publish)")
+	// R6: publishes the verify STATION carrying run_entity_id (Q_n is the firing entity, so
+	// the run travels as a property) and is self-extinguishing (route.routed before the
+	// publish). It must NOT force the verify_artifact tool.
+	if !app.publishesToWithProps("component.verify-station.dispatch", "run_entity_id") || !app.hasAbsenceGuard(marker) || !app.markerBeforeStationPublish(marker) {
+		t.Error("review-approved must publish the verify station (component.verify-station.dispatch, R6) carrying run_entity_id and be self-extinguishing (route.routed before the publish)")
+	}
+	if app.forcesFunction("verify_artifact") {
+		t.Error("review-approved must NOT force the verify_artifact tool — verify is a publish-triggered component now (R6)")
 	}
 
 	ret, ok := rules["dev_from_task_review_retry"]

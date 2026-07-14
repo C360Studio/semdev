@@ -59,8 +59,10 @@ Template:
   the `openspec` CLI via a plain os/exec runner). `floors-station` (`component`)
   additionally captures boot's SHARED `runspace.Checkouts` (the same process-local map
   the dev-loop tools use — it reads the developer's authored attempt off the run's
-  checkout) via the `RegisterAll(reg, checkouts, sandboxes)` DI seam. `verify-station` /
-  `provision-station` join the seam as they land (6C/6D).
+  checkout) via the `RegisterAll(reg, checkouts, sandboxes)` DI seam. `verify-station`
+  (`component`) joins the same seam: it clones the run's COMMITTED artifact off that shared
+  checkout (`CloneForVerify`) and cold-proves it, stamping `verify.result` on the run.
+  `provision-station` joins the seam as it lands (6D).
 - **Change:** simplify-m0-execution-rail
 
 ## create-change-author-tool

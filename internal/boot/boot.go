@@ -25,6 +25,7 @@ import (
 	"github.com/c360studio/semdev/internal/station/floors"
 	"github.com/c360studio/semdev/internal/station/projection"
 	"github.com/c360studio/semdev/internal/station/validation"
+	stationverify "github.com/c360studio/semdev/internal/station/verify"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -56,7 +57,7 @@ import (
 // checkouts and sandboxes are boot's SHARED, run-scoped, PROCESS-LOCAL runspace
 // instances (the same ones RegisterTools wires into the dev-loop tools). The R6
 // deterministic-station components that read the run's checkout or warm container
-// (floors, and later verify/provision) MUST capture the SAME instance the tools use —
+// (floors and verify, and later provision) MUST capture the SAME instance the tools use —
 // a component that built its own would get a different empty map and never find the
 // run's checkout. Self-sufficient stations (delivery/projection/validation) ignore
 // them (their deps build from the NATS client at construction). Both are nil on the
@@ -82,6 +83,9 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	// Checkout/sandbox-dependent R6 stations — capture boot's shared runspace instances.
 	if err := floors.Register(reg, checkouts); err != nil {
 		return fmt.Errorf("register floors station: %w", err)
+	}
+	if err := stationverify.Register(reg, checkouts); err != nil {
+		return fmt.Errorf("register verify station: %w", err)
 	}
 	return nil
 }

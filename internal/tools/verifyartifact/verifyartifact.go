@@ -123,11 +123,75 @@ func New(clones VerifyClones, manifests Manifests, prover Prover, store secrets.
 	return &Executor{clones: clones, manifests: manifests, prover: prover, store: store, writer: writer, logger: logger}
 }
 
-// Execute clones the run's committed artifact into a fresh dir, builds the declared image
-// and proves it resolves its deps and passes its own tests cold (the test step compiles
-// the artifact) in a fresh throwaway container, judges the
-// evidence with verify.Decide (inside ProveArtifact), and stamps verify.result. It stamps
-// no outcome from the caller (G3) and fires no transition (G2).
+// VerifyResult is the shared verify core's outcome: the definitive cold clean-room
+// verdict plus the resolved manifest profile (for the caller's summary/logging).
+type VerifyResult struct {
+	Verdict verify.Verdict
+	Profile string
+}
+
+// RunVerify clones the run's COMMITTED artifact into a fresh dir, resolves its
+// reproducibility manifest FROM THE CLONE, proves it resolves+builds+tests COLD in a
+// fresh throwaway container with a fresh dependency cache, and stamps the definitive
+// verify.result (pass/fail/retry) on the run. It is the shared core of the verify_artifact
+// tool AND the verify station (design simplify-m0-execution-rail R6) — one writer of
+// verify.result (verify-harness, G5), so the two callers cannot drift.
+//
+// It returns a pre-proof infra error (clone/resolve/prove-could-not-run) that stamps
+// NOTHING — never a false green — for the caller to surface as retryable; or a stamped
+// VerifyResult carrying the definitive verdict. A retry Verdict is stamped (evidence) but
+// signals a TRANSIENT infra fault (a container that would not provision, a resolve read as
+// network-class), never a terminal reject of a good artifact (SB5). Fires no lifecycle
+// transition (G2); takes no caller-supplied outcome (G3).
+//
+// CONTRACT: clones/manifests/prover/writer must be non-nil — both callers guarantee it
+// (the tool Execute nil-checks first; the station factory constructs them and fails loud on
+// a nil seam). A nil logger is defended (defaults to slog.Default()).
+func RunVerify(ctx context.Context, clones VerifyClones, manifests Manifests, prover Prover, store secrets.Store, writer agentictools.OwnedFactWriter, logger *slog.Logger, runEntityID string) (VerifyResult, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// Clone the committed artifact into a fresh dir (non-destructive of the warm checkout)
+	// — the "--recursive clone" at M0. Fails closed if no checkout was materialized (the
+	// run parks, never a verify over a guessed path, SB5).
+	cloneRoot, err := clones.CloneForVerify(ctx, runEntityID)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("verify_artifact: clone artifact for cold verify: %w", err)
+	}
+	// Resolve the manifest from the CLONE, so the COMMITTED Dockerfile/deps are what's
+	// proven — not the warm checkout's environment.
+	manifest, err := manifests.Resolve(ctx, cloneRoot)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("verify_artifact: resolve reproducibility manifest: %w", err)
+	}
+	// Prove cold: build the image from the clone, run resolve+test in a fresh throwaway
+	// container with a fresh dep cache. A returned ERROR is a pre-proof infra/declaration
+	// fault (docker flake, unbuildable image) the caller surfaces as retryable — no verdict
+	// is stamped, so the proof re-runs (a persistent fault stalls toward the human, never a
+	// false green). A returned Verdict is a definitive result (pass/fail/retry) stamped here.
+	verdict, err := prover.ProveArtifact(ctx, dockerBin, cloneRoot, manifest, store)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("verify_artifact: cold clean-room proof could not run: %w", err)
+	}
+	if err := stampResult(ctx, writer, runEntityID, verdict.Outcome); err != nil {
+		return VerifyResult{}, fmt.Errorf("verify_artifact: stamp %s on %s: %w", ResultPredicate, runEntityID, err)
+	}
+	logger.Info("verify_artifact recorded clean-room verdict",
+		slog.String("run_entity_id", runEntityID),
+		slog.String("outcome", string(verdict.Outcome)),
+		slog.String("profile", manifest.Profile))
+	return VerifyResult{Verdict: verdict, Profile: manifest.Profile}, nil
+}
+
+// Execute is the (transitional) verify_artifact tool body: it reads the run entity from the
+// tool-call metadata, runs the shared RunVerify core, and shapes the forced-loop control
+// (StopLoop) around the verdict. It stamps no outcome from the caller (G3) and fires no
+// transition (G2).
+//
+// This is a DEAD path post-reshape — the verify STATION (internal/station/verify) replaced
+// the forced verify coordinator turn (R6), so no rule spawns this tool in production — but
+// it is kept correct (and its tests green) until the executor is deleted in the group-6
+// tool-cleanup slice (6E).
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
 	if e.clones == nil || e.manifests == nil || e.prover == nil || e.writer == nil {
 		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: harness not fully wired (clones/manifests/prover/writer)")
@@ -137,73 +201,43 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
 	}
 
-	// Clone the committed artifact into a fresh dir (non-destructive of the warm checkout)
-	// — the "--recursive clone" at M0. Fails closed if no checkout was materialized (the
-	// run parks, never a verify over a guessed path, SB5).
-	cloneRoot, err := e.clones.CloneForVerify(ctx, runEntityID)
+	res, err := RunVerify(ctx, e.clones, e.manifests, e.prover, e.store, e.writer, e.logger, runEntityID)
 	if err != nil {
-		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: clone artifact for cold verify: %v", err)
+		// A pre-proof infra fault (clone/resolve/prove-could-not-run) stamped no verdict —
+		// surface it as a retryable tool error (the forced verify loop re-runs; never a false
+		// green). The graph-vs-transport classification collapses to ReadErrorKind (the sibling
+		// tools' idiom); the specific kind no longer matters on this dead path.
+		return errResult(call, changefacts.ReadErrorKind(err), "%v", err)
 	}
-	// Resolve the manifest from the CLONE, so the COMMITTED Dockerfile/deps are what's
-	// proven — not the warm checkout's environment.
-	manifest, err := e.manifests.Resolve(ctx, cloneRoot)
-	if err != nil {
-		return errResult(call, agentic.ToolErrorInternal, "verify_artifact: resolve reproducibility manifest: %v", err)
-	}
-
-	// Prove cold: build the image from the clone, run resolve+test in a fresh throwaway
-	// container with a fresh dep cache. A returned ERROR is a pre-proof infra/declaration
-	// fault (docker flake, unbuildable image) the tool surfaces as retryable — no verdict
-	// is stamped, so the forced verify loop re-runs (a persistent fault stalls toward the
-	// human, never a false green). A returned Verdict is a definitive result (pass/fail/
-	// retry) the tool stamps.
-	verdict, err := e.prover.ProveArtifact(ctx, dockerBin, cloneRoot, manifest, e.store)
-	if err != nil {
-		return errResult(call, agentic.ToolErrorNetwork, "verify_artifact: cold clean-room proof could not run: %v", err)
-	}
-
-	if err := e.stampResult(ctx, runEntityID, verdict.Outcome); err != nil {
-		return errResult(call, writeErrKind(err), "verify_artifact: stamp %s on %s: %v", ResultPredicate, runEntityID, err)
-	}
-
-	e.logger.Info("verify_artifact recorded clean-room verdict",
-		slog.String("run_entity_id", runEntityID),
-		slog.String("outcome", string(verdict.Outcome)),
-		slog.String("profile", manifest.Profile))
 
 	summary, _ := json.Marshal(map[string]any{
-		"outcome":       verdict.Outcome,
-		"profile":       manifest.Profile,
-		"checks":        verdict.Checks,
-		"failed_checks": verdict.FailedChecks(),
+		"outcome":       res.Verdict.Outcome,
+		"profile":       res.Profile,
+		"checks":        res.Verdict.Checks,
+		"failed_checks": res.Verdict.FailedChecks(),
 	})
 
-	// A RETRY verdict is a TRANSIENT infra fault (a container that would not provision, a
-	// resolve read as network-class), NOT a verdict about the artifact — the whole point of
-	// the Retry classification is to NEVER terminally reject a good artifact on a flake (SB5,
-	// verify.go). So it RE-RUNS the cold proof rather than terminating: it does NOT StopLoop,
-	// so the forced verify loop re-runs verify_artifact. The verify.result=retry stamp stays
-	// as evidence (a later pass/fail upserts it). Because the rule-native delivery route
-	// (dev-from-task/08a/08b) keys on verify.result eq \"pass\" / eq \"fail\", a \"retry\"
-	// value matches NEITHER route — so a single docker flake never triggers delivery nor
-	// parks a good run (the reshape replaced the dev.verified chaining marker with this direct
-	// run-fact route). A persistent transport fault trips MaxIterations and stalls toward the
-	// human — fail-closed, never a false green.
-	if verdict.Outcome == verify.OutcomeRetry {
+	// A RETRY verdict is a TRANSIENT infra fault, NOT a verdict about the artifact — the whole
+	// point of the Retry classification is to NEVER terminally reject a good artifact on a
+	// flake (SB5). So it RE-RUNS the cold proof rather than terminating: it does NOT StopLoop,
+	// so the forced verify loop re-runs verify_artifact. The verify.result=retry stamp stays as
+	// evidence (a later pass/fail upserts it). The rule-native delivery route keys on
+	// verify.result eq "pass"/"fail", so a "retry" value matches NEITHER route — a single
+	// docker flake never triggers delivery nor parks a good run.
+	if res.Verdict.Outcome == verify.OutcomeRetry {
 		return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary)}, nil
 	}
 
-	// A TERMINAL verdict (pass or fail) ends the turn (StopLoop) — the verify.result the tool
-	// already stamped on the RUN is what the delivery route reads (08a coherent on pass, 08b
-	// blocked on fail). A fail verdict is DATA, not a tool error; it ends the turn as a
-	// success too. No loop chaining marker (the delivery route fires on the run's verify.result
-	// directly, not a loop marker — the reshape's rule-native routing, R1).
+	// A TERMINAL verdict (pass or fail) ends the turn (StopLoop) — the verify.result the core
+	// stamped on the RUN is what the delivery route reads (08a coherent on pass, 08b blocked on
+	// fail). A fail verdict is DATA, not a tool error; it ends the turn as a success too.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
 // stampResult upserts verify.result on the run entity (replace-by-predicate, so a
-// retry re-run replaces the prior outcome rather than appending a second one).
-func (e *Executor) stampResult(ctx context.Context, runEntityID string, outcome verify.Outcome) error {
+// retry re-run replaces the prior outcome rather than appending a second one). A free
+// function so the tool and the verify station share one writer of verify.result (G5).
+func stampResult(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string, outcome verify.Outcome) error {
 	triple := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  ResultPredicate,
@@ -212,13 +246,7 @@ func (e *Executor) stampResult(ctx context.Context, runEntityID string, outcome 
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	return e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
-}
-
-// writeErrKind mirrors the sibling tools: a handler-classified graph error is
-// internal/ordering, not retryable transport.
-func writeErrKind(err error) agentic.ToolErrorKind {
-	return changefacts.ReadErrorKind(err)
+	return writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
 }
 
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {

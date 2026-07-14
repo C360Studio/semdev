@@ -90,9 +90,9 @@ const journeyDeveloperMarker = "SEMDEV DEVELOPER"
 // (dev-from-task/06a-route-advance.json) the mock's submit_review turn guards on.
 const journeyReviewMarker = "SEMDEV REVIEWER"
 
-// journeyVerifyMarker is a distinctive substring of the verify prompt
-// (dev-from-task/07a-review-approved.json) the mock's verify_artifact turn guards on.
-const journeyVerifyMarker = "clean-room COLD verify"
+// (verify is a publish-triggered COMPONENT now, R6 group 6 — the review-approved route
+// publishes the verify-station rather than forcing a verify_artifact model turn, so there
+// is no verify prompt for the mock to guard on.)
 
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
@@ -123,7 +123,7 @@ var wantAgenticHealthy = []string{
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
 	// The R6 deterministic-station components must be healthy before the arc drives into
 	// them — a mis-wired station factory fails here, not at a late-station timeout.
-	"delivery-station", "projection-station", "validation-station", "floors-station",
+	"delivery-station", "projection-station", "validation-station", "floors-station", "verify-station",
 }
 
 // TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
@@ -149,7 +149,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	//   8. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
 	//      (floors is a COMPONENT now — the floors trigger publishes it on her terminal, no turn)
 	//   9. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
-	//  10. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
+	//      (verify is a COMPONENT now — the review-approved route publishes it, no model turn)
 	//      (delivery is a COMPONENT now — the delivery route publishes it, no model turn)
 	// Turns 6-8 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
 	// under tool_choice=auto the loop continues; her apply_patch AND measure_task turns both
@@ -158,10 +158,11 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
 	// her loop (StatusComplete → outcome=success). The stations + route rules then chain the
 	// rest with NO model turns of their own: her terminal → the floors STATION (06a advance)
-	// spawns Quinn → review route (07a approved) spawns verify → delivery route (08a coherent)
-	// PUBLISHES the delivery-station component. The validate/projection/FLOORS/delivery
-	// deterministic stations are all publish-triggered components (R6), so 9 tool fixtures drive
-	// 10 model turns (turn 8 consumes no fixture). An unscripted turn returns UnmatchedSentinel.
+	// spawns Quinn → review route (07a approved) PUBLISHES the verify-station component →
+	// delivery route (08a coherent) PUBLISHES the delivery-station component. The
+	// validate/projection/FLOORS/verify/delivery deterministic stations are all
+	// publish-triggered components (R6), so 8 tool fixtures drive 9 model turns (turn 8 consumes
+	// no fixture). An unscripted turn returns UnmatchedSentinel.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -215,11 +216,11 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 			Marker: journeyReviewMarker,
 			Tool:   &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}},
 		},
-		mockllm.Fixture{
-			Marker: journeyVerifyMarker,
-			Tool:   &mockllm.ToolCall{Name: "verify_artifact", Args: map[string]any{}},
-		},
-		// Delivery is a publish-triggered COMPONENT now (R6, group 6): the delivery route
+		// Verify is a publish-triggered COMPONENT now (R6, group 6): the review-approved route
+		// (dev-from-task/07a) fires a plain `publish` to the verify-station component, which
+		// cold-proves the committed artifact and stamps verify.result with ZERO model turns — so
+		// there is no verify_artifact fixture to script.
+		// Delivery is likewise a publish-triggered COMPONENT (R6): the delivery route
 		// (dev-from-task/08a) fires a plain `publish` to the delivery-station component, which
 		// records pr.ref with ZERO model turns — so there is no open_pr fixture to script.
 	)
@@ -410,15 +411,17 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 
 	// Station 14 — the CLEAN-ROOM COLD VERIFY of the committed artifact (the make-or-break).
 	// The review ROUTE (dev-from-task/07a) fires on Quinn's loop reading the route.verdict
-	// mirror: because route.verdict=approved, it spawns a forced verify_artifact loop
-	// (run_scope=inherit — proving a role=reviewer inherit loop propagated the run anchor).
-	// verify_artifact CLONES the run's checkout into a fresh dir, builds the operator-declared
-	// image, and proves the artifact resolves + passes its own tests COLD in a SEPARATE fresh
-	// container with a fresh dependency cache. Because the fix is real and self-contained, the
-	// cold verify PASSES: assert verify.result == "pass". This runs the REAL docker cold proof.
-	// Red-first: a non-self-contained fix (or a warm-cache-masked fabrication) comes back "fail".
+	// mirror: because route.verdict=approved, it PUBLISHES the verify-station COMPONENT (R6, no
+	// model turn), threading run_entity_id as a property (Q_n is the firing entity, so the run
+	// travels as a property). The verify station CLONES the run's checkout into a fresh dir off
+	// boot's SHARED checkouts (CloneForVerify), builds the operator-declared image, and proves
+	// the artifact resolves + passes its own tests COLD in a SEPARATE fresh container with a
+	// fresh dependency cache. Because the fix is real and self-contained, the cold verify
+	// PASSES: assert verify.result == "pass". This runs the REAL docker cold proof — zero model
+	// turns. Red-first: a non-self-contained fix (or a warm-cache-masked fabrication) comes back
+	// "fail"; disable the verify-station component and verify.result never lands.
 	requireVerifyPassed(ctx, t, runEntityID)
-	t.Logf("station 14: clean-room COLD verify of the committed artifact — verify.result=pass (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 14: verify-station cold-proved the committed artifact (no model turn) — verify.result=pass (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 15 — the ISSUE→PR ARC CONNECTS end-to-end. The DELIVERY ROUTE (dev-from-task/08a)
 	// fires ON THE RUN (delivery is terminal, so it routes on run facts directly — no loop, no
@@ -433,14 +436,15 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	requirePRDelivered(ctx, t, runEntityID)
 	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly ten model turns drove the FULL arc. The route rules chain the stations with NO
+	// Exactly nine model turns drove the FULL arc. The route rules chain the stations with NO
 	// model turns of their own, and the deterministic stations validate / project / FLOORS /
-	// deliver are publish-triggered COMPONENTS (R6), not forced turns (the reshape also deleted
-	// the check_gate/check_coherence forced turns and the separate measure loop). Turns: C1, C2,
-	// A1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, R1 review, V verify = 10. A spurious
-	// re-spawn (a route re-firing) or an unscripted turn would push this past 10.
-	if got := mock.RequestCount(); got != 10 {
-		t.Fatalf("expected exactly 10 model turns (…, Amelia's 3-turn loop, R1 review, V verify; validate/projection/floors/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
+	// VERIFY / deliver are publish-triggered COMPONENTS (R6), not forced turns (the reshape also
+	// deleted the check_gate/check_coherence forced turns and the separate measure loop). Turns:
+	// C1, C2, A1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, R1 review = 9 (verify is now
+	// a component, dropping the old V turn). A spurious re-spawn (a route re-firing) or an
+	// unscripted turn would push this past 9.
+	if got := mock.RequestCount(); got != 9 {
+		t.Fatalf("expected exactly 9 model turns (…, Amelia's 3-turn loop, R1 review; validate/projection/floors/verify/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
 	}
 }
 
@@ -666,13 +670,13 @@ func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string
 }
 
 // requireVerifyPassed polls the run entity until verify.result == "pass" — the proof the
-// review approved route (dev-from-task/07a) fired on Quinn's loop, the forced verify_artifact
-// loop cloned the committed artifact and proved it resolves + passes its own tests COLD in
-// a fresh throwaway container, and the artifact is self-contained + reproducible. A stamped
-// "fail" is a hard failure (the fix is not self-contained, a fabrication survived to verify,
-// or a forbidden build-file pattern), surfaced immediately rather than by timeout. The
-// clean-room cold proof runs REAL docker on the committed fixture, so this allows a wide
-// window.
+// review approved route (dev-from-task/07a) fired on Quinn's loop and PUBLISHED the
+// verify-station COMPONENT (R6, no model turn), which cloned the committed artifact and
+// proved it resolves + passes its own tests COLD in a fresh throwaway container, and the
+// artifact is self-contained + reproducible. A stamped "fail" is a hard failure (the fix is
+// not self-contained, a fabrication survived to verify, or a forbidden build-file pattern),
+// surfaced immediately rather than by timeout. The clean-room cold proof runs REAL docker on
+// the committed fixture, so this allows a wide window.
 func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
@@ -685,12 +689,12 @@ func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) 
 			return false
 		}
 		if got := tripleString(e, result); got == "fail" {
-			t.Fatalf("verify_artifact stamped %s=fail — the committed artifact did NOT prove cold: the fix is not self-contained, a warm-cache-masked fabrication survived to the cold verify, or a build file carries a forbidden runtime download; check the clone carries the patched bytes and the fixture's build files are clean", result)
+			t.Fatalf("verify-station stamped %s=fail — the committed artifact did NOT prove cold: the fix is not self-contained, a warm-cache-masked fabrication survived to the cold verify, or a build file carries a forbidden runtime download; check the clone carries the patched bytes and the fixture's build files are clean", result)
 		}
 		return tripleString(e, result) == "pass"
 	}, "run entity "+runEntityID+" never gained "+result+"=pass — the review approved route (dev-from-task/07a) did not fire "+
-		"(a role=reviewer inherit loop may not have propagated the run anchor), or the cold clean-room proof did not run: "+
-		"check submit_review mirrored route.verdict=approved onto its loop, the approved route spawns verify on that mirror, verify_artifact is advertised/scripted, "+
+		"(agent.run.entity_id may not have propagated onto Quinn's review loop to thread the run_entity_id property), or the cold clean-room proof did not run: "+
+		"check submit_review mirrored route.verdict=approved onto its loop, the approved route publishes component.verify-station.dispatch, the verify-station component is healthy, "+
 		"and docker is available (the journey builds the fixture image and runs go test in a fresh container)")
 }
 
