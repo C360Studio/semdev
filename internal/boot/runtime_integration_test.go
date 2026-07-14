@@ -109,6 +109,8 @@ var wantHealthyComponents = []string{
 	"agentic-loop",
 	"agentic-dispatch",
 	"delivery-station",
+	"projection-station",
+	"validation-station",
 }
 
 // TestRuntimeStartsCleanlyAgainstLiveNATS is the NATS-gated boot smoke test (run

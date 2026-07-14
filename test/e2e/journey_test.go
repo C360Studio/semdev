@@ -129,7 +129,7 @@ var wantAgenticHealthy = []string{
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
 	// The R6 deterministic-station components must be healthy before the arc drives into
 	// them — a mis-wired station factory fails here, not at a late-station timeout.
-	"delivery-station",
+	"delivery-station", "projection-station", "validation-station",
 }
 
 // TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
@@ -147,28 +147,27 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	//   1. C1 front-door coordinator → decide(issue_intake)     [mints the run]
 	//   2. C2 re-woken coordinator   → decide(create_change)    [routes to author]
 	//   3. A1 authoring coordinator  → create_change(<change>)  [emits the change]
-	//   4. V1 validate coordinator   → validate_change(<slug>)  [validates → gate]
-	//   5. P1 projection coordinator  → project_tasks(<slug>)   [approval → task.spec]
-	//   6. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
-	//   7. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
-	//   8. D-a developer (Amelia)    → apply_patch(fix diff)    [authors the fix, tool_choice=auto]
-	//   9. D-b developer (Amelia)    → measure_task(index 0)    [measures IN-LOOP, real go test]
-	//  10. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
-	//  11. F1 floors coordinator     → check_floors(index 0)    [floors + route mirror on its loop]
-	//  12. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
-	//  13. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
+	//      (validate + projection are COMPONENTS now — their rules publish, no model turns)
+	//   4. PS provision coordinator  → provision_sandbox()      [cold-prove → sandbox.ready]
+	//   5. C3 dev re-woken coord.    → decide(dev_from_task)    [post-approval kickoff]
+	//   6. D-a developer (Amelia)    → apply_patch(fix diff)    [authors the fix, tool_choice=auto]
+	//   7. D-b developer (Amelia)    → measure_task(index 0)    [measures IN-LOOP, real go test]
+	//   8. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
+	//   9. F1 floors coordinator     → check_floors(index 0)    [floors + route mirror on its loop]
+	//  10. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
+	//  11. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
 	//      (delivery is a COMPONENT now — the delivery route publishes it, no model turn)
-	// Turns 8-10 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
+	// Turns 6-8 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
 	// under tool_choice=auto the loop continues; her apply_patch AND measure_task turns both
-	// guard on her own prompt (journeyDeveloperMarker), and turn 10 finds no matching fixture
+	// guard on her own prompt (journeyDeveloperMarker), and turn 8 finds no matching fixture
 	// at the cursor (the next is check_floors, keyed on "structural floors" which is not in
 	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
 	// her loop (StatusComplete → outcome=success). The route rules then chain the rest with NO
 	// model turns of their own: floors terminal → floors route (06a advance) spawns Quinn →
 	// review route (07a approved) spawns verify → delivery route (08a coherent) PUBLISHES the
-	// delivery-station component (R6 — a component, not a paid open_pr turn). 12 tool fixtures
-	// drive 13 model turns (turn 10 consumes no fixture). An unscripted turn returns
-	// mockllm.UnmatchedSentinel, failing loudly not green.
+	// delivery-station component. The validate/projection/delivery deterministic stations are
+	// all publish-triggered components (R6), so 10 tool fixtures drive 11 model turns (turn 8
+	// consumes no fixture). An unscripted turn returns mockllm.UnmatchedSentinel, failing loudly.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -188,14 +187,12 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 			Marker: journeyIssueRef,
 			Tool:   &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()},
 		},
-		mockllm.Fixture{
-			Marker: journeyChangeSlug,
-			Tool:   &mockllm.ToolCall{Name: "validate_change", Args: map[string]any{"slug": journeyChangeSlug}},
-		},
-		mockllm.Fixture{
-			Marker: journeyChangeSlug,
-			Tool:   &mockllm.ToolCall{Name: "project_tasks", Args: map[string]any{"slug": journeyChangeSlug}},
-		},
+		// Validation + projection are publish-triggered COMPONENTS now (R6, group 6): the
+		// validate rule (coordinator/03) and the projection rule (dev-from-task/03) each fire
+		// a plain `publish` to their station component, which validates / freezes task.spec
+		// with ZERO model turns — so there are no validate_change / project_tasks fixtures to
+		// script. The gate rule (openspec.validated) and the provision gate (task.spec) wait
+		// on the components' stamped facts, not on a model turn.
 		mockllm.Fixture{
 			Marker: journeyProvisionMarker,
 			Tool:   &mockllm.ToolCall{Name: "provision_sandbox", Args: map[string]any{}},
@@ -301,15 +298,15 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
 	t.Logf("station 4: change %q authored onto run %s (mock RequestCount=%d)", journeyChangeSlug, runEntityID, mock.RequestCount())
 
-	// Station 5 — the authored marker chained a validate loop that ran the OpenSpec
-	// CLI oracle and stamped openspec.validated on the run, which fired the existing
-	// change-approval gate (run-lifecycle/01) executing→awaiting_approval. Asserting
-	// the phase reached awaiting_approval proves the whole chain: create_change's
-	// loop marker → the validate rule → validate_change → openspec.validated → the
-	// gate. (The gate requires openspec.validated present, so awaiting_approval
-	// implies it was stamped.)
+	// Station 5 — the authored marker published the VALIDATION STATION component (R6),
+	// which ran the OpenSpec CLI oracle and stamped openspec.validated on the run, firing
+	// the existing change-approval gate (run-lifecycle/01) executing→awaiting_approval.
+	// Asserting the phase reached awaiting_approval proves the whole chain WITH ZERO model
+	// turns for the validate step: create_change's loop marker → the validate rule's publish
+	// → the validation-station component → openspec.validated → the gate. (The gate requires
+	// openspec.validated present, so awaiting_approval implies the component stamped it.)
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
-	t.Logf("station 5: change validated → run reached awaiting_approval (gate fired); mock RequestCount=%d", mock.RequestCount())
+	t.Logf("station 5: validation-station validated the change → run reached awaiting_approval (gate fired, no model turn); mock RequestCount=%d", mock.RequestCount())
 
 	// Station 6 — the human approves the change. The journey stands in for the
 	// group-5 approval adapter (a forge-io path, deferred): it stamps
@@ -328,17 +325,16 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Station 7 — approval PROJECTS the immutable task surface BEFORE the dev loop
 	// routes into development (dev-from-task spec: WHEN run.change_approved present
 	// THEN tasks projected as task.spec; Codex P1 on f1eed5c). Two rules fire on the
-	// run entity: dev-from-task/01 stamps the bare agent.run anchor (a chain entity
-	// carries none, so publish_agent inherit has nothing to bind), then
-	// dev-from-task/03 does the inherit publish — a forced project_tasks loop that
-	// reads the change's task facts, binds to the validated content (D15 #0), and
-	// stamps task.spec.<i>.* on the run. The projection rule threads the slug via the
-	// run-level openspec.change.slug pointer create_change stamped. Assert task.spec.0
-	// is present — proof projection ran against the real change (this exercises the
-	// revision guard project_tasks carries) and the dev loop has an immutable spec to
-	// converge on before it kicks off.
+	// run entity: dev-from-task/01 stamps the bare agent.run anchor, then
+	// dev-from-task/03 fires a `publish` to the PROJECTION STATION component (R6),
+	// which reads the change's task facts, binds to the validated content (D15 #0), and
+	// stamps task.spec.<i>.* on the run with ZERO model turns. The projection rule threads
+	// the slug via the run-level openspec.change.slug pointer create_change stamped, as a
+	// publish property. Assert task.spec.0 is present — proof the projection component ran
+	// against the real change (exercising the revision guard projecttasks.Project carries)
+	// and the dev loop has an immutable spec to converge on before it kicks off.
 	requireTaskSpecProjected(ctx, t, runEntityID)
-	t.Logf("station 7: task.spec projected on approval (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 7: projection-station froze task.spec on approval (no model turn); mock RequestCount=%d", mock.RequestCount())
 
 	// Station 8 — the make-or-break: the run's sandbox is PROVISIONED AND PROVED COLD
 	// before development. sandbox/01-provision (gated on task.spec presence, so it
@@ -446,15 +442,14 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	requirePRDelivered(ctx, t, runEntityID)
 	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly thirteen model turns drove the FULL arc. The route rules (floors 06a advance,
-	// review 07a approved, delivery 08a coherent) chain the stations with NO model turns of
-	// their own — they compose the route from harness-stamped facts, and delivery is now a
-	// publish-triggered component (R6), not a forced open_pr turn (the reshape deleted the
+	// Exactly eleven model turns drove the FULL arc. The route rules chain the stations with
+	// NO model turns of their own, and the deterministic stations validate / project / deliver
+	// are publish-triggered COMPONENTS (R6), not forced turns (the reshape also deleted the
 	// check_gate/check_coherence forced turns and the separate measure loop). Turns: C1, C2, A1,
-	// V1, P1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, F1 floors, R1 review, V verify
-	// = 13. A spurious re-spawn (a route re-firing) or an unscripted turn would push this past 13.
-	if got := mock.RequestCount(); got != 13 {
-		t.Fatalf("expected exactly 13 model turns (…, Amelia's 3-turn loop, F1 floors, R1 review, V verify; delivery is a component, not a turn), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
+	// PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, F1 floors, R1 review, V verify = 11. A
+	// spurious re-spawn (a route re-firing) or an unscripted turn would push this past 11.
+	if got := mock.RequestCount(); got != 11 {
+		t.Fatalf("expected exactly 11 model turns (…, Amelia's 3-turn loop, F1 floors, R1 review, V verify; validate/projection/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
 	}
 }
 

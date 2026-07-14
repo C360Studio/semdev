@@ -37,6 +37,8 @@ var Entries = []Entry{
 	// R6 deterministic-station components (publish-triggered, zero model turns) —
 	// each replaces a forced coordinator turn; the generic base is internal/station.
 	{Name: "delivery-station", Kind: KindComponent, Capability: "forge-io", AlignmentNote: "deterministic-station-component"},
+	{Name: "projection-station", Kind: KindComponent, Capability: "dev-from-task", AlignmentNote: "deterministic-station-component"},
+	{Name: "validation-station", Kind: KindComponent, Capability: "openspec-io", AlignmentNote: "deterministic-station-component"},
 	{Name: "create_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "create-change-author-tool"},
 	{Name: "render_openspec", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "render-openspec-hydrate-tool"},
 	{Name: "write_change", Kind: KindTool, Capability: "openspec-io", AlignmentNote: "write-change-workspace-tool"},

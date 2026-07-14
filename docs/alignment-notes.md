@@ -53,9 +53,12 @@ Template:
   deterministic work with zero model turns. Each concrete station calls the same
   core the (transitional) tool did, so no fact writer gains a second owner (G5),
   and fires no lifecycle transition (G2).
-- **Registry entry:** `delivery-station` (`component`) — the first R6 station;
-  `floors-station` / `verify-station` / `provision-station` / `projection-station`
-  / `validation-station` back to this same note as they land (groups 6A–6D).
+- **Registry entry:** `delivery-station`, `projection-station`, `validation-station`
+  (`component`) — the R6 stations that need no shared-runspace DI seam (their
+  dependencies build from the NATS client; the validation station additionally shells
+  the `openspec` CLI via a plain os/exec runner). `floors-station` / `verify-station` /
+  `provision-station` back to this same note as they land (they additionally share
+  boot's process-local runspace via a DI seam).
 - **Change:** simplify-m0-execution-rail
 
 ## create-change-author-tool

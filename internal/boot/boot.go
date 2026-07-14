@@ -22,6 +22,8 @@ import (
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station/delivery"
+	"github.com/c360studio/semdev/internal/station/projection"
+	"github.com/c360studio/semdev/internal/station/validation"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -63,6 +65,12 @@ func RegisterAll(reg *component.Registry) error {
 	// RegisterComponents seam instead (group 6B onward).
 	if err := delivery.Register(reg); err != nil {
 		return fmt.Errorf("register delivery station: %w", err)
+	}
+	if err := projection.Register(reg); err != nil {
+		return fmt.Errorf("register projection station: %w", err)
+	}
+	if err := validation.Register(reg); err != nil {
+		return fmt.Errorf("register validation station: %w", err)
 	}
 	return nil
 }

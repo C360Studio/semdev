@@ -82,6 +82,25 @@ func (r ruleFile) publishesTo(subject string) bool {
 	return false
 }
 
+// publishesToWithProps reports whether the rule has a `publish` to subject that
+// carries EVERY named property — the R6 station property-name contract (a station
+// reads its refs, e.g. run_entity_id/slug, from these properties, so a typo would
+// fail closed and only surface in the e2e without this offline pin, G6).
+func (r ruleFile) publishesToWithProps(subject string, props ...string) bool {
+	for _, a := range r.OnEnter {
+		if a.Type != "publish" || a.Subject != subject {
+			continue
+		}
+		for _, p := range props {
+			if _, ok := a.Properties[p]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // markerBeforeStationPublish reports whether the fired-once marker add_triple
 // precedes the FIRST `publish` action — the same SB7 restart-safety ordering as
 // markerBeforePublish, but for the R6 publish→component station path (a publish
@@ -277,10 +296,12 @@ func TestChangeApprovalGateFreshnessForwardContract(t *testing.T) {
 // coordinator. The fix (semteams agent-run/02 pattern): stamp a fired-once marker
 // (run.dev_kickoff) and guard on its absence, so the trigger flips false the
 // moment it fires — independent of RULE_STATE. This pin fails if either half is
-// dropped. (The sibling spawn rules coordinator/02, coordinator/03, and the park
-// rule are NOT yet self-extinguishing — tracked in design.md as a pre-production
-// hardening carry-forward; when the dev-loop rail adds more publish_agent spawns
-// they must follow this pattern.)
+// dropped. (The sibling spawn rule coordinator/02 and the park rule are NOT yet
+// self-extinguishing — tracked in design.md as a pre-production hardening
+// carry-forward; when the dev-loop rail adds more publish_agent spawns they must
+// follow this pattern. coordinator/03 is no longer in that set — it now `publish`es
+// the validation-station component, R6, whose re-dispatch is idempotent, so its
+// edge-trigger needs no self-extinguish marker.)
 func TestDevRewakeIsSelfExtinguishing(t *testing.T) {
 	rewake, ok := runLifecycleRules(t)["dev_from_task_rewake_coordinator"]
 	if !ok {
@@ -330,21 +351,25 @@ func TestProjectionSpawnIsSelfExtinguishing(t *testing.T) {
 	}
 	const marker = "run.projection_kickoff"
 	if !proj.hasAbsenceGuard(marker) {
-		t.Errorf("projection spawn must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate projection loop (publish_agent is not idempotent)", marker)
+		t.Errorf("projection dispatch must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-dispatches a duplicate projection (the core-NATS publish is not deduped)", marker)
 	}
 	if !proj.hasTriple(marker) {
-		t.Errorf("projection spawn must add_triple %s in on_enter to extinguish its own trigger", marker)
+		t.Errorf("projection dispatch must add_triple %s in on_enter to extinguish its own trigger", marker)
 	}
-	if !proj.forcesFunction("project_tasks") {
-		t.Error("projection spawn must force the project_tasks call (tool_choice mode=function, function_name=project_tasks)")
+	// R6: projection is a publish-triggered component now — the rule PUBLISHES the
+	// projection station (not a forced project_tasks turn), carrying the change slug as
+	// a property (the station reads it), with the marker stamped BEFORE the publish (a
+	// publish failure leaves the run stuck, not duplicable).
+	if !proj.publishesToWithProps("component.projection-station.dispatch", "slug") || !proj.markerBeforeStationPublish(marker) {
+		t.Error("projection dispatch must publish component.projection-station.dispatch (R6) with a slug property and the run.projection_kickoff marker stamped BEFORE the publish")
 	}
-	// It fires on approval and needs the run anchor (dev-from-task/01) for
-	// run_scope=inherit — assert both so the trigger is grounded.
+	// It fires on approval and needs the run anchor (dev-from-task/01) so the run is
+	// the dispatch entity_id — assert both so the trigger is grounded.
 	if c, ok := proj.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
-		t.Error("projection spawn must fire on run.change_approved == true (the spec trigger: approval projects task.spec)")
+		t.Error("projection dispatch must fire on run.change_approved == true (the spec trigger: approval projects task.spec)")
 	}
 	if c, ok := proj.condition("agent.run"); !ok || c.Operator != "ne" {
-		t.Error("projection spawn must require the agent.run anchor (ne \"\") so run_scope=inherit binds the loop to this run")
+		t.Error("projection dispatch must require the agent.run anchor (ne \"\") so the run resolves as the dispatch entity_id")
 	}
 }
 
@@ -369,10 +394,10 @@ func TestDevRewakeGatedOnProjection(t *testing.T) {
 		t.Errorf("dev re-wake projection gate must be task.spec.0.test_command ne \"\" (a present, non-empty projected field), got operator=%q value=%v", c.Operator, c.Value)
 	}
 	// The gate is only honest if a projection station actually stamps task.spec on
-	// approval — assert the producer exists and forces project_tasks.
+	// approval — assert the producer exists and publishes the projection component.
 	proj, ok := runLifecycleRules(t)["dev_from_task_project_tasks"]
-	if !ok || !proj.forcesFunction("project_tasks") {
-		t.Error("the projection gate has no producer: dev_from_task_project_tasks must exist and force project_tasks, or task.spec.0.test_command never becomes present and the dev loop deadlocks")
+	if !ok || !proj.publishesTo("component.projection-station.dispatch") {
+		t.Error("the projection gate has no producer: dev_from_task_project_tasks must exist and publish component.projection-station.dispatch (R6), or task.spec.0.test_command never becomes present and the dev loop deadlocks")
 	}
 }
 
@@ -749,6 +774,30 @@ func TestDeliveryRouteTotalityAndSelfExtinguish(t *testing.T) {
 	}
 	if !park.hasAbsenceGuard(marker) {
 		t.Errorf("delivery-park must self-extinguish via %s (shared with the coherent route; delivery is terminal so a run-scoped guard is correct)", marker)
+	}
+}
+
+// TestValidationStationPublishWiring pins the validate rule's R6 publish contract (G6:
+// the property-name seam offline, not only via the e2e). coordinator/03 fires on the
+// authoring LOOP (that is where openspec.change.authored lives), so the run is NOT the
+// dispatch entity_id — the rule MUST thread run_entity_id AND slug as publish properties,
+// which the validation station reads (a typo would fail closed: the station rejects the
+// dispatch, openspec.validated never stamps, the run never reaches awaiting_approval).
+func TestValidationStationPublishWiring(t *testing.T) {
+	rules := runLifecycleRules(t)
+	v, ok := rules["coordinator_validate_authored_change"]
+	if !ok {
+		t.Fatal("missing coordinator_validate_authored_change rule")
+	}
+	if !v.publishesToWithProps("component.validation-station.dispatch", "run_entity_id", "slug") {
+		t.Error("the validate rule must publish component.validation-station.dispatch (R6) carrying BOTH run_entity_id and slug properties — it fires on the authoring loop, so the run + slug travel as properties, not the firing entity")
+	}
+	// It must fire on the authored marker (the loop signal) and NOT force a model tool.
+	if c, ok := v.condition("openspec.change.authored"); !ok || c.Operator != "ne" {
+		t.Error("the validate rule must fire on openspec.change.authored ne \"\" (the authoring-loop marker)")
+	}
+	if v.forcesFunction("validate_change") {
+		t.Error("the validate rule must NOT force the validate_change tool — validation is a publish-triggered component now (R6)")
 	}
 }
 

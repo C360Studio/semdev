@@ -36,6 +36,7 @@ package validatechange
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -88,10 +89,26 @@ func New(reader changefacts.Reader, runner cliexec.Runner, writer agentictools.O
 	return &Executor{reader: reader, runner: runner, writer: writer, logger: logger}
 }
 
-// Execute hydrates the run's change, materializes it to a throwaway workspace,
-// shells `openspec validate <slug> --strict --json --no-interactive`, and — from
-// the real exit code — stamps openspec.validated on the run (pass) or clears it
-// (fail). It is terminal for the turn (StopLoop); the gate rule advances the run.
+// ErrOracleUnrunnable wraps a failure to RUN the OpenSpec CLI (binary missing,
+// timeout, cancel) — a transport fault, not a verdict, so nothing is stamped or
+// cleared and it is retryable. The tool maps it to the Network error kind; the
+// validation station logs it and the base retries.
+var ErrOracleUnrunnable = errors.New("openspec validate could not be run")
+
+// Result reports the oracle verdict for a run's change. Validated true iff the CLI
+// passed (openspec.validated stamped to Revision); false means the CLI rejected the
+// change (the marker was cleared, Issues carries the validator output) — a definitive
+// verdict, NOT an error.
+type Result struct {
+	Validated bool
+	Revision  string
+	Issues    string
+}
+
+// Execute hydrates the run's change, runs the OpenSpec CLI oracle, and stamps/clears
+// openspec.validated from the real exit code. It is a thin wrapper over the shared
+// Validate core (also called by the validation station, R6). Terminal for the turn
+// (StopLoop); the gate rule advances the run.
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
 	if e.reader == nil || e.runner == nil || e.writer == nil {
 		return errResult(call, agentic.ToolErrorInternal, "validate_change: harness not fully wired (reader/runner/writer)")
@@ -109,19 +126,52 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: decode arguments: %v", err)
 	}
-	if p.Slug == "" {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: slug is required")
+
+	out, err := Validate(ctx, e.reader, e.runner, e.writer, runEntityID, p.Slug)
+	if err != nil {
+		// The oracle-unrunnable transport fault stays retryable (Network). The other
+		// core refusals (missing revision, empty/unsafe change) are now classified via
+		// the shared graph-error classifier rather than the pre-extraction per-branch
+		// InvalidArgs — a coarsening that is INERT: validate_change is dropped from
+		// allowed_tools (uncallable) and the validation STATION ignores the kind (it
+		// retries then logs); the tool executor is scheduled for deletion in the group-6
+		// tool-cleanup slice (semstreams-reviewer slice-2 MEDIUM).
+		kind := changefacts.ReadErrorKind(err)
+		if errors.Is(err, ErrOracleUnrunnable) {
+			kind = agentic.ToolErrorNetwork
+		}
+		return errResult(call, kind, "%v", err)
 	}
-	if err := openspec.ValidateSlug(p.Slug); err != nil {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: %v", err)
+	if out.Validated {
+		summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": true, "revision": out.Revision, "run_entity": runEntityID})
+		return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+	}
+	content, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": false, "issues": out.Issues})
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(content), StopLoop: true}, nil
+}
+
+// Validate is the shared validation core: it hydrates the run's change, materializes
+// it to a throwaway workspace, shells `openspec validate <slug> --strict --json
+// --no-interactive`, and — from the real exit code — stamps openspec.validated (pass)
+// or clears any stale marker (fail). It returns a Result (Validated true iff the CLI
+// passed). A returned error is a wiring/authoring/transport fault (the oracle-
+// unrunnable case wraps ErrOracleUnrunnable); a CLI REJECTION is Result{Validated:
+// false, Issues:...} with a nil error. Both the validate_change tool and the
+// validation station (R6) call it, so openspec.validated keeps one writer (G5).
+func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Runner, writer agentictools.OwnedFactWriter, runEntityID, slug string) (Result, error) {
+	if slug == "" {
+		return Result{}, fmt.Errorf("validate_change: slug is required")
+	}
+	if err := openspec.ValidateSlug(slug); err != nil {
+		return Result{}, fmt.Errorf("validate_change: %w", err)
 	}
 
-	change, err := changefacts.Hydrate(ctx, e.reader, runEntityID, p.Slug)
+	change, err := changefacts.Hydrate(ctx, reader, runEntityID, slug)
 	if err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "validate_change: %v", err)
+		return Result{}, fmt.Errorf("validate_change: %w", err)
 	}
 	if isEmpty(change) {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: no openspec.change.%s.* facts on %s — nothing to validate (was the change authored?)", p.Slug, runEntityID)
+		return Result{}, fmt.Errorf("validate_change: no openspec.change.%s.* facts on %s — nothing to validate (was the change authored?)", slug, runEntityID)
 	}
 
 	// Read the content revision create_change stamped over THIS slug's authored
@@ -130,62 +180,56 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	// cannot stamp a content-bound marker, and a bare-slug marker would reopen the
 	// stale-pass hole. A missing revision means the change was not authored by
 	// create_change (or a partial write) — an ordering/authoring gap, not transport.
-	revPredicate := createchange.SlugRevisionPredicate(p.Slug)
-	rev, err := e.readRevision(ctx, runEntityID, revPredicate)
+	revPredicate := createchange.SlugRevisionPredicate(slug)
+	rev, err := readRevision(ctx, reader, runEntityID, revPredicate)
 	if err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "validate_change: read %s on %s: %v", revPredicate, runEntityID, err)
+		return Result{}, fmt.Errorf("validate_change: read %s on %s: %w", revPredicate, runEntityID, err)
 	}
 	if rev == "" {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "validate_change: no %s on %s — the change carries no content revision (was it authored by create_change?)", revPredicate, runEntityID)
+		return Result{}, fmt.Errorf("validate_change: no %s on %s — the change carries no content revision (was it authored by create_change?)", revPredicate, runEntityID)
 	}
 
 	// Materialize to a throwaway workspace so the oracle judges exactly the
 	// hydrated change (openspec/changes/<slug>/ under a temp root), then remove it.
 	root, err := os.MkdirTemp("", "semdev-validate-")
 	if err != nil {
-		return errResult(call, agentic.ToolErrorInternal, "validate_change: create temp workspace: %v", err)
+		return Result{}, fmt.Errorf("validate_change: create temp workspace: %w", err)
 	}
 	defer os.RemoveAll(root)
-	changeDir := filepath.Join(root, "openspec", "changes", p.Slug)
+	changeDir := filepath.Join(root, "openspec", "changes", slug)
 	if err := openspec.WriteChange(changeDir, change); err != nil {
-		return errResult(call, agentic.ToolErrorInternal, "validate_change: write change to temp workspace: %v", err)
+		return Result{}, fmt.Errorf("validate_change: write change to temp workspace: %w", err)
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, validateTimeout)
 	defer cancel()
-	res, err := e.runner.Run(runCtx, root, openspecBin, "validate", p.Slug, "--strict", "--json", "--no-interactive")
+	res, err := runner.Run(runCtx, root, openspecBin, "validate", slug, "--strict", "--json", "--no-interactive")
 	if err != nil {
 		// The oracle could not be run (binary missing, timeout, cancel) — a
 		// transport failure, NOT a verdict. Do not stamp or clear; retryable.
-		return errResult(call, agentic.ToolErrorNetwork, "validate_change: run %s validate: %v", openspecBin, err)
+		return Result{}, fmt.Errorf("validate_change: run %s validate: %w: %v", openspecBin, ErrOracleUnrunnable, err)
 	}
 
 	if res.ExitCode == 0 {
-		if err := e.stampValidated(ctx, runEntityID, rev); err != nil {
-			return errResult(call, writeErrKind(err), "validate_change: stamp %s on %s: %v", ValidatedPredicate, runEntityID, err)
+		if err := stampValidated(ctx, writer, runEntityID, rev); err != nil {
+			return Result{}, fmt.Errorf("validate_change: stamp %s on %s: %w", ValidatedPredicate, runEntityID, err)
 		}
-		summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "validated": true, "revision": rev, "run_entity": runEntityID})
-		return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+		return Result{Validated: true, Revision: rev}, nil
 	}
 
 	// Invalid: clear any stale pass marker so the change cannot reach the approval
 	// gate, and hand back the validator's own issues for correction.
-	if err := e.clearValidated(ctx, runEntityID); err != nil {
-		return errResult(call, writeErrKind(err), "validate_change: clear stale %s on %s: %v", ValidatedPredicate, runEntityID, err)
+	if err := clearValidated(ctx, writer, runEntityID); err != nil {
+		return Result{}, fmt.Errorf("validate_change: clear stale %s on %s: %w", ValidatedPredicate, runEntityID, err)
 	}
-	content, _ := json.Marshal(map[string]any{
-		"slug":      p.Slug,
-		"validated": false,
-		"issues":    validatorOutput(res),
-	})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(content), StopLoop: true}, nil
+	return Result{Validated: false, Issues: validatorOutput(res)}, nil
 }
 
 // stampValidated upserts openspec.validated=<content revision> on the run entity
 // (replace-by-predicate, so a re-validation replaces rather than appends a second
 // marker). The value is the revision — not the slug — so it binds to the exact
 // content the validator blessed (D15 #0).
-func (e *Executor) stampValidated(ctx context.Context, runEntityID, rev string) error {
+func stampValidated(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID, rev string) error {
 	triple := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  ValidatedPredicate,
@@ -194,15 +238,15 @@ func (e *Executor) stampValidated(ctx context.Context, runEntityID, rev string) 
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	return e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
+	return writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
 }
 
 // readRevision returns the object of the exact revision predicate on the run
 // entity (the slug-scoped openspec.change.<slug>.revision create_change stamped),
 // or "" if absent. It is named via createchange's own helper so the read/write
 // sides cannot drift.
-func (e *Executor) readRevision(ctx context.Context, runEntityID, predicate string) (string, error) {
-	triples, err := e.reader.ReadFacts(ctx, runEntityID, predicate)
+func readRevision(ctx context.Context, reader changefacts.Reader, runEntityID, predicate string) (string, error) {
+	triples, err := reader.ReadFacts(ctx, runEntityID, predicate)
 	if err != nil {
 		return "", err
 	}
@@ -217,8 +261,8 @@ func (e *Executor) readRevision(ctx context.Context, runEntityID, predicate stri
 
 // clearValidated removes the openspec.validated marker this harness owns, so a
 // now-failing change does not retain a stale pass.
-func (e *Executor) clearValidated(ctx context.Context, runEntityID string) error {
-	return e.writer.ReplaceTriples(ctx, runEntityID, nil, []string{ValidatedPredicate})
+func clearValidated(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string) error {
+	return writer.ReplaceTriples(ctx, runEntityID, nil, []string{ValidatedPredicate})
 }
 
 // validatorOutput returns the CLI's JSON stdout verbatim (its issue list) when
@@ -234,12 +278,6 @@ func validatorOutput(res cliexec.Result) string {
 // isEmpty reports whether a hydrated Change carries no artifact facts.
 func isEmpty(c *openspec.Change) bool {
 	return c.Proposal == nil && c.Design == nil && c.Tasks == nil && len(c.Deltas) == 0
-}
-
-// writeErrKind mirrors the create_change classifier: a handler-classified graph
-// error (entity_not_found and friends) is internal/ordering, not transport.
-func writeErrKind(err error) agentic.ToolErrorKind {
-	return changefacts.ReadErrorKind(err)
 }
 
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
