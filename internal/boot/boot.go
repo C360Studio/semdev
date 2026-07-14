@@ -22,6 +22,7 @@ import (
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station/delivery"
+	"github.com/c360studio/semdev/internal/station/floors"
 	"github.com/c360studio/semdev/internal/station/projection"
 	"github.com/c360studio/semdev/internal/station/validation"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
@@ -51,18 +52,24 @@ import (
 // semstreams' framework registration (componentregistry.Register); semdev's own
 // components — the G1-gated tools and processors — register here as the
 // capability groups land, so both binaries pick them up together.
-func RegisterAll(reg *component.Registry) error {
+//
+// checkouts and sandboxes are boot's SHARED, run-scoped, PROCESS-LOCAL runspace
+// instances (the same ones RegisterTools wires into the dev-loop tools). The R6
+// deterministic-station components that read the run's checkout or warm container
+// (floors, and later verify/provision) MUST capture the SAME instance the tools use —
+// a component that built its own would get a different empty map and never find the
+// run's checkout. Self-sufficient stations (delivery/projection/validation) ignore
+// them (their deps build from the NATS client at construction). Both are nil on the
+// schema-scanning census path: the checkout/sandbox factories still register (so the
+// G1 census sees them) but fail loud if ever CONSTRUCTED without the seam — which the
+// census never does (it only inspects the registry). The live boot passes the shared
+// instances, created before this call.
+func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
 	if err := componentregistry.Register(reg); err != nil {
 		return fmt.Errorf("register framework components: %w", err)
 	}
-	// semdev's own components register here. Keep every addition inside this
-	// function so both binaries stay in lockstep. The R6 deterministic-station
-	// components (publish-triggered, zero model turns) that are SELF-SUFFICIENT —
-	// they need only the NATS client, which the factory receives via
-	// component.Dependencies at component-manager start — register here statically.
-	// The checkout/sandbox-dependent stations (floors, verify, provision) need
-	// boot's shared process-local runspace instances and register via the live
-	// RegisterComponents seam instead (group 6B onward).
+	// Self-sufficient R6 stations (publish-triggered, zero model turns) — deps build
+	// from the NATS client via component.Dependencies at component-manager start.
 	if err := delivery.Register(reg); err != nil {
 		return fmt.Errorf("register delivery station: %w", err)
 	}
@@ -71,6 +78,10 @@ func RegisterAll(reg *component.Registry) error {
 	}
 	if err := validation.Register(reg); err != nil {
 		return fmt.Errorf("register validation station: %w", err)
+	}
+	// Checkout/sandbox-dependent R6 stations — capture boot's shared runspace instances.
+	if err := floors.Register(reg, checkouts); err != nil {
+		return fmt.Errorf("register floors station: %w", err)
 	}
 	return nil
 }
@@ -88,11 +99,13 @@ func RegisterAll(reg *component.Registry) error {
 // (The framework's own RegisterBuiltins still reads GITHUB_TOKEN internally for its
 // github_read/write tools — that is framework behavior, outside this seam.)
 //
-// sandboxes is the run-scoped WARM dev-container registry (created by the runtime so
-// Stop can reap it): provision_sandbox writes to it, measure_task reads from it. The
-// census passes nil so those seams stay literal-nil and the tools register
-// schema-only; the live boot passes the shared instance.
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, sandboxSourceDir string, sandboxes *runspace.Sandboxes) error {
+// checkouts (the run's on-disk working-copy registry) and sandboxes (the WARM
+// dev-container registry) are boot's SHARED, run-scoped, PROCESS-LOCAL runspace
+// instances, created by the runtime BEFORE RegisterAll so the R6 checkout/sandbox
+// station components capture the SAME instances these tools use. The census passes
+// nil for both, so those seams stay literal-nil and the tools register schema-only;
+// the live boot passes the shared instances.
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, sandboxSourceDir string, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -208,9 +221,12 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		rdDiffer    readdiff.Differ
 	)
 	if deps.NATSClient != nil {
-		checkouts, cerr := runspace.NewCheckouts("", cliexec.OSRunner{})
-		if cerr != nil {
-			return fmt.Errorf("create run checkouts: %w", cerr)
+		// checkouts is boot's SHARED run-checkout registry, created before RegisterAll and
+		// passed in (the floors/verify/provision station components capture the SAME
+		// instance). A live client with a nil checkouts is a wiring fault — fail loud
+		// rather than materialize into an instance the components can't see.
+		if checkouts == nil {
+			return fmt.Errorf("register tools: live NATS client but nil run checkouts (wiring fault — the shared instance must be created before RegisterTools)")
 		}
 		verifyClones = checkouts
 		manifests = runspace.Manifests{}

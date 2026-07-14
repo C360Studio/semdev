@@ -126,7 +126,7 @@ import (
 
 func main() {
 	reg := component.NewRegistry()
-	_ = boot.RegisterAll(reg)
+	_ = boot.RegisterAll(reg, nil, nil)
 	_ = githubwebhook.Register(reg) // drift: bypasses boot
 }
 `)

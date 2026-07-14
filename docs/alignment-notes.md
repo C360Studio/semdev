@@ -56,9 +56,11 @@ Template:
 - **Registry entry:** `delivery-station`, `projection-station`, `validation-station`
   (`component`) — the R6 stations that need no shared-runspace DI seam (their
   dependencies build from the NATS client; the validation station additionally shells
-  the `openspec` CLI via a plain os/exec runner). `floors-station` / `verify-station` /
-  `provision-station` back to this same note as they land (they additionally share
-  boot's process-local runspace via a DI seam).
+  the `openspec` CLI via a plain os/exec runner). `floors-station` (`component`)
+  additionally captures boot's SHARED `runspace.Checkouts` (the same process-local map
+  the dev-loop tools use — it reads the developer's authored attempt off the run's
+  checkout) via the `RegisterAll(reg, checkouts, sandboxes)` DI seam. `verify-station` /
+  `provision-station` join the seam as they land (6C/6D).
 - **Change:** simplify-m0-execution-rail
 
 ## create-change-author-tool

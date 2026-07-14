@@ -528,26 +528,30 @@ func TestDispatchDeveloperIsMultiTurnAndSelfExtinguishing(t *testing.T) {
 	}
 }
 
-// The floors station (dev-from-task/05, the reshape group 5): measure moved INTO Amelia's
-// loop, so the floors trigger fires on the DEVELOPER loop's TERMINAL (role=developer AND
-// outcome ne "" — present for both success and failed) and forces check_floors, which
-// mirrors the routing inputs (route.passed/route.rejected/route.attempt) onto its loop.
-// LOOP-scoped self-extinguishing (dev.floors_dispatched on the developer loop). Red-first:
-// drop any and this fails.
+// The floors station (dev-from-task/05, reshape group 5+6, R6 make-or-break): measure moved
+// INTO Amelia's loop, so the floors trigger fires on the DEVELOPER loop L_n's TERMINAL
+// (role=developer AND outcome ne "" — for both success and failed) and PUBLISHES the floors
+// STATION component (not a forced check_floors turn). The component stamps floor.finding on
+// the run and the route.* mirror on L_n (= the dispatch entity_id), so the route rules 06a-d
+// fire on L_n. run_entity_id + task_index travel as publish properties. LOOP-scoped
+// self-extinguishing (dev.floors_dispatched on L_n, before the publish). Red-first: drop any
+// and this fails.
 func TestFloorsTriggerFiresOnDeveloperTerminal(t *testing.T) {
 	fl, ok := runLifecycleRules(t)["dev_from_task_floors_trigger"]
 	if !ok {
 		t.Fatal("missing dev_from_task_floors_trigger rule")
 	}
 	const marker = "dev.floors_dispatched"
-	if !fl.hasAbsenceGuard(marker) || !fl.hasTriple(marker) || !fl.markerBeforePublish(marker) {
+	if !fl.hasAbsenceGuard(marker) || !fl.hasTriple(marker) || !fl.markerBeforeStationPublish(marker) {
 		t.Errorf("floors trigger must be self-extinguishing (%s guard + add_triple before the publish)", marker)
 	}
-	if !fl.forcesFunction("check_floors") {
-		t.Error("floors trigger must force check_floors (a forced coordinator loop, NOT in Amelia's loop)")
+	// R6: publishes the floors station carrying run_entity_id (L_n is the firing entity, so
+	// the run travels as a property) + task_index. It must NOT force the check_floors tool.
+	if !fl.publishesToWithProps("component.floors-station.dispatch", "run_entity_id", "task_index") {
+		t.Error("floors trigger must publish component.floors-station.dispatch (R6) carrying run_entity_id + task_index properties")
 	}
-	if !fl.declaresTools() {
-		t.Error("floors trigger must declare an explicit tools allowlist ([check_floors])")
+	if fl.forcesFunction("check_floors") {
+		t.Error("floors trigger must NOT force the check_floors tool — floors is a publish-triggered component now (R6)")
 	}
 	// Fires on the DEVELOPER loop terminal (measure moved in-loop, so there is no measure
 	// loop and no dev.measure_done chain). role=developer + outcome-present is the terminal.
@@ -562,8 +566,10 @@ func TestFloorsTriggerFiresOnDeveloperTerminal(t *testing.T) {
 	}
 }
 
-// The FLOORS ROUTE (dev-from-task/06a-d, the reshape group 5): the rule-native replacement
-// for check_gate. It fires on the check_floors loop reading the route.* mirror.
+// The FLOORS ROUTE (dev-from-task/06a-d, reshape group 5+6): the rule-native replacement
+// for check_gate. It fires on the DEVELOPER loop L_n reading the route.* mirror the floors
+// STATION (R6) stamps there (pre-reshape this was the check_floors coordinator loop; the
+// rules are UNCHANGED — they key on route.*, which the component now mirrors onto L_n).
 //   - 06a advance: route.passed=true AND route.rejected=false → spawn Quinn (reviewer).
 //   - 06b not_clean: logic:OR (route.passed=false OR route.rejected=true) → route.not_clean.
 //   - 06c retry: route.not_clean=true AND route.attempt.0 length_lt 3 → re-dispatch Amelia.

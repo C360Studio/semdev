@@ -21,7 +21,7 @@ func semdevToolRegistry(t *testing.T) *agentictools.ExecutorRegistry {
 	// nil path regardless of the ambient GITHUB_TOKEN, so the census is hermetic. A
 	// nil warm-sandbox registry keeps every tool's Sandboxes/Warmers seam literal-nil,
 	// so the schema scan takes the schema-only path (no live NATS client either).
-	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", "", nil); err != nil {
+	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", "", nil, nil); err != nil {
 		t.Fatalf("boot.RegisterTools: %v", err)
 	}
 	return reg

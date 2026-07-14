@@ -2,7 +2,7 @@
   "id": "dev_from_task_route_not_clean_floor",
   "type": "expression",
   "name": "Floors route → NOT-CLEAN (floor rejected): stamp the intermediate",
-  "description": "The not-clean intermediate, branch 2 of 2 (design R1, group 5). See 06b (dev_from_task_route_not_clean_red) for the full rationale: the not-clean disjunction (measured red OR a structural floor rejected) is split into two GUARDED pure-AND rules so each carries the route.not_clean length_eq 0 self-extinguish guard (a guardless logic:or rule would re-fire and re-append unbounded, since the graph-ingest ADD path bumps the entity version with no nothing-changed skip). This branch fires when a structural FLOOR rejected the attempt even though it may have measured green — the cache-masked-fabrication shape (route.passed can be true while route.rejected is true).\n\nTRIGGER = the check_floors LOOP: route.rejected eq \"true\" (required:false — the scalar exists only on a floors loop) AND route.not_clean length_eq 0 (the self-extinguish guard). Both branches stamp the SAME single-valued route.not_clean='true'; the retry (06c)/escalate (06d) rules read route.not_clean eq 'true'. Mutually exclusive with advance (06a requires route.rejected=false).\n\nG2: no transition, no spawn — a fact the route RULES compose from.",
+  "description": "The not-clean intermediate, branch 2 of 2 (design R1, group 5). See 06b (dev_from_task_route_not_clean_red) for the full rationale: the not-clean disjunction (measured red OR a structural floor rejected) is split into two GUARDED pure-AND rules so each carries the route.not_clean length_eq 0 self-extinguish guard (a guardless logic:or rule would re-fire and re-append unbounded, since the graph-ingest ADD path bumps the entity version with no nothing-changed skip). This branch fires when a structural FLOOR rejected the attempt even though it may have measured green — the cache-masked-fabrication shape (route.passed can be true while route.rejected is true).\n\nTRIGGER = the developer loop L_n: route.rejected eq \"true\" (required:false — the scalar exists only on a floors loop) AND route.not_clean length_eq 0 (the self-extinguish guard). Both branches stamp the SAME single-valued route.not_clean='true'; the retry (06c)/escalate (06d) rules read route.not_clean eq 'true'. Mutually exclusive with advance (06a requires route.rejected=false).\n\nG2: no transition, no spawn — a fact the route RULES compose from.",
   "enabled": true,
   "conditions": [
     { "field": "route.rejected", "operator": "eq", "value": "true", "required": false },
@@ -24,6 +24,6 @@
     "gate": "route",
     "station": "route not_clean (floor rejected) — the OR-collapse branch 2 (R1, group 5)",
     "or_collapse": "the second guarded AND branch of the not-clean OR-collapse (see 06b). Fires when a structural floor rejected (route.rejected=true) even on a green measurement (the cache-masked-fabrication shape). Self-extinguishing via route.not_clean length_eq 0.",
-    "self_extinguish": "route.not_clean length_eq 0 guard → fire-once; a fresh floors loop per attempt re-arms it."
+    "self_extinguish": "route.not_clean length_eq 0 guard → fire-once; a fresh developer loop L_n per attempt re-arms it."
   }
 }

@@ -98,9 +98,17 @@ type payload struct {
 	TaskIndex *int `json:"task_index"`
 }
 
+// FloorResult reports the floors outcome for a task attempt.
+type FloorResult struct {
+	Rejected  bool
+	Findings  []floors.Finding
+	AttemptID string
+}
+
 // Execute resolves the task's attempt, runs every floor, and stamps the findings as
-// floor.finding.<task_index>.<floor> facts on the run entity. The verdicts are the
-// deterministic floors' own; the tool records them and reports whether any rejected.
+// floor.finding.<task_index>.<floor> facts on the run entity, mirroring the routing
+// inputs onto its own loop. It is a thin wrapper over the shared RunFloors core (also
+// called by the floors station, R6). The verdicts are the deterministic floors' own.
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
 	if e.attempts == nil || e.reader == nil || e.writer == nil {
 		return errResult(call, agentic.ToolErrorInternal, "check_floors: harness not fully wired (attempts/reader/writer)")
@@ -126,89 +134,102 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInvalidArgs, "check_floors: task_index must be non-negative, got %d", idx)
 	}
 
-	attempt, err := e.attempts.Resolve(ctx, runEntityID, idx)
-	if err != nil {
-		// Fail closed: a resolve/check failure must NOT leave a prior attempt's PASS
-		// readable as if it were the current attempt's — that is a direct route to a
-		// stale false-green once the gate reads these facts. Clear this task's findings
-		// so no current verdict is readable, then surface the resolve fault (retryable;
-		// the loop re-runs, and a persistent failure parks toward the human). The
-		// attempt-id binding is the belt to this clear's suspenders.
-		if cerr := e.clearFindings(ctx, runEntityID, idx); cerr != nil {
-			e.logger.Warn("check_floors: could not clear stale findings after a resolve fault",
-				slog.Int("task_index", idx), slog.Any("clear_error", cerr))
-		}
-		return errResult(call, agentic.ToolErrorInternal, "check_floors: resolve attempt for task %d: %v", idx, err)
-	}
-
-	findings := floors.CheckAll(attempt)
-	rejected := floors.AnyRejected(findings)
-	out := findingTriples(runEntityID, idx, floors.AttemptID(attempt), rejected, findings, time.Now().UTC())
-	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "check_floors: stamp floor.finding for task %d on %s: %v", idx, runEntityID, err)
-	}
-
-	e.logger.Info("check_floors evaluated attempt",
-		slog.String("run_entity_id", runEntityID),
-		slog.Int("task_index", idx),
-		slog.Bool("rejected", rejected))
-
-	// MIRROR the routing inputs onto THIS floors loop so the rule-native floors route
-	// (advance / not_clean → retry / escalate) can fire on them (design R1: a rule reads
-	// only the firing entity's triples, so the run-level measurement + attempt facts must
-	// be copied onto the loop the route rules fire on). These are RAW copies (never a
-	// derived route decision, G2): route.passed (the measurement, fail-closed "false" when
-	// absent — the "model never measured" case routes like any red), route.rejected (this
-	// floors run's own aggregate), and route.attempt.<i> (the append-mirror of the run's
-	// task.attempt.<i> distinct objects, so the route rules count the budget via length_*).
-	// The findings (the substance) are written to the run FIRST; the mirror (the chaining
-	// signal the route rules trigger on) follows, so a mirror-write failure surfaces only
-	// AFTER the findings are durable. Failure posture: a mirror error returns errResult
-	// WITHOUT StopLoop, so the forced loop re-runs check_floors (re-stamping idempotently)
-	// until it lands or MaxIterations trips — never a silent green. A missing LoopID
-	// (unit-test-only) skips the mirror with a loud warn rather than failing the findings.
+	// The tool mirrors the route onto ITS OWN loop (call.LoopID). This is a DEAD path
+	// post-reshape — the floors station replaced the forced check_floors coordinator turn
+	// (R6), so no rule spawns this tool and call.LoopID is never populated in production —
+	// but it is kept correct (and skipped with a warn when absent) until the executor is
+	// deleted in the group-6 tool-cleanup slice.
+	routeLoopEntityID := ""
 	if call.LoopID == "" {
 		e.logger.Warn("check_floors: no loop_id on the tool call — skipping the route mirror; the floors route will not fire",
 			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
 	} else {
-		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
+		var lerr error
+		routeLoopEntityID, lerr = agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
 		if lerr != nil {
 			return errResult(call, agentic.ToolErrorInternal, "check_floors: construct floors loop entity id: %v", lerr)
 		}
-		passed, err := e.readMeasuredPassed(ctx, runEntityID, idx)
-		if err != nil {
-			return errResult(call, changefacts.ReadErrorKind(err), "check_floors: read measurement for the route mirror on %s: %v", runEntityID, err)
-		}
-		attempts, err := e.readAttemptObjects(ctx, runEntityID, idx)
-		if err != nil {
-			return errResult(call, changefacts.ReadErrorKind(err), "check_floors: read task.attempt for the route mirror on %s: %v", runEntityID, err)
-		}
-		mirror := routeMirrorTriples(loopEntityID, idx, passed, rejected, attempts, time.Now().UTC())
-		// ReplaceTriples → MergeTriples does FULL-SET-REPLACE PER PREDICATE: every predicate
-		// present in the write has its whole prior value-set on the loop replaced by this
-		// write's set. So route.passed/route.rejected (single-valued) are replaced, and
-		// route.attempt.<i> is set to the COMPLETE current attempt set (all N objects) — NOT
-		// appended. This is why the mirror stamps the FULL attempt set every run: writing only
-		// the newest object would DROP the prior ones (full-set-replace, not append). It is
-		// idempotent on an error-retry re-run (the same complete set replaces itself) regardless
-		// of the per-triple timestamps. removePredicates for the scalars is redundant-but-harmless
-		// (they are always re-supplied); route.attempt is not listed (it is replaced by presence).
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate}); merr != nil {
-			return errResult(call, changefacts.ReadErrorKind(merr), "check_floors: stamp the route mirror on %s: %v", loopEntityID, merr)
-		}
+	}
+
+	res, err := RunFloors(ctx, e.attempts, e.reader, e.writer, e.logger, runEntityID, routeLoopEntityID, idx)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "%v", err)
 	}
 
 	summary, _ := json.Marshal(map[string]any{
 		"task_index": idx,
-		"rejected":   rejected,
-		"findings":   findings,
+		"rejected":   res.Rejected,
+		"findings":   res.Findings,
 	})
-	// StopLoop: the floors trigger (dev-from-task/05) forces a single-turn floors loop
-	// (this tool is NOT in Amelia's loop — it runs in its own forced coordinator loop);
-	// ending the turn here keeps it one model call (mirrors project_tasks / provision). A
-	// rejecting verdict is DATA, not a tool error; the floors ROUTE reads the stamped
-	// route.passed/route.rejected mirror, not this StopLoop, to decide advance/retry.
+	// StopLoop: the (dead) forced floors loop ends after this call. A rejecting verdict is
+	// DATA, not a tool error; the floors ROUTE reads the stamped route.passed/route.rejected
+	// mirror, not this StopLoop, to decide advance/retry.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+}
+
+// RunFloors runs the deterministic floors over the task's current attempt, stamps
+// floor.finding.<idx>.* on the run, and MIRRORS the routing inputs
+// (route.passed/route.rejected/route.attempt.<idx>) onto routeLoopEntityID for the
+// rule-native floors route. Shared core of the check_floors tool and the floors station
+// (R6). routeLoopEntityID is the entity the floors-route rules fire on: for the station
+// it is the DEVELOPER loop L_n (the published dispatch entity_id, fresh per attempt); the
+// mirror is skipped when it is "" (the dead tool path with no loop, or a unit test).
+//
+// The mirror is RAW copies (never a derived route decision, G2): route.passed (the
+// measurement, fail-closed "false" when absent OR bound to a stale snapshot — the g4+5
+// staleness fix, preserved), route.rejected (this run's own aggregate), and
+// route.attempt.<i> (the full attempt set, so the route rules count the budget via
+// length_*). The findings (the substance) are written to the run FIRST; the mirror (the
+// chaining signal the route rules trigger on) follows, so a mirror-write failure surfaces
+// only AFTER the findings are durable. Fails closed: a resolve/check fault CLEARS this
+// task's findings (so no stale pass is readable) before returning the error.
+func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger, runEntityID, routeLoopEntityID string, taskIndex int) (FloorResult, error) {
+	attempt, err := attempts.Resolve(ctx, runEntityID, taskIndex)
+	if err != nil {
+		// A resolve/check failure must NOT leave a prior attempt's PASS readable as if it
+		// were the current attempt's — a direct route to a stale false-green once the route
+		// reads these facts. Clear this task's findings, then surface the fault (retryable).
+		if cerr := clearFindings(ctx, writer, runEntityID, taskIndex); cerr != nil {
+			logger.Warn("check_floors: could not clear stale findings after a resolve fault",
+				slog.Int("task_index", taskIndex), slog.Any("clear_error", cerr))
+		}
+		return FloorResult{}, fmt.Errorf("check_floors: resolve attempt for task %d: %w", taskIndex, err)
+	}
+
+	findings := floors.CheckAll(attempt)
+	rejected := floors.AnyRejected(findings)
+	attemptID := floors.AttemptID(attempt)
+	out := findingTriples(runEntityID, taskIndex, attemptID, rejected, findings, time.Now().UTC())
+	if err := writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: stamp floor.finding for task %d on %s: %w", taskIndex, runEntityID, err)
+	}
+
+	logger.Info("check_floors evaluated attempt",
+		slog.String("run_entity_id", runEntityID),
+		slog.Int("task_index", taskIndex),
+		slog.Bool("rejected", rejected))
+
+	if routeLoopEntityID == "" {
+		return FloorResult{Rejected: rejected, Findings: findings, AttemptID: attemptID}, nil
+	}
+
+	passed, err := readMeasuredPassed(ctx, reader, runEntityID, taskIndex)
+	if err != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: read measurement for the route mirror on %s: %w", runEntityID, err)
+	}
+	attemptObjs, err := readAttemptObjects(ctx, reader, runEntityID, taskIndex)
+	if err != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: read task.attempt for the route mirror on %s: %w", runEntityID, err)
+	}
+	mirror := routeMirrorTriples(routeLoopEntityID, taskIndex, passed, rejected, attemptObjs, time.Now().UTC())
+	// ReplaceTriples → MergeTriples FULL-SET-REPLACES per predicate: route.passed/rejected
+	// (single-valued) are replaced, and route.attempt.<i> is set to the COMPLETE current
+	// attempt set (all N objects) — writing only the newest would DROP the prior ones.
+	// Idempotent on a retry (the same complete set replaces itself).
+	if merr := writer.ReplaceTriples(ctx, routeLoopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate}); merr != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: stamp the route mirror on %s: %w", routeLoopEntityID, merr)
+	}
+	return FloorResult{Rejected: rejected, Findings: findings, AttemptID: attemptID}, nil
 }
 
 // findingTriples projects the floor findings into the owned per-task package on the
@@ -250,9 +271,9 @@ func findingTriples(runEntityID string, idx int, attemptID string, rejected bool
 // the measurement is keyed by task index and persists across attempts, a green from attempt
 // N could otherwise advance an attempt N+1 that was re-applied but never re-measured. Only a
 // measurement whose recorded commit equals the current (non-empty) attempt.commit is trusted.
-func (e *Executor) readMeasuredPassed(ctx context.Context, runEntityID string, idx int) (string, error) {
+func readMeasuredPassed(ctx context.Context, reader changefacts.Reader, runEntityID string, idx int) (string, error) {
 	prefix := measurement.ResultPrefix + strconv.Itoa(idx) + "."
-	triples, err := e.reader.ReadFacts(ctx, runEntityID, prefix)
+	triples, err := reader.ReadFacts(ctx, runEntityID, prefix)
 	if err != nil {
 		return "", err
 	}
@@ -269,7 +290,7 @@ func (e *Executor) readMeasuredPassed(ctx context.Context, runEntityID string, i
 	if passed != "true" {
 		return "false", nil // absent or red measurement → fail closed
 	}
-	currentCommit, err := e.readAttemptCommit(ctx, runEntityID)
+	currentCommit, err := readAttemptCommit(ctx, reader, runEntityID)
 	if err != nil {
 		return "", err
 	}
@@ -284,9 +305,9 @@ func (e *Executor) readMeasuredPassed(ctx context.Context, runEntityID string, i
 // readAttemptCommit reads the run's current attempt.commit (the SHA apply_patch last
 // committed) so a green measurement can be correlated to the snapshot it ran against.
 // Returns "" (no error) when absent.
-func (e *Executor) readAttemptCommit(ctx context.Context, runEntityID string) (string, error) {
+func readAttemptCommit(ctx context.Context, reader changefacts.Reader, runEntityID string) (string, error) {
 	const attemptCommit = "attempt.commit"
-	triples, err := e.reader.ReadFacts(ctx, runEntityID, attemptCommit)
+	triples, err := reader.ReadFacts(ctx, runEntityID, attemptCommit)
 	if err != nil {
 		return "", err
 	}
@@ -304,9 +325,9 @@ func (e *Executor) readAttemptCommit(ctx context.Context, runEntityID string) (s
 // readAttemptObjects reads the distinct objects of the run's task.attempt.<idx> counter
 // (each object is a developer-loop instance, one per attempt) so the route mirror can
 // append them onto the loop and the route rules count the budget via length_*.
-func (e *Executor) readAttemptObjects(ctx context.Context, runEntityID string, idx int) ([]string, error) {
+func readAttemptObjects(ctx context.Context, reader changefacts.Reader, runEntityID string, idx int) ([]string, error) {
 	want := attemptPredicate(idx)
-	triples, err := e.reader.ReadFacts(ctx, runEntityID, want)
+	triples, err := reader.ReadFacts(ctx, runEntityID, want)
 	if err != nil {
 		return nil, err
 	}
@@ -348,16 +369,16 @@ func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bo
 // clearFindings removes this task's entire floor.finding.<idx>.* package (the "clear
 // my prefix" pattern), so a stale earlier attempt's pass is not left readable when
 // the current attempt cannot be evaluated. A no-op when nothing is stamped yet.
-func (e *Executor) clearFindings(ctx context.Context, runEntityID string, idx int) error {
+func clearFindings(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string, idx int) error {
 	prefix := floors.FindingPrefix + strconv.Itoa(idx) + "."
-	preds, err := e.writer.ReadOwnedPredicates(ctx, runEntityID, prefix)
+	preds, err := writer.ReadOwnedPredicates(ctx, runEntityID, prefix)
 	if err != nil {
 		return err
 	}
 	if len(preds) == 0 {
 		return nil
 	}
-	return e.writer.ReplaceTriples(ctx, runEntityID, nil, preds)
+	return writer.ReplaceTriples(ctx, runEntityID, nil, preds)
 }
 
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {

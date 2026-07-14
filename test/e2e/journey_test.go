@@ -86,12 +86,6 @@ const journeyDevRewakeMarker = "Begin developing"
 // (dev-from-task/04-dispatch-developer.json) the mock's apply_patch turn guards on.
 const journeyDeveloperMarker = "SEMDEV DEVELOPER"
 
-// journeyFloorsMarker is a distinctive substring of the floors prompt
-// (dev-from-task/05-floors-trigger.json) the mock's check_floors turn guards on. Measure
-// moved INTO Amelia's loop (the reshape), so there is no separate measure/gate turn — the
-// measure_task turn is guarded by Amelia's own prompt (journeyDeveloperMarker) instead.
-const journeyFloorsMarker = "structural floors"
-
 // journeyReviewMarker is a distinctive substring of Quinn's review prompt
 // (dev-from-task/06a-route-advance.json) the mock's submit_review turn guards on.
 const journeyReviewMarker = "SEMDEV REVIEWER"
@@ -129,7 +123,7 @@ var wantAgenticHealthy = []string{
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
 	// The R6 deterministic-station components must be healthy before the arc drives into
 	// them — a mis-wired station factory fails here, not at a late-station timeout.
-	"delivery-station", "projection-station", "validation-station",
+	"delivery-station", "projection-station", "validation-station", "floors-station",
 }
 
 // TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
@@ -153,21 +147,21 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	//   6. D-a developer (Amelia)    → apply_patch(fix diff)    [authors the fix, tool_choice=auto]
 	//   7. D-b developer (Amelia)    → measure_task(index 0)    [measures IN-LOOP, real go test]
 	//   8. D-c developer (Amelia)    → (no tool → completion)   [she is done; the loop ends]
-	//   9. F1 floors coordinator     → check_floors(index 0)    [floors + route mirror on its loop]
-	//  10. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
-	//  11. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
+	//      (floors is a COMPONENT now — the floors trigger publishes it on her terminal, no turn)
+	//   9. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
+	//  10. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
 	//      (delivery is a COMPONENT now — the delivery route publishes it, no model turn)
 	// Turns 6-8 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
 	// under tool_choice=auto the loop continues; her apply_patch AND measure_task turns both
 	// guard on her own prompt (journeyDeveloperMarker), and turn 8 finds no matching fixture
-	// at the cursor (the next is check_floors, keyed on "structural floors" which is not in
+	// at the cursor (the next is submit_review, keyed on "SEMDEV REVIEWER" which is not in
 	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
-	// her loop (StatusComplete → outcome=success). The route rules then chain the rest with NO
-	// model turns of their own: floors terminal → floors route (06a advance) spawns Quinn →
-	// review route (07a approved) spawns verify → delivery route (08a coherent) PUBLISHES the
-	// delivery-station component. The validate/projection/delivery deterministic stations are
-	// all publish-triggered components (R6), so 10 tool fixtures drive 11 model turns (turn 8
-	// consumes no fixture). An unscripted turn returns mockllm.UnmatchedSentinel, failing loudly.
+	// her loop (StatusComplete → outcome=success). The stations + route rules then chain the
+	// rest with NO model turns of their own: her terminal → the floors STATION (06a advance)
+	// spawns Quinn → review route (07a approved) spawns verify → delivery route (08a coherent)
+	// PUBLISHES the delivery-station component. The validate/projection/FLOORS/delivery
+	// deterministic stations are all publish-triggered components (R6), so 9 tool fixtures drive
+	// 10 model turns (turn 8 consumes no fixture). An unscripted turn returns UnmatchedSentinel.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -214,12 +208,9 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 			Marker: journeyDeveloperMarker,
 			Tool:   &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}},
 		},
-		// (Amelia's 3rd turn matches no fixture here — the cursor sits on check_floors, whose
-		// marker is absent from her prompt — so the mock returns a completion and her loop ends.)
-		mockllm.Fixture{
-			Marker: journeyFloorsMarker,
-			Tool:   &mockllm.ToolCall{Name: "check_floors", Args: map[string]any{"task_index": 0}},
-		},
+		// (Amelia's 3rd turn matches no fixture here — the cursor sits on submit_review, whose
+		// marker is absent from her prompt — so the mock returns a completion and her loop ends.
+		// The floors STATION then runs off her terminal, R6, no model turn — no check_floors fixture.)
 		mockllm.Fixture{
 			Marker: journeyReviewMarker,
 			Tool:   &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}},
@@ -387,35 +378,35 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	requireTriplePresent(ctx, t, runEntityID, "task.attempt.0")
 	t.Logf("station 11: task measured IN-LOOP, in-container — measurement.result.0.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
 
-	// Station 12 — the structural floors run on the developer's REAL diff. The floors trigger
-	// (dev-from-task/05) fires on Amelia's DEVELOPER-loop TERMINAL (agent.loop.outcome ne "" —
-	// measure moved in-loop, so there is no separate measure loop) and spawns a forced
-	// check_floors loop (run_scope=inherit), which runs the deterministic go/ast floors over
-	// the task's target files in the checkout — the SAME bytes measure ran over — stamps the
+	// Station 12 — the structural floors run on the developer's REAL diff (R6: the floors
+	// STATION component, zero model turns). The floors trigger (dev-from-task/05) fires on
+	// Amelia's DEVELOPER-loop L_n TERMINAL (agent.loop.outcome ne "" — measure moved in-loop, so
+	// there is no separate measure loop) and PUBLISHES the floors-station component, which runs
+	// the deterministic go/ast floors over the task's target files in the checkout — the SAME
+	// bytes measure ran over (via boot's SHARED runspace.Checkouts, the DI seam) — stamps the
 	// aggregate floor.finding.0.rejected + the per-floor findings on the run, AND mirrors the
-	// routing inputs (route.passed/route.rejected/route.attempt) onto its loop for the route.
-	// Because the fix is a clean edit (real test present, source parses, no stub/mock, targets
-	// authored), NO floor rejects: assert floor.finding.0.rejected == "false" — the structural
-	// verdict the floors route advances on. Also assert the presence floor ran (the H1 gate).
-	// Red-first: disable dev-from-task/05 and this station times out.
+	// routing inputs (route.passed/route.rejected/route.attempt) onto L_n for the route. Because
+	// the fix is a clean edit (real test present, source parses, no stub/mock, targets authored),
+	// NO floor rejects: assert floor.finding.0.rejected == "false" — the structural verdict the
+	// floors route advances on. Also assert the presence floor ran (the H1 gate). Red-first:
+	// disable dev-from-task/05 and this station times out.
 	requireFloorsPassed(ctx, t, runEntityID)
-	t.Logf("station 12: structural floors ran on the diff — floor.finding.0.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 12: floors-station ran on the diff (no model turn) — floor.finding.0.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 13 — the FLOORS ROUTE advances (rule-native, the reshape replaced check_gate).
-	// The floors trigger (dev-from-task/05) fired on Amelia's DEVELOPER-loop terminal and
-	// spawned a forced check_floors loop, which ran the deterministic floors over the checkout
-	// AND MIRRORED the routing inputs onto its own loop: route.passed (=measurement.result.0.
-	// passed=true), route.rejected (=floor.finding.0.rejected=false), route.attempt.0 (the
-	// attempt mirror). The floors ROUTE (dev-from-task/06a) then fires ON THAT LOOP: because
-	// route.passed=true AND route.rejected=false, it ADVANCES — spawning Quinn's reviewer loop
-	// directly (NO gate tool, NO route-token, NO extra model turn for the route rule). Quinn
-	// reviews the cleared task (D16 per-task review): submit_review reads the task's task.spec
-	// + measurement.result and DERIVES the floored verdict (G3). Because the task measured
-	// green and the mock raises no findings, the verdict is approved: assert review.verdict.0
-	// == approved. Red-first: break the measurement and the floors route goes not_clean→retry
-	// instead of advance→review, so no verdict lands and this station times out.
+	// The floors STATION mirrored the routing inputs onto Amelia's DEVELOPER loop L_n:
+	// route.passed (=measurement.result.0.passed=true, bound to the current attempt.commit),
+	// route.rejected (=floor.finding.0.rejected=false), route.attempt.0 (the attempt mirror). The
+	// floors ROUTE (dev-from-task/06a) then fires ON L_n (the make-or-break coupling: the route
+	// moved from the deleted check_floors loop to the developer loop): because route.passed=true
+	// AND route.rejected=false, it ADVANCES — spawning Quinn's reviewer loop directly (NO gate
+	// tool, NO route-token, NO extra model turn for the route rule). Quinn reviews the cleared
+	// task (D16): submit_review reads the task's task.spec + measurement.result and DERIVES the
+	// floored verdict (G3). Because the task measured green and the mock raises no findings, the
+	// verdict is approved: assert review.verdict.0 == approved. Red-first: break the measurement
+	// and the floors route goes not_clean→retry instead of advance→review, so no verdict lands.
 	requireReviewApproved(ctx, t, runEntityID)
-	t.Logf("station 13: floors route advanced → Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 13: floors route advanced on L_n → Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 14 — the CLEAN-ROOM COLD VERIFY of the committed artifact (the make-or-break).
 	// The review ROUTE (dev-from-task/07a) fires on Quinn's loop reading the route.verdict
@@ -442,14 +433,14 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	requirePRDelivered(ctx, t, runEntityID)
 	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly eleven model turns drove the FULL arc. The route rules chain the stations with
-	// NO model turns of their own, and the deterministic stations validate / project / deliver
-	// are publish-triggered COMPONENTS (R6), not forced turns (the reshape also deleted the
-	// check_gate/check_coherence forced turns and the separate measure loop). Turns: C1, C2, A1,
-	// PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, F1 floors, R1 review, V verify = 11. A
-	// spurious re-spawn (a route re-firing) or an unscripted turn would push this past 11.
-	if got := mock.RequestCount(); got != 11 {
-		t.Fatalf("expected exactly 11 model turns (…, Amelia's 3-turn loop, F1 floors, R1 review, V verify; validate/projection/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
+	// Exactly ten model turns drove the FULL arc. The route rules chain the stations with NO
+	// model turns of their own, and the deterministic stations validate / project / FLOORS /
+	// deliver are publish-triggered COMPONENTS (R6), not forced turns (the reshape also deleted
+	// the check_gate/check_coherence forced turns and the separate measure loop). Turns: C1, C2,
+	// A1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, R1 review, V verify = 10. A spurious
+	// re-spawn (a route re-firing) or an unscripted turn would push this past 10.
+	if got := mock.RequestCount(); got != 10 {
+		t.Fatalf("expected exactly 10 model turns (…, Amelia's 3-turn loop, R1 review, V verify; validate/projection/floors/delivery are components, not turns), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
 	}
 }
 

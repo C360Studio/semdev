@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/config"
@@ -372,8 +373,21 @@ type runtimeRegistries struct {
 //     agentrun.Register). No transition fires from here — rules own every
 //     transition (G2); this only registers what the workflow's edges are.
 func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, platform types.PlatformMeta, opts RunOptions, logger *slog.Logger) (*runtimeRegistries, error) {
+	// The SHARED, run-scoped, PROCESS-LOCAL runspace instances are created HERE (the live
+	// path always has a real client) — BEFORE RegisterAll — and handed to BOTH the R6
+	// station components (RegisterAll) and the dev-loop tools (RegisterTools). They must be
+	// the same instances: a station component that built its own runspace.Checkouts /
+	// Sandboxes would get a different empty map and never find the run's checkout/container.
+	// NewRuntime keeps sandboxes via the returned struct so Stop can reap the containers it
+	// stood up (checkouts are temp dirs cleaned on process exit).
+	checkouts, err := runspace.NewCheckouts("", cliexec.OSRunner{})
+	if err != nil {
+		return nil, fmt.Errorf("create run checkouts: %w", err)
+	}
+	sandboxes := runspace.NewSandboxes()
+
 	componentReg := component.NewRegistry()
-	if err := RegisterAll(componentReg); err != nil {
+	if err := RegisterAll(componentReg, checkouts, sandboxes); err != nil {
 		return nil, fmt.Errorf("register components: %w", err)
 	}
 
@@ -388,11 +402,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		Platform:   platform,
 		Logger:     logger,
 	}
-	// The warm dev-container registry is created here (the live path always has a real
-	// client) and handed to the tools; NewRuntime keeps it via this struct so Stop can
-	// reap the containers it stood up.
-	sandboxes := runspace.NewSandboxes()
-	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, opts.SandboxSourceDir, sandboxes); err != nil {
+	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, opts.SandboxSourceDir, checkouts, sandboxes); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 
