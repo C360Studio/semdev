@@ -95,6 +95,11 @@ var wantAdvertisedTools = []string{
 // against the real framework — the first end-to-end proof that config is valid. They
 // go healthy on consumer bind alone (no LLM traffic needed), so an unreachable mock
 // endpoint does not gate this; a bad port/stream/model_registry declaration does.
+// delivery-station is semdev's first R6 deterministic-station component (a
+// publish-triggered processor). Reaching healthy proves the component-manager
+// resolved semdev's own factory (boot.RegisterAll → delivery.Register) and its
+// core-NATS subscription bound — the wiring proof for the whole station pattern,
+// without the docker journey.
 var wantHealthyComponents = []string{
 	"graph-ingest",
 	"graph-query",
@@ -103,6 +108,7 @@ var wantHealthyComponents = []string{
 	"agentic-model",
 	"agentic-loop",
 	"agentic-dispatch",
+	"delivery-station",
 }
 
 // TestRuntimeStartsCleanlyAgainstLiveNATS is the NATS-gated boot smoke test (run

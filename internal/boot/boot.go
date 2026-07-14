@@ -21,6 +21,7 @@ import (
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
+	"github.com/c360studio/semdev/internal/station/delivery"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -52,8 +53,17 @@ func RegisterAll(reg *component.Registry) error {
 	if err := componentregistry.Register(reg); err != nil {
 		return fmt.Errorf("register framework components: %w", err)
 	}
-	// semdev's own components register here (task 2.1 onward). Keep every
-	// addition inside this function so both binaries stay in lockstep.
+	// semdev's own components register here. Keep every addition inside this
+	// function so both binaries stay in lockstep. The R6 deterministic-station
+	// components (publish-triggered, zero model turns) that are SELF-SUFFICIENT —
+	// they need only the NATS client, which the factory receives via
+	// component.Dependencies at component-manager start — register here statically.
+	// The checkout/sandbox-dependent stations (floors, verify, provision) need
+	// boot's shared process-local runspace instances and register via the live
+	// RegisterComponents seam instead (group 6B onward).
+	if err := delivery.Register(reg); err != nil {
+		return fmt.Errorf("register delivery station: %w", err)
+	}
 	return nil
 }
 

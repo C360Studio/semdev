@@ -34,6 +34,30 @@ Template:
 - **Change:** <change-slug>
 ```
 
+## deterministic-station-component
+
+- **Primitive considered:** the forced single-turn coordinator loop each
+  deterministic station used to ride — a rule `publish_agent` with
+  `tool_choice=function` spawning an agentic loop whose only act is to call one
+  harness tool and StopLoop; or a rule alone.
+- **Why it cannot express this:** a rule can ROUTE facts but cannot invoke Go, so
+  the deterministic station work (record delivery, run the floors, cold-verify,
+  project, validate, provision) still needs a Go executor. The forced-turn tool
+  path makes that executor a MODEL turn — under a real LLM a paid call that
+  decides nothing, since the outcome is harness-derived (G3) — and is
+  context-starved by construction (R6). The framework-aligned answer is the
+  gated-DAG publish→component pattern (`internal/station`, mirroring
+  `processor/research-graph-route`): a rule fires a plain `publish`, the rule
+  engine emits it on core NATS (semdev's rule component declares no matching
+  JetStream output port), and a registered processor turns the reference into
+  deterministic work with zero model turns. Each concrete station calls the same
+  core the (transitional) tool did, so no fact writer gains a second owner (G5),
+  and fires no lifecycle transition (G2).
+- **Registry entry:** `delivery-station` (`component`) — the first R6 station;
+  `floors-station` / `verify-station` / `provision-station` / `projection-station`
+  / `validation-station` back to this same note as they land (groups 6A–6D).
+- **Change:** simplify-m0-execution-rail
+
 ## create-change-author-tool
 
 - **Primitive considered:** a rule that authors the OpenSpec change directly, or

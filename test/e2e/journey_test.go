@@ -100,10 +100,6 @@ const journeyReviewMarker = "SEMDEV REVIEWER"
 // (dev-from-task/07a-review-approved.json) the mock's verify_artifact turn guards on.
 const journeyVerifyMarker = "clean-room COLD verify"
 
-// journeyOpenPRMarker is a distinctive substring of the open_pr prompt
-// (dev-from-task/08a-delivery-open-pr.json) the mock's open_pr turn guards on.
-const journeyOpenPRMarker = "Open the pull request"
-
 // journeyFixtureFixDiff is the developer's authored fix for the go-health-class
 // fixture's real boundary bug (`>` → `>=` at the warning threshold) — the exact
 // unified diff apply_patch lands on the run's checkout. It mirrors the fixture
@@ -131,6 +127,9 @@ const entityStatesBucket = "ENTITY_STATES"
 var wantAgenticHealthy = []string{
 	"graph-ingest", "graph-query", "rule",
 	"agentic-tools", "agentic-model", "agentic-loop", "agentic-dispatch",
+	// The R6 deterministic-station components must be healthy before the arc drives into
+	// them — a mis-wired station factory fails here, not at a late-station timeout.
+	"delivery-station",
 }
 
 // TestBridgeProofIssueToPRAgainstMock is the mock-LLM bridge proof: publish an
@@ -158,7 +157,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	//  11. F1 floors coordinator     → check_floors(index 0)    [floors + route mirror on its loop]
 	//  12. R1 reviewer (Quinn)       → submit_review(index 0)   [per-task floored verdict]
 	//  13. V1 verify coordinator     → verify_artifact()        [cold clean-room verify, real]
-	//  14. PR1 delivery coordinator  → open_pr()                [record pr.ref — the PR]
+	//      (delivery is a COMPONENT now — the delivery route publishes it, no model turn)
 	// Turns 8-10 are ONE developer loop: apply_patch and measure_task no longer StopLoop, so
 	// under tool_choice=auto the loop continues; her apply_patch AND measure_task turns both
 	// guard on her own prompt (journeyDeveloperMarker), and turn 10 finds no matching fixture
@@ -166,9 +165,10 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
 	// her loop (StatusComplete → outcome=success). The route rules then chain the rest with NO
 	// model turns of their own: floors terminal → floors route (06a advance) spawns Quinn →
-	// review route (07a approved) spawns verify → delivery route (08a coherent) forces open_pr.
-	// 13 tool fixtures drive 14 model turns (turn 10 consumes no fixture). An unscripted turn
-	// returns mockllm.UnmatchedSentinel, failing loudly not green.
+	// review route (07a approved) spawns verify → delivery route (08a coherent) PUBLISHES the
+	// delivery-station component (R6 — a component, not a paid open_pr turn). 12 tool fixtures
+	// drive 13 model turns (turn 10 consumes no fixture). An unscripted turn returns
+	// mockllm.UnmatchedSentinel, failing loudly not green.
 	mock := mockllm.New(
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
@@ -231,10 +231,9 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 			Marker: journeyVerifyMarker,
 			Tool:   &mockllm.ToolCall{Name: "verify_artifact", Args: map[string]any{}},
 		},
-		mockllm.Fixture{
-			Marker: journeyOpenPRMarker,
-			Tool:   &mockllm.ToolCall{Name: "open_pr", Args: map[string]any{}},
-		},
+		// Delivery is a publish-triggered COMPONENT now (R6, group 6): the delivery route
+		// (dev-from-task/08a) fires a plain `publish` to the delivery-station component, which
+		// records pr.ref with ZERO model turns — so there is no open_pr fixture to script.
 	)
 	if err := mock.Start(); err != nil {
 		t.Fatalf("start mock LLM: %v", err)
@@ -437,25 +436,25 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Station 15 — the ISSUE→PR ARC CONNECTS end-to-end. The DELIVERY ROUTE (dev-from-task/08a)
 	// fires ON THE RUN (delivery is terminal, so it routes on run facts directly — no loop, no
 	// mirror, no check_coherence tool): because verify.result=pass AND review.verdict.0=approved
-	// AND openspec.validated present, it forces open_pr, which records pr.ref. This is the
-	// bridge proof's terminal: under the mock, an issue drove all the way to a reviewed,
-	// clean-room-verified PR — the rail CONNECTS (not a completeness claim). Assert pr.ref is
-	// present (an M0 local-delivery stub — the real forge-io PR is a later group; the gate
-	// genuinely passed, only the delivery target is stubbed). Red-first: break any signal
-	// (verify/validate/review) and the delivery route blocks (08b parks) instead of delivering.
+	// AND openspec.validated present, it PUBLISHES the delivery-station COMPONENT (R6), which
+	// records pr.ref with zero model turns. This is the bridge proof's terminal: under the mock,
+	// an issue drove all the way to a reviewed, clean-room-verified PR — the rail CONNECTS (not a
+	// completeness claim). Assert pr.ref is present (an M0 local-delivery stub — the real forge-io
+	// PR is a later group; the gate genuinely passed, only the delivery target is stubbed).
+	// Red-first: break any signal (verify/validate/review) and the delivery route blocks (08b
+	// parks) instead of delivering; disable the delivery-station component and pr.ref never lands.
 	requirePRDelivered(ctx, t, runEntityID)
-	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and open_pr recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
-	// Exactly fourteen model turns drove the FULL arc. The route rules (floors 06a advance,
+	// Exactly thirteen model turns drove the FULL arc. The route rules (floors 06a advance,
 	// review 07a approved, delivery 08a coherent) chain the stations with NO model turns of
-	// their own — they compose the route from harness-stamped facts (the reshape deleted the
-	// check_gate/check_coherence forced turns and the separate measure loop; Amelia's in-loop
-	// measure + her terminal completion turn net to the same count). Turns: C1, C2, A1, V1,
-	// P1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, F1 floors, R1 review, V verify,
-	// PR1 open_pr = 14. A spurious re-spawn (a route re-firing, a second open_pr) or an
-	// unscripted turn would push this past 14.
-	if got := mock.RequestCount(); got != 14 {
-		t.Fatalf("expected exactly 14 model turns (…, Amelia's 3-turn loop, F1 floors, R1 review, V verify, PR1 open_pr), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
+	// their own — they compose the route from harness-stamped facts, and delivery is now a
+	// publish-triggered component (R6), not a forced open_pr turn (the reshape deleted the
+	// check_gate/check_coherence forced turns and the separate measure loop). Turns: C1, C2, A1,
+	// V1, P1, PS, C3, Amelia-apply, Amelia-measure, Amelia-stop, F1 floors, R1 review, V verify
+	// = 13. A spurious re-spawn (a route re-firing) or an unscripted turn would push this past 13.
+	if got := mock.RequestCount(); got != 13 {
+		t.Fatalf("expected exactly 13 model turns (…, Amelia's 3-turn loop, F1 floors, R1 review, V verify; delivery is a component, not a turn), got %d — extra turns indicate a re-spawn/loop, an errant route, or an unscripted turn", got)
 	}
 }
 

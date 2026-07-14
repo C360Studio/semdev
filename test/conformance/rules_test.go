@@ -70,6 +70,35 @@ func (r ruleFile) firesTransition() bool {
 	return false
 }
 
+// publishesTo reports whether the rule has a plain `publish` action (the R6
+// deterministic-station dispatch mechanism — distinct from publish_agent, which
+// spawns a model loop) to the given subject.
+func (r ruleFile) publishesTo(subject string) bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "publish" && a.Subject == subject {
+			return true
+		}
+	}
+	return false
+}
+
+// markerBeforeStationPublish reports whether the fired-once marker add_triple
+// precedes the FIRST `publish` action — the same SB7 restart-safety ordering as
+// markerBeforePublish, but for the R6 publish→component station path (a publish
+// failure must leave the run stuck-toward-human, not duplicable).
+func (r ruleFile) markerBeforeStationPublish(marker string) bool {
+	markerIdx, publishIdx := -1, -1
+	for i, a := range r.OnEnter {
+		if markerIdx == -1 && a.Type == "add_triple" && a.Predicate == marker {
+			markerIdx = i
+		}
+		if publishIdx == -1 && a.Type == "publish" {
+			publishIdx = i
+		}
+	}
+	return markerIdx != -1 && publishIdx != -1 && markerIdx < publishIdx
+}
+
 // clearsPredicate reports whether the rule removes a predicate (the resume-from-
 // park rule clears run.awaiting_human, exempting it from the park-exclusion pin).
 func (r ruleFile) clearsPredicate(predicate string) bool {
@@ -704,8 +733,8 @@ func TestDeliveryRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := pr.condition("openspec.validated"); !ok || c.Operator != "length_gt" {
 		t.Errorf("delivery-open-pr must require openspec.validated present (length_gt 0; a revision-match eq lands with #519's .value), got %+v", c)
 	}
-	if !pr.forcesFunction("open_pr") || !pr.hasAbsenceGuard(marker) || !pr.markerBeforePublish(marker) {
-		t.Error("delivery-open-pr must force open_pr and be self-extinguishing via a RUN-scoped delivery.routed BEFORE the publish (open_pr is not idempotent)")
+	if !pr.publishesTo("component.delivery-station.dispatch") || !pr.hasAbsenceGuard(marker) || !pr.markerBeforeStationPublish(marker) {
+		t.Error("delivery-open-pr must publish the delivery station (component.delivery-station.dispatch, R6) and be self-extinguishing via a RUN-scoped delivery.routed BEFORE the publish (delivery is not idempotent)")
 	}
 
 	park, ok := rules["dev_from_task_delivery_park"]
@@ -720,6 +749,43 @@ func TestDeliveryRouteTotalityAndSelfExtinguish(t *testing.T) {
 	}
 	if !park.hasAbsenceGuard(marker) {
 		t.Errorf("delivery-park must self-extinguish via %s (shared with the coherent route; delivery is terminal so a run-scoped guard is correct)", marker)
+	}
+}
+
+// TestDeliveryRoutedWithoutResultIsAKnownGap PINS the R6 station "routed-without-result"
+// wedge (G6 — pin the failure shape when a fix is deliberately deferred). The delivery route
+// (08a) stamps its self-extinguish delivery.routed marker BEFORE it publishes the
+// delivery-station component; if that component then fails persistently (after the base's
+// bounded retry), pr.ref never lands. Because the marker is set and rules are EDGE-triggered,
+// nothing re-triggers, and no rule reconciles "delivery.routed set ∧ pr.ref absent" into a
+// park (08b parks only on verify.result=fail) — the run does not auto-park at M0. This is a
+// deliberate deferral to R8/group 8 (restart-safe reconstruction + effect idempotency).
+//
+// TRIPWIRE: this asserts the gap STILL EXISTS. When group 8 adds the reconciliation rule (a
+// park gated on delivery.routed-present ∧ pr.ref-absent), this FAILS — prompting removal of
+// the tripwire and of the honest-gap comments in internal/station/station.go, 08a's metadata,
+// and internal/vocab/vocab.go.
+func TestDeliveryRoutedWithoutResultIsAKnownGap(t *testing.T) {
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		routedPresent, prAbsent := false, false
+		for _, c := range r.Conditions {
+			if c.Field == "delivery.routed" && c.Operator == "length_gt" {
+				routedPresent = true
+			}
+			if c.Field == "pr.ref" && c.Operator == "length_eq" {
+				prAbsent = true
+			}
+		}
+		if routedPresent && prAbsent {
+			t.Errorf("rule %q reconciles delivery.routed-set ∧ pr.ref-absent — the R8/group-8 routed-without-result fix appears to have LANDED; remove this known-gap tripwire and the honest-gap comments in internal/station/station.go, configs/rules/dev-from-task/08a-delivery-open-pr.json, and internal/vocab/vocab.go", r.ID)
+		}
 	}
 }
 
@@ -757,24 +823,31 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 	}
 }
 
-// open_pr is NON-IDEMPOTENT (a second spawn = a duplicate PR), so ONLY the coherent
-// delivery route (dev-from-task/08a) may force it.
-func TestOnlySanctionedOpenPRSpawners(t *testing.T) {
+// Delivery is NON-IDEMPOTENT (a second dispatch = a duplicate PR at M2), so ONLY the
+// coherent delivery route (dev-from-task/08a) may trigger it — and since delivery is a
+// publish-triggered COMPONENT now (R6), no rule may force the open_pr TOOL as a model
+// turn. This pin covers both: exactly one publisher of the delivery station, and zero
+// forced open_pr turns.
+func TestOnlySanctionedDeliveryPublishers(t *testing.T) {
 	rules, err := loadRules(repoRoot(t))
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
-	var spawners []string
+	const deliveryStationSubject = "component.delivery-station.dispatch"
+	var publishers []string
 	for _, r := range rules {
 		if r.forcesFunction("open_pr") {
-			spawners = append(spawners, r.ID)
+			t.Errorf("rule %q forces the open_pr tool as a model turn — delivery is a deterministic publish-triggered component (R6); no rule may spawn a model call to deliver", r.ID)
+		}
+		if r.publishesTo(deliveryStationSubject) {
+			publishers = append(publishers, r.ID)
 			if r.ID != "dev_from_task_delivery_open_pr" {
-				t.Errorf("rule %q forces open_pr but is not the sanctioned spawner — open_pr is non-idempotent; ONLY the coherent delivery route (08a) may force it", r.ID)
+				t.Errorf("rule %q publishes the delivery station but is not the sanctioned publisher — delivery is non-idempotent; ONLY the coherent delivery route (08a) may publish it", r.ID)
 			}
 		}
 	}
-	if !slices.Contains(spawners, "dev_from_task_delivery_open_pr") {
-		t.Error("the coherent delivery route (08a) does not force open_pr — the delivery path is broken")
+	if !slices.Contains(publishers, "dev_from_task_delivery_open_pr") {
+		t.Error("the coherent delivery route (08a) does not publish the delivery station — the delivery path is broken")
 	}
 }
 

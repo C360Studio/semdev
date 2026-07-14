@@ -72,6 +72,25 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInternal, "open_pr: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
 	}
 
+	ref, err := Deliver(ctx, e.writer, runEntityID)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "open_pr: stamp %s on %s: %v", RefPredicate, runEntityID, err)
+	}
+
+	e.logger.Info("open_pr recorded the delivery reference",
+		slog.String("run_entity_id", runEntityID), slog.String("pr_ref", ref))
+
+	summary, _ := json.Marshal(map[string]any{"pr_ref": ref, "delivered": true})
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+}
+
+// Deliver stamps pr.ref (the M0 deterministic LOCAL delivery reference) on the run
+// entity and returns the ref. It is the shared delivery core: the transitional
+// open_pr TOOL calls it (above), and the delivery STATION component (R6) calls it
+// off a rule publish — one writer of pr.ref (G5, Source == open-pr), one place the
+// M0 stub form lives, so the tool and the component cannot drift. It fires no
+// lifecycle transition (G2); a rule reading pr.ref closes the run.
+func Deliver(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string) (string, error) {
 	// The M0 delivery reference is deterministic from the run — a stub proving the coherent
 	// run reached delivery; the M2 forge-io adapter replaces it with a live PR URL.
 	ref := localStubPrefix + runEntityID
@@ -83,15 +102,10 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	if err := e.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil); err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "open_pr: stamp %s on %s: %v", RefPredicate, runEntityID, err)
+	if err := writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil); err != nil {
+		return "", err
 	}
-
-	e.logger.Info("open_pr recorded the delivery reference",
-		slog.String("run_entity_id", runEntityID), slog.String("pr_ref", ref))
-
-	summary, _ := json.Marshal(map[string]any{"pr_ref": ref, "delivered": true})
-	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+	return ref, nil
 }
 
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {

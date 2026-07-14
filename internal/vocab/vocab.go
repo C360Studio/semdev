@@ -46,9 +46,11 @@ var Predicates = []Predicate{
 	{"run.dev_kickoff", "dev-rewake-rule", "dev-from-task", m0},
 	{"run.projection_kickoff", "dev-projection-rule", "dev-from-task", m0},
 	// pr.ref is the delivered PR reference. Its writer was reconciled at 8D from the
-	// placeholder pr-delivery-adapter (which never existed) to open-pr, the tool that
-	// actually stamps it (an M0 local-delivery stub; the M2 forge-io adapter replaces it
-	// with a live PR URL — same predicate, same single writer role).
+	// placeholder pr-delivery-adapter (which never existed) to open-pr. Since group 6 (R6)
+	// the DELIVERY-STATION component stamps it (off the delivery route's publish) via the
+	// SAME openpr.Deliver core the tool used — same Source open-pr, so this single-writer
+	// declaration is unchanged (an M0 local-delivery stub; the M2 forge-io adapter replaces
+	// it with a live PR URL).
 	{"pr.ref", "open-pr", "forge-io", m0},
 	{"openspec.change.*", "create-change-author-tool", "openspec-io", m0},
 	{"openspec.spec.*", "brownfield-spec-projector", "openspec-io", m0},
@@ -151,9 +153,11 @@ var Predicates = []Predicate{
 	// attempt re-arms it, so retries route for free. Loop-scoped, mutually-exclusive routes.
 	{"route.routed", "dev-route-rule", "dev-from-task", reshape},
 	// delivery.routed is the fired-once self-extinguish marker the two delivery routes
-	// (coherent→open_pr / blocked→park) stamp on the RUN — delivery is terminal (it never
-	// repeats), so a run-scoped guard is correct (no per-attempt reset needed), and it is
-	// load-bearing for the coherent route since open_pr is not idempotent.
+	// (coherent→publish the delivery-station component / blocked→park) stamp on the RUN —
+	// delivery is terminal (it never repeats), so a run-scoped guard is correct (no
+	// per-attempt reset needed), and it is load-bearing for the coherent route since real
+	// delivery is not idempotent at M2. (See the 08a KNOWN M0 GAP: a persistent station
+	// fault leaves this set with pr.ref absent and no auto-park — reconciled by R8/group 8.)
 	{"delivery.routed", "dev-route-rule", "dev-from-task", reshape},
 }
 

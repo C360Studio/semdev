@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/c360studio/semstreams v1.0.0-beta.146
 	github.com/google/go-cmp v0.7.0
+	github.com/nats-io/nats.go v1.48.0
 	golang.org/x/tools v0.43.0
 )
 
@@ -66,7 +67,6 @@ require (
 	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/nats-io/nats.go v1.48.0 // indirect
 	github.com/nats-io/nkeys v0.4.11 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

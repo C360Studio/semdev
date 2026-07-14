@@ -42,7 +42,7 @@
 
 - [ ] 6.1 Floors component: subscribes to the developer-terminal publish, evaluates the committed snapshot, stamps `floor.finding` (framework-alignment note + registry entry; delete the forced-turn relay)
 - [ ] 6.2 Verify component: fires on approved review verdict, runs the clean-room proof from clone-at-SHA, stamps `verify.result` (delete the forced-turn relay)
-- [ ] 6.3 Delivery component: fires on the delivery rule's publish, idempotent `open_pr` (delete the forced-turn relay)
+- [x] 6.3 Delivery component: fires on the delivery rule's publish, records `pr.ref` via the shared `openpr.Deliver` core (delete the forced-turn relay). This slice also establishes the reusable `internal/station` generic base (Discoverable + LifecycleComponent, core-NATS subscribe, dispatch decode, bounded idempotent retry, component-lifetime handler context, panic recovery) that 6.1/6.2/6.4 copy. `pr.ref` is M0-idempotent (latest-wins); the replay-safe existing-PR lookup is task 7.4 (R8), and the routed-without-result wedge is pinned as a known gap deferred to R8 (`TestDeliveryRoutedWithoutResultIsAKnownGap`)
 - [ ] 6.4 Projection + validation + provisioning conversions: same pattern, one commit each; confirm `issue_intake` stays a Sarah decide (design open question)
 - [ ] 6.5 Model-turn census pin: only author/developer/reviewer spawns remain in the rule packs; deterministic-station failure parks (fail-closed test per station)
 

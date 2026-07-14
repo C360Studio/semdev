@@ -59,6 +59,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 
 | Name | Kind | Capability | Alignment note |
 |------|------|------------|----------------|
+| `delivery-station` | component | forge-io | `deterministic-station-component` |
 | `create_change` | tool | openspec-io | `create-change-author-tool` |
 | `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
 | `write_change` | tool | openspec-io | `write-change-workspace-tool` |
