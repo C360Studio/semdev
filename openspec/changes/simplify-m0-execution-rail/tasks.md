@@ -69,6 +69,6 @@
 - [ ] 10.1 Journey station: fail-then-pass (retry actually driven e2e — the standing MEDIUM carry-forward)
 - [ ] 10.2 Journey station: reviewer rejection re-entry (Quinn rejects once, Amelia's fresh attempt carries the findings)
 - [ ] 10.3 Journey station: budget exhaustion → park toward the human
-- [ ] 10.4 Docker-gated restart-recovery station: kill the process mid-run, restart, run completes
+- [ ] 10.4 Docker-gated restart-recovery station (DEFERRED with the R8 recovery park — both blocked on the upstream `on_recovery` routing gap, `TestTripwireOnRecoveryRoutingGate`): once the gate fix lands, kill the process mid-run, restart over the SAME durable NATS/JetStream, and assert the restart-recovery park FIRED (`run.awaiting_human` set) with NO false green (no `verify.result`/`pr.ref`) — park-not-completes, never "run completes." Until then a restarted in-flight run wedges (documented M0 gap)
 - [ ] 10.5 Docs honesty pass (G10): brief/status restate M0 completion criteria (bridge proof ≠ complete; real-forge evidence required); document the gated-DAG M1 walker seam; update CLAUDE.md status
 - [ ] 10.6 Full ladder: mock journey green, docker-gated suites green, `openspec validate --strict` green on all three changes; semstreams-reviewer pass over the reshaped rail

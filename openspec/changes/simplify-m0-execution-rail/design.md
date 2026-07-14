@@ -208,18 +208,65 @@ model — dishonest cost accounting and context-starved by construction.
 
 ### R8. Restart-safe, idempotent provisioning and effects
 
-- `sandbox.ready` grows the reconstruction inputs as facts: source ref, image
-  digest (already digest-pinned), checkout base commit.
-- Every resolver that today errors on an empty process-local registry
-  (`Checkouts.Root`, `Sandboxes.Resolve`) instead **reconstructs**: clone at
-  `attempt.commit` (or base), re-`Up` the container from the pinned digest —
-  idempotent, derived only from durable facts.
-- `provision_sandbox`'s `alreadyReady` early-return checks liveness (container
-  actually running, checkout actually present) and reconstructs on miss
-  instead of no-op'ing — the wedge documented at `provisionsandbox.go:182`
-  dies.
+**As-built decision: M0 does NOT reconstruct. The correct posture is a rule-native
+fail-closed park — but that park is BLOCKED on an upstream framework gap (below),
+so at M0 a restarted in-flight run WEDGES: a known, documented gap, not a working
+capability.** The original bullets below proposed reconstructing the
+checkout/container from durable facts. Investigation against semstreams beta.146
+showed reconstruction is both impossible-to-do-honestly and unnecessary at M0 — and
+that the honest park replacement is itself not yet expressible in the engine:
+
+- A run's live state is process-local in three places — the agentic loop's
+  conversation state, the on-disk checkout (a temp dir holding the applied
+  attempt's git objects), and the warm container. None survive a restart. The
+  durable facts (`measurement.result`, `floor.finding`, `attempt.commit`,
+  `verify.result`) are *pointers* into that lost state. The applied diff is not a
+  durable fact, so M0 reconstruction could at most re-materialize the **pristine
+  base** — leaving a run whose facts assert a green the tree no longer embodies:
+  the exact semspec false-green the reshape exists to kill.
+- On a normal restart the framework's rule engine is edge-triggered and does NOT
+  re-fire a rule that was already matching (`prevState.IsMatching=true` →
+  `TransitionNone`), so the resolvers are never even *called* — the run freezes.
+  The only reliable post-restart hook is the framework's `on_recovery` bootstrap
+  fork, which fires once for a rule that was matching before the crash.
+- **The correct M0 posture is a rule-native fail-closed park** — a rule with an
+  empty `on_enter` (so nothing fires during live operation, when a run is
+  `executing` its whole working life) and the park in `on_recovery` (which the
+  framework fires only on the post-restart bootstrap replay). A run that was
+  `executing`, not delivered, not already parked, would park toward the human on
+  the next boot: surfaced and honest, never silently wedged, never falsely
+  resumed. This would be a third realization of the single `run.awaiting_human`
+  park writer (G5); no Go reconciler/ticker (G2/B3/B7).
+- **BLOCKED ON UPSTREAM (semstreams engine gap, G2 path — not shippable at M0):**
+  that park is **inert** on semstreams beta.146. The wired rule Processor only
+  routes a rule to the stateful evaluator when it has a non-empty
+  `on_enter`/`on_exit`/`while_true` (`message_handler.go` `hasStatefulActions`
+  gate — it excludes `on_recovery`), so an `on_recovery`-only rule is never
+  evaluated: it persists no state during live operation and never fires
+  `on_recovery` on restart. A second issue compounds it — the stale-revision
+  guard (`stateful_evaluator.go`, `prevState.SourceRevision >= ev.Revision`)
+  likely suppresses the bootstrap recovery fork for an entity whose last write
+  triggered its last eval. There is **no** end-to-end test proving `on_recovery`
+  fires through the wired path. Per G2 (engine gap → file the upstream ask + park
+  toward the human, never a silent Go reconciler), this is filed upstream and
+  **deferred**, tripwired at `test/conformance/upstream_asks_test.go`
+  (`TestTripwireOnRecoveryRoutingGate`). **Until the fix lands, a restarted
+  in-flight run WEDGES — a known, documented M0 gap, not a claimed capability.**
+  A Go boot-time reconciler that swept durable state to recover runs would be
+  exactly the B3/B7 the constitution bars, so it is deliberately NOT built.
 - `open_pr` becomes idempotent: it looks up an existing delivery for the run
-  (branch/PR marker) before creating, so a replay never double-opens.
+  before creating, so a replay never double-opens (real payoff at M2 real-forge;
+  at M0 the local-delivery stub is already upsert-idempotent). This half of R8 is
+  NOT blocked and ships.
+
+**Deferred to M2 (stated non-claim, not faked):** genuine attempt-level recovery
+— `Checkouts.Root` / `Sandboxes.Resolve` reconstructing a checkout at
+`attempt.commit` and re-`Up`ping the container — requires a **persistent git
+remote that survives process death** (the same M2 work that replaces
+`StaticSource` with a per-run `--recursive` PR clone). Until that precondition
+holds, reconstruction cannot restore the applied attempt, so M0 parks instead.
+The original reconstruction bullets (checkout/sandbox reconstruction, `alreadyReady`
+liveness) belong to that M2 seam.
 
 ### R9. Honestly single-task at M0
 
@@ -232,11 +279,18 @@ nobody copies rule chains per task index.
 
 `journey_test.go` is renamed a **bridge proof** and extended with the
 previously-missing stations: fail-then-pass (retry actually driven e2e),
-rejection re-entry (Quinn rejects once), budget exhaustion → park, and a
-docker-gated restart-recovery station (kill the process mid-run, restart,
-run completes). Forge delivery in e2e speaks the real forge API against a
-protocol-faithful local double; **M0-complete additionally requires one
-recorded real-forge run in the evidence ledger** — the stub
+rejection re-entry (Quinn rejects once), and budget exhaustion → park. **The
+docker-gated restart-recovery station is DEFERRED with the R8 recovery park**
+(both blocked on the same upstream `on_recovery` routing gap): once the framework
+gate fix lands (the `TestTripwireOnRecoveryRoutingGate` tripwire fires), the
+station kills the process mid-run, restarts over the SAME durable NATS/JetStream
+(the buckets must survive — the inverse of the usual `nats:reset`), and asserts
+the restart-recovery park fired (`run.awaiting_human` set with the restart reason)
+with NO false green (no `verify.result`, no `pr.ref`). Until then a restarted
+in-flight run wedges — honestly documented, never claimed as "completes." Forge
+delivery in e2e speaks the real forge API against a protocol-faithful local
+double; **M0-complete additionally requires one recorded real-forge run in the
+evidence ledger** — the stub
 `local-delivery:<run>` satisfies nothing.
 
 ### R11. semstreams beta.141 → beta.146; upstream asks tracked, non-blocking
@@ -244,9 +298,15 @@ recorded real-forge run in the evidence ledger** — the stub
 The bump rides this change (despawn primitive, lifecycle idempotency,
 `$entity.lifecycle.*`). Asks: #519 (scalar `.value`; fix drafted upstream) —
 interim constant budget; #528 (per-spawn `max_iterations`) — interim uniform
-component cap; #529 (uniform exhaustion reason) — interim route-on-outcome.
-Each interim carries a tripwire test that fails when the capability lands, so
-the upgrade is prompted, not forgotten.
+component cap; #529 (uniform exhaustion reason) — interim route-on-outcome; and
+the **`on_recovery` routing gap** (R8/group 7) — the rule Processor's
+`hasStatefulActions` gate (`message_handler.go`) excludes `on_recovery`, so an
+`on_recovery`-only park is never evaluated; compounded by the stale-revision guard
+suppressing the bootstrap recovery fork. Interim: the restart-recovery park is
+DEFERRED and a restarted in-flight run wedges (a documented M0 gap, NOT a Go
+reconciler — G2). Each interim carries a tripwire test that fails when the
+capability lands, so the upgrade is prompted, not forgotten
+(`TestTripwireOnRecoveryRoutingGate` for this one).
 
 ### R12. Vocabulary diet (G9)
 

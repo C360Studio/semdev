@@ -1,6 +1,9 @@
 package conformance
 
 import (
+	"go/build"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -193,4 +196,113 @@ func TestTripwire529UniformExhaustionReason(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestTripwireOnRecoveryRoutingGate — semstreams on_recovery routing gap (R8;
+// design group 7). The M0-correct posture for a restarted, still-in-flight run is
+// a rule-native FAIL-CLOSED PARK: a rule with an EMPTY on_enter (so nothing fires
+// during live operation, when a run is `executing` its whole working life) and the
+// park in `on_recovery` (which the framework's bootstrap-recovery fork fires only
+// after a restart, for a rule that was matching before the crash).
+//
+// LIMITATION (beta.146): that rule is INERT as wired. The rule Processor routes a
+// rule to the stateful evaluator (where the on_recovery fork lives) ONLY when it
+// has a non-empty on_enter/on_exit/while_true — the `hasStatefulActions` gate in
+// processor/rule/message_handler.go EXCLUDES on_recovery. So an on_recovery-only
+// rule is never evaluated: it persists no state during live operation and never
+// fires on_recovery on restart. (A second issue compounds it: the stale-revision
+// guard in stateful_evaluator.go, `prevState.SourceRevision >= ev.Revision`, likely
+// suppresses the bootstrap recovery fork even if the gate were fixed — verify on a
+// real restart when doing the upgrade.) There is no end-to-end test upstream proving
+// on_recovery fires through the wired path. Per G2 (engine gap → file the upstream
+// ask + park toward the human, never a silent Go reconciler), the restart-recovery
+// park is DEFERRED and a restarted in-flight run wedges — a known, documented M0 gap.
+//
+// MECHANICAL UPGRADE when this goes RED: the gate now admits on_recovery. Add the
+// run-lifecycle recovery-park rule (on_enter empty, on_recovery stamps
+// run.awaiting_human + posts user.response, guarded on phase==executing / pr.ref
+// absent / awaiting_human absent), re-add its shape pin + the sanctioned-park-writer
+// entry, and drive the docker-gated restart-recovery station (design R10). First
+// re-verify the stale-revision-guard interaction on a real restart.
+//
+// This tripwire reads the ACTUAL compiled framework source (the module cache) rather
+// than reflecting, because the gate is an unexported local in message_handler.go with
+// no exported surface. It FAILS LOUD if it cannot locate/parse the gate (so a moved
+// file or refactor surfaces as a visible re-anchor task, never a silent green).
+func TestTripwireOnRecoveryRoutingGate(t *testing.T) {
+	src := readSemstreamsSource(t, "processor", "rule", "message_handler.go")
+
+	// The routing gate. In beta.146 it reads:
+	//   hasStatefulActions := hasDefinition && (len(ruleDef.OnEnter) > 0 || len(ruleDef.OnExit) > 0 || len(ruleDef.WhileTrue) > 0)
+	// We anchor on the gate assignment and assert it does NOT yet consider OnRecovery.
+	const anchor = "hasStatefulActions :="
+	var gateLines []string
+	for _, line := range strings.Split(src, "\n") {
+		if strings.Contains(line, anchor) {
+			gateLines = append(gateLines, strings.TrimSpace(line))
+		}
+	}
+	if len(gateLines) == 0 {
+		t.Fatalf("could not find the %q routing gate in message_handler.go — the framework "+
+			"refactored the rule-dispatch path; re-anchor this tripwire against the new gate "+
+			"before trusting it (the on_recovery routing gap must be re-verified by hand)", anchor)
+	}
+	// Sanity: the gate still gates on the stateful lists we expect (a floor — if these
+	// vanished the gate changed shape and the tripwire's premise is stale).
+	for _, g := range gateLines {
+		if !strings.Contains(g, "OnEnter") {
+			t.Fatalf("the %q gate no longer references OnEnter (%q) — the gate changed shape; "+
+				"re-verify the on_recovery routing gap by hand before trusting this pin", anchor, g)
+		}
+	}
+	for _, g := range gateLines {
+		if strings.Contains(g, "OnRecovery") {
+			t.Fatalf("TRIPWIRE FIRED (on_recovery routing gap): message_handler.go's "+
+				"hasStatefulActions gate now admits OnRecovery (%q). A restarted in-flight run "+
+				"can finally park rule-natively. Do the mechanical upgrade — add the "+
+				"run-lifecycle recovery-park rule (on_enter empty + on_recovery park), re-add its "+
+				"shape pin + sanctioned-park-writer entry, and drive the docker restart-recovery "+
+				"station (R10). FIRST re-verify the stale-revision guard fires the recovery fork "+
+				"on a real restart. Then remove this pin.", g)
+		}
+	}
+}
+
+// readSemstreamsSource reads a source file from the compiled semstreams module in the
+// module cache (the exact version go.mod pins), so a source-anchored tripwire inspects
+// the framework code that actually runs. Fails loud (t.Fatal) on any miss.
+func readSemstreamsSource(t *testing.T, parts ...string) string {
+	t.Helper()
+	const modPath = "github.com/c360studio/semstreams"
+
+	// Resolve the pinned version from the repo's go.mod (the require line).
+	goMod, err := os.ReadFile(filepath.Join(repoRoot(t), "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	version := ""
+	for _, line := range strings.Split(string(goMod), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) >= 2 && f[0] == modPath {
+			version = f[1]
+			break
+		}
+	}
+	if version == "" {
+		t.Fatalf("could not find the %s require version in go.mod — re-anchor this tripwire", modPath)
+	}
+
+	// Locate the module cache. GOMODCACHE wins; else <GOPATH>/pkg/mod.
+	gomodcache := os.Getenv("GOMODCACHE")
+	if gomodcache == "" {
+		gomodcache = filepath.Join(build.Default.GOPATH, "pkg", "mod")
+	}
+	full := filepath.Join(append([]string{gomodcache, modPath + "@" + version}, parts...)...)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatalf("read semstreams source %s: %v — the module cache layout changed or the module "+
+			"is vendored; re-anchor this tripwire so the on_recovery routing gap is not silently "+
+			"lost", full, err)
+	}
+	return string(data)
 }
