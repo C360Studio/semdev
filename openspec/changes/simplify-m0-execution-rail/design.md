@@ -255,10 +255,20 @@ that the honest park replacement is itself not yet expressible in the engine:
   in-flight run WEDGES — a known, documented M0 gap, not a claimed capability.**
   A Go boot-time reconciler that swept durable state to recover runs would be
   exactly the B3/B7 the constitution bars, so it is deliberately NOT built.
-- `open_pr` becomes idempotent: it looks up an existing delivery for the run
-  before creating, so a replay never double-opens (real payoff at M2 real-forge;
-  at M0 the local-delivery stub is already upsert-idempotent). This half of R8 is
-  NOT blocked and ships.
+- `open_pr` (the `openpr.Deliver` core) becomes idempotent: it reads the run's
+  existing `pr.ref` before creating and, if one is present, returns the **stored**
+  ref value (via `changefacts.Reader`, not reconstructed — a live PR URL is not
+  derivable from the run) without re-stamping, so a replay never double-opens (real
+  payoff at M2 real-forge; at M0 the local-delivery stub is already
+  upsert-idempotent). A present-but-malformed `pr.ref` fails closed rather than
+  re-creating. This closes the **sequential** replay window (restart, re-fired
+  rule, retried station `Handle`) — the half of R8 that is NOT blocked, and ships.
+  **M2 caveat (group 8):** the read-before-create guard does not close a
+  **concurrent** double-fire (two `Deliver`s both read "absent", both create);
+  harmless at M0 (deterministic ref + latest-wins converge on one triple), but the
+  side-effecting M2 forge create must add forge-level idempotency (an idempotency
+  key, or query-existing-PR-by-head-branch) on top of this guard — it inherits no
+  concurrency safety from the sequential guard alone.
 
 **Deferred to M2 (stated non-claim, not faked):** genuine attempt-level recovery
 — `Checkouts.Root` / `Sandboxes.Resolve` reconstructing a checkout at

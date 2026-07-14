@@ -51,7 +51,7 @@
 - [ ] 7.1 Red-first pin: restart after `sandbox.ready` currently wedges the run (docker-gated reproduction of the provisionsandbox.go:182 no-op)
 - [ ] 7.2 `sandbox.ready` carries reconstruction inputs (source ref, image digest, base commit) as facts
 - [ ] 7.3 Resolvers reconstruct idempotently from durable facts on missing process-local state: re-clone at `attempt.commit` (preserving committed attempt state), re-`Up` from the pinned digest; `alreadyReady` verifies liveness before no-op'ing
-- [ ] 7.4 Idempotent delivery: `open_pr` looks up the run's existing PR before creating (replay pin: no double-open)
+- [x] 7.4 Idempotent delivery: `open_pr` looks up the run's existing PR before creating (replay pin: no double-open)
 
 ## 8. Real forge delivery
 

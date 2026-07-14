@@ -19,8 +19,10 @@ package openpr
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
@@ -39,14 +41,55 @@ const RefPredicate = "pr.ref"
 // adapter replaces this with the live PR URL at M2.
 const localStubPrefix = "local-delivery:"
 
-// Deliver stamps pr.ref (the M0 deterministic LOCAL delivery reference) on the run
+// Deliver records pr.ref (the M0 deterministic LOCAL delivery reference) on the run
 // entity and returns the ref. It is the shared delivery core: the delivery STATION
 // component (R6, internal/station/delivery) calls it off a rule publish — the single
 // writer of pr.ref (G5, Source == open-pr), the one place the M0 stub form lives. It
 // fires no lifecycle transition (G2); a rule reading pr.ref closes the run.
-func Deliver(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string) (string, error) {
-	// The M0 delivery reference is deterministic from the run — a stub proving the coherent
-	// run reached delivery; the M2 forge-io adapter replaces it with a live PR URL.
+//
+// Idempotent delivery (R8): Deliver reads the run's existing pr.ref BEFORE creating
+// one, so a replay — a restart mid-arc, a re-fired delivery rule, a retried station
+// Handle — returns the SAME ref and never opens a second PR. At M0 the create step is
+// a KV upsert (already idempotent, latest-wins) so the guard is belt-and-suspenders;
+// its real payoff is M2, where create becomes a side-effecting forge "open PR" call
+// and a double fire would open two PRs. Reading the STORED ref (via changefacts.Reader,
+// the value lane) rather than reconstructing it is what makes the guard M2-correct: a
+// live PR URL is not deterministic from the run, so a replay must return what was
+// recorded. The run entity always exists by delivery time; a read fault fails closed
+// (returned, not swallowed — never a false or duplicate delivery).
+func Deliver(ctx context.Context, reader changefacts.Reader, writer agentictools.OwnedFactWriter, runEntityID string) (string, error) {
+	existing, err := reader.ReadFacts(ctx, runEntityID, RefPredicate)
+	if err != nil {
+		return "", fmt.Errorf("open-pr: read existing delivery on %s: %w", runEntityID, err)
+	}
+	for _, tr := range existing {
+		// ReadFacts is prefix-scoped; require the EXACT predicate. The short-circuit is
+		// PRESENCE-based: any pr.ref on the run means this run was already delivered, so
+		// never reach the create branch (at M2 that would open a duplicate forge PR). A
+		// present pr.ref whose object is not a string is a corrupt delivery fact — fail
+		// CLOSED (the invariant is "never a false OR duplicate delivery") rather than fall
+		// through to create or return a stringified non-ref.
+		if tr.Predicate != RefPredicate {
+			continue
+		}
+		ref, ok := tr.Object.(string)
+		if !ok {
+			return "", fmt.Errorf("open-pr: existing %s on %s has a non-string object %T — "+
+				"cannot confirm the recorded delivery reference; failing closed rather than re-opening",
+				RefPredicate, runEntityID, tr.Object)
+		}
+		return ref, nil
+	}
+
+	// First delivery: form the M0 deterministic local reference and stamp it. The M2
+	// forge-io adapter replaces this create branch with a live PR "open" call; the
+	// read-existing guard above stays, so the M2 swap cannot regress idempotency. NOTE
+	// (group 8): the guard closes the SEQUENTIAL replay window (restart, re-fired rule,
+	// retried Handle), not a CONCURRENT double-fire — two Delivers can both read "absent"
+	// and both create. Harmless at M0 (deterministic ref + latest-wins ReplaceTriples
+	// converge on one triple); at M2 the side-effecting create must add forge-level
+	// idempotency (an idempotency key or query-existing-PR-by-head-branch) on top of this
+	// guard. Tracked in design R8.
 	ref := localStubPrefix + runEntityID
 	triple := message.Triple{
 		Subject:    runEntityID,
@@ -57,7 +100,7 @@ func Deliver(ctx context.Context, writer agentictools.OwnedFactWriter, runEntity
 		Confidence: 1.0,
 	}
 	if err := writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil); err != nil {
-		return "", err
+		return "", fmt.Errorf("open-pr: stamp %s on %s: %w", RefPredicate, runEntityID, err)
 	}
 	return ref, nil
 }

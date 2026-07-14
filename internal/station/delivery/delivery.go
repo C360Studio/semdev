@@ -10,9 +10,11 @@
 // route the coherence signals but cannot invoke the delivery Go, and a forced
 // model turn to call a deterministic tool is a paid call that decides nothing (the
 // ref is harness-formed, G3). The station pattern (internal/station) is the
-// framework-aligned answer. The delivery core (openpr.Deliver) is unchanged and
-// single-writer (pr.ref, Source open-pr, G5) — the tool and this component call the
-// same core so the M0 stub form cannot drift. Fires no lifecycle transition (G2).
+// framework-aligned answer. This station is the SOLE caller of the delivery core
+// (openpr.Deliver, the open_pr tool having been deleted at 6E); the core is the
+// single writer of pr.ref (Source open-pr, G5) and is idempotent — it reads the
+// run's existing pr.ref before creating, so a re-fired dispatch returns the same
+// ref and never re-opens (R8). Fires no lifecycle transition (G2).
 package delivery
 
 import (
@@ -21,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/openpr"
 	"github.com/c360studio/semstreams/component"
@@ -33,8 +36,11 @@ import (
 const ComponentName = "delivery-station"
 
 // handler stamps pr.ref for the coherent run named by the dispatch's firing
-// entity (the delivery rule fires on the RUN, so req.EntityID is the run).
+// entity (the delivery rule fires on the RUN, so req.EntityID is the run). It
+// carries the reader the delivery core uses to short-circuit a replay (R8
+// idempotency — read the run's existing pr.ref before creating one).
 type handler struct {
+	reader changefacts.Reader
 	writer agentictools.OwnedFactWriter
 	logger *slog.Logger
 }
@@ -47,7 +53,7 @@ type handler struct {
 // routed-without-result reconciliation is R8/group 8. pr.ref is a run-level fact,
 // so req.EntityID (the firing run) is the whole target.
 func (h *handler) Handle(ctx context.Context, req station.Request) error {
-	ref, err := openpr.Deliver(ctx, h.writer, req.EntityID)
+	ref, err := openpr.Deliver(ctx, h.reader, h.writer, req.EntityID)
 	if err != nil {
 		return fmt.Errorf("delivery-station: stamp %s on %s: %w", openpr.RefPredicate, req.EntityID, err)
 	}
@@ -74,7 +80,11 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "NATSClient required")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
-	h := &handler{writer: agentictools.NewNATSOwnedFactWriter(deps.NATSClient), logger: logger}
+	h := &handler{
+		reader: changefacts.NewNATSReader(deps.NATSClient),
+		writer: agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+		logger: logger,
+	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)
 }
 
