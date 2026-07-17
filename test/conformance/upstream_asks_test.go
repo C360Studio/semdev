@@ -198,73 +198,74 @@ func TestTripwire529UniformExhaustionReason(t *testing.T) {
 	}
 }
 
-// TestTripwireOnRecoveryRoutingGate — semstreams #530 (on_recovery routing gap;
-// R8, design group 7). The M0-correct posture for a restarted, still-in-flight run is
-// a rule-native FAIL-CLOSED PARK: a rule with an EMPTY on_enter (so nothing fires
-// during live operation, when a run is `executing` its whole working life) and the
-// park in `on_recovery` (which the framework's bootstrap-recovery fork fires only
-// after a restart, for a rule that was matching before the crash).
+// TestTripwireOnRecoveryRoutingGate — semstreams #530 (on_recovery routing gate;
+// R8, design group 7). Now a REGRESSION GUARD: the #530 gate fix LANDED in beta.147.
 //
-// LIMITATION (beta.146): that rule is INERT as wired. The rule Processor routes a
-// rule to the stateful evaluator (where the on_recovery fork lives) ONLY when it
-// has a non-empty on_enter/on_exit/while_true — the `hasStatefulActions` gate in
-// processor/rule/message_handler.go EXCLUDES on_recovery. So an on_recovery-only
-// rule is never evaluated: it persists no state during live operation and never
-// fires on_recovery on restart. (A second issue compounds it: the stale-revision
-// guard in stateful_evaluator.go, `prevState.SourceRevision >= ev.Revision`, likely
-// suppresses the bootstrap recovery fork even if the gate were fixed — verify on a
-// real restart when doing the upgrade.) There is no end-to-end test upstream proving
-// on_recovery fires through the wired path. Per G2 (engine gap → file the upstream
-// ask + park toward the human, never a silent Go reconciler), the restart-recovery
-// park is DEFERRED and a restarted in-flight run wedges — a known, documented M0 gap.
+// The M0-correct posture for a restarted, still-in-flight run is a rule-native
+// FAIL-CLOSED PARK: a rule with an EMPTY on_enter (so nothing fires during live
+// operation, when a run is `executing` its whole working life) and the park in
+// `on_recovery` (which the framework's bootstrap-recovery fork fires only after a
+// restart, for a rule that was matching before the crash).
 //
-// MECHANICAL UPGRADE when this goes RED: the gate now admits on_recovery. Add the
-// run-lifecycle recovery-park rule (on_enter empty, on_recovery stamps
-// run.awaiting_human + posts user.response, guarded on phase==executing / pr.ref
-// absent / awaiting_human absent), re-add its shape pin + the sanctioned-park-writer
-// entry, and drive the docker-gated restart-recovery station (design R10). First
-// re-verify the stale-revision-guard interaction on a real restart.
+// Through beta.146 that rule was INERT: the rule Processor routed a rule to the
+// stateful evaluator (where the on_recovery fork lives) ONLY on a non-empty
+// on_enter/on_exit/while_true — the gate EXCLUDED on_recovery. beta.147 fixed it: the
+// gate now delegates to the `hasStatefulRuleActions(ruleDef)` helper, which admits
+// `len(def.OnRecovery) > 0`, so an on_recovery-only park is finally routed. This test
+// flips to a REGRESSION GUARD: it asserts that helper still admits OnRecovery, and
+// FIRES if a future beta drops it (which would make the park inert again and silently
+// wedge a restarted run).
 //
-// This tripwire reads the ACTUAL compiled framework source (the module cache) rather
-// than reflecting, because the gate is an unexported local in message_handler.go with
-// no exported surface. It FAILS LOUD if it cannot locate/parse the gate (so a moved
-// file or refactor surfaces as a visible re-anchor task, never a silent green).
+// STILL UNVERIFIED (do NOT assume restart-recovery works end-to-end yet): the
+// COMPOUNDING stale-revision guard in stateful_evaluator.go
+// (`prevState.SourceRevision >= ev.Revision`) is UNCHANGED in beta.147 and may still
+// suppress the bootstrap recovery fork for an entity whose last live write triggered
+// its last eval. There is no upstream e2e proving on_recovery fires through the wired
+// path across a real restart. So the restart-recovery park + its docker station (design
+// R10, task 10.4) remain a FOLLOW-UP: build the run-lifecycle recovery-park rule
+// (on_enter empty, on_recovery stamps run.awaiting_human + posts user.response, guarded
+// on phase==executing / pr.ref absent / awaiting_human absent) + its shape pin + the
+// sanctioned-park-writer entry, and FIRST prove on a real restart that the recovery fork
+// actually fires past the stale-revision guard.
+//
+// It reads the ACTUAL compiled framework source (the module cache) rather than
+// reflecting, because the gate helper is unexported. It FAILS LOUD if it cannot locate
+// the helper (a moved/renamed gate surfaces as a visible re-anchor task, never a silent
+// green that hides a #530 regression).
 func TestTripwireOnRecoveryRoutingGate(t *testing.T) {
 	src := readSemstreamsSource(t, "processor", "rule", "message_handler.go")
 
-	// The routing gate. In beta.146 it reads:
-	//   hasStatefulActions := hasDefinition && (len(ruleDef.OnEnter) > 0 || len(ruleDef.OnExit) > 0 || len(ruleDef.WhileTrue) > 0)
-	// We anchor on the gate assignment and assert it does NOT yet consider OnRecovery.
-	const anchor = "hasStatefulActions :="
-	var gateLines []string
-	for _, line := range strings.Split(src, "\n") {
-		if strings.Contains(line, anchor) {
-			gateLines = append(gateLines, strings.TrimSpace(line))
-		}
+	// beta.147's gate:
+	//   hasStatefulActions := hasDefinition && hasStatefulRuleActions(ruleDef)
+	//   func hasStatefulRuleActions(def Definition) bool {
+	//       return len(def.OnEnter) > 0 || len(def.OnExit) > 0 || len(def.WhileTrue) > 0 || len(def.OnRecovery) > 0
+	//   }
+	// Anchor on the helper body and assert it STILL admits OnRecovery.
+	const helperAnchor = "func hasStatefulRuleActions("
+	start := strings.Index(src, helperAnchor)
+	if start < 0 {
+		t.Fatalf("could not find the %q gate helper in message_handler.go — the framework refactored "+
+			"the rule-dispatch gate again; re-anchor this pin and re-verify BY HAND that an "+
+			"on_recovery-only rule is still routed to the stateful evaluator (#530), else a restarted "+
+			"run silently wedges", helperAnchor)
 	}
-	if len(gateLines) == 0 {
-		t.Fatalf("could not find the %q routing gate in message_handler.go — the framework "+
-			"refactored the rule-dispatch path; re-anchor this tripwire against the new gate "+
-			"before trusting it (the on_recovery routing gap must be re-verified by hand)", anchor)
+	body := src[start:]
+	if end := strings.Index(body, "\n}"); end >= 0 {
+		body = body[:end]
 	}
-	// Sanity: the gate still gates on the stateful lists we expect (a floor — if these
-	// vanished the gate changed shape and the tripwire's premise is stale).
-	for _, g := range gateLines {
-		if !strings.Contains(g, "OnEnter") {
-			t.Fatalf("the %q gate no longer references OnEnter (%q) — the gate changed shape; "+
-				"re-verify the on_recovery routing gap by hand before trusting this pin", anchor, g)
-		}
+	body = strings.TrimSpace(body)
+
+	// Floor: the helper still gates on the entry lists we expect (a moved-shape guard).
+	if !strings.Contains(body, "OnEnter") {
+		t.Fatalf("the %q helper no longer references OnEnter (%q) — the gate changed shape; re-anchor "+
+			"this pin and re-verify the on_recovery routing by hand", helperAnchor, body)
 	}
-	for _, g := range gateLines {
-		if strings.Contains(g, "OnRecovery") {
-			t.Fatalf("TRIPWIRE FIRED (on_recovery routing gap): message_handler.go's "+
-				"hasStatefulActions gate now admits OnRecovery (%q). A restarted in-flight run "+
-				"can finally park rule-natively. Do the mechanical upgrade — add the "+
-				"run-lifecycle recovery-park rule (on_enter empty + on_recovery park), re-add its "+
-				"shape pin + sanctioned-park-writer entry, and drive the docker restart-recovery "+
-				"station (R10). FIRST re-verify the stale-revision guard fires the recovery fork "+
-				"on a real restart. Then remove this pin.", g)
-		}
+	// The #530 fix: the helper must admit OnRecovery. If it does not, we have REGRESSED.
+	if !strings.Contains(body, "OnRecovery") {
+		t.Fatalf("REGRESSION (#530): the %q gate helper NO LONGER admits OnRecovery (%q). An "+
+			"on_recovery-only park is inert again — a restarted in-flight run would silently wedge. "+
+			"The gate fix landed in beta.147; restore it upstream (or re-block the restart-recovery "+
+			"park and re-open #530) before relying on on_recovery.", helperAnchor, body)
 	}
 }
 

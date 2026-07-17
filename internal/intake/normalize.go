@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	githubwebhook "github.com/c360studio/semstreams/input/github-webhook"
+	"github.com/c360studio/semdev/internal/forge/githubwebhook"
 )
 
 // Subjects the framework github_webhook input publishes to the GITHUB stream.

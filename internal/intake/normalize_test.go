@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	githubwebhook "github.com/c360studio/semstreams/input/github-webhook"
+	"github.com/c360studio/semdev/internal/forge/githubwebhook"
 )
 
 func issuePayload(action, sender string, labels []string, body string, num int) []byte {
