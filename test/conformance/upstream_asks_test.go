@@ -15,20 +15,25 @@ import (
 
 // Upstream-ask tripwires (simplify-m0-execution-rail, task 1.2).
 //
-// The reshaped rail carried three deliberate interims because the semstreams
-// engine could not yet express the ideal form. As of beta.148 all three upstream
-// fixes have LANDED (#519 scalar .value, #528 per-spawn max_iterations, #529 typed
-// exhaustion sentinel — alongside #530 in beta.147), so these tests have flipped from
-// "gap-open tripwires" to REGRESSION GUARDS: each now asserts the landed capability is
-// still present and FIRES if a future beta drops it (which would silently re-open the
-// gap the reshaped rail routes around).
+// This file holds tripwires against the semstreams engine in TWO polarities:
 //
-// The MECHANICAL UPGRADES the capabilities enable — per-task iteration budgets
-// (loop_max_iterations, #528), per-task attempt budgets via $entity.triple.task.spec.budget.value
-// (#519), and a reason-aware escalate route (errors.Is ErrMaxIterationsReached, #529) — are
-// routing-behavior changes NOT yet adopted; each guard's doc names its follow-up. The current
-// M0 behavior (uniform iteration cap, literal-3 budget, outcome=failed routing) is proven by
-// the e2e and remains correct until those upgrades are deliberately taken.
+//   REGRESSION GUARDS — an upstream fix LANDED, so the tripwire asserts the landed
+//   capability is still present and FIRES (red) if a future beta drops it. #519
+//   (scalar .value), #528 (per-spawn max_iterations), #529 (typed exhaustion
+//   sentinel), and #530 (on_recovery routing gate) are all regression guards as of
+//   beta.148/beta.147. The MECHANICAL UPGRADES they enable — per-task iteration
+//   budgets (loop_max_iterations, #528), per-task attempt budgets via
+//   $entity.triple.task.spec.budget.value (#519), and a reason-aware escalate route
+//   (errors.Is ErrMaxIterationsReached, #529) — are routing-behavior changes NOT yet
+//   adopted; each guard's doc names its follow-up. The current M0 behavior (uniform
+//   iteration cap, literal-3 budget, outcome=failed routing) is proven by the e2e and
+//   remains correct until those upgrades are deliberately taken.
+//
+//   GAP-OPEN TRIPWIRES — the upstream fix is STILL OPEN, so the tripwire is the
+//   INVERSE: it asserts the GAP is still present (green while open) and FIRES (red)
+//   when the framework CLOSES it — the signal to adopt the real fix in semdev and
+//   FLIP the tripwire to a regression guard. TestTripwireExecutorHonorsPerLoopToolAllowlist
+//   (the executor per-loop tool-enforcement ask, semdev MEDIUM-3) is the first of these.
 
 // TestTripwire519ScalarValueSubstitution — semstreams #519 (scalar .value
 // field-to-field). Now a REGRESSION GUARD: the #519 fix LANDED in beta.148.
@@ -209,6 +214,149 @@ func TestTripwireOnRecoveryRoutingGate(t *testing.T) {
 			"on_recovery-only park is inert again — a restarted in-flight run would silently wedge. "+
 			"The gate fix landed in beta.147; restore it upstream (or re-block the restart-recovery "+
 			"park and re-open #530) before relying on on_recovery.", helperAnchor, body)
+	}
+}
+
+// TestTripwireExecutorHonorsPerLoopToolAllowlist — the executor per-loop
+// tool-enforcement ask, semstreams #551 (semdev MEDIUM-3). FILED upstream; this
+// gap-open tripwire tracks the ask until the engine capability lands (the G2 /
+// port-manifest "file the ask" step is done — the ask is recorded here and parked
+// behind the mock backstop + the block on the first real-LLM token).
+//
+// A GAP-OPEN TRIPWIRE, the INVERSE polarity of the regression guards above: it
+// asserts the gap is STILL present and FIRES when the framework CLOSES it.
+//
+// THE GAP (beta.148): a rule's per-spawn `tools` list is advertised to the MODEL
+// (agentic-loop puts it in the request) but NEVER enforced at execution. The
+// agentic-tools executor admits a tool call SOLELY on its global AllowedTools
+// config — `handleToolCall` gates via `isToolAllowed(call.Name)`, and isToolAllowed
+// reads only c.config.AllowedTools with no LoopID / per-loop set. So a loop
+// advertised a narrow set (a coordinator routing loop: decide + read tools) whose
+// model emitted a globally-allowlisted tool OUTSIDE that set (create_change, a
+// forge-io writer) would have it EXECUTED. The narrow advertised list is the
+// EFFECTIVE control at the model boundary (OpenAI/Anthropic only emit advertised
+// tools); what is missing is the executor-side defense-in-depth BACKSTOP. semdev
+// cannot close this in-tree: coordinator/developer/reviewer loops share ONE executor
+// with ONE global allowlist (disjoint roles need disjoint tools), and the role-based
+// category seam (config.EnableCategories / categories.go) is DEAD — declared, never
+// wired into the execution gate.
+//
+// This asserts the global-only gate is STILL the whole story, across four anchors: the
+// gate call site, the isToolAllowed signature + body, the dead EnableCategories seam, AND
+// the ADR-067 dispatch-enforced metadata set (DispatchEnforcedMetadataKeys) — the
+// framework's OWN precedent mechanism for per-task execution enforcement, and the most
+// likely shape MEDIUM-3 closes through (a new tool-allowlist key there would leave the
+// isToolAllowed anchors untouched). It TRIPS (fail) when any of these gains per-loop/role
+// tool-name awareness — the signal to (1) scope the coordinator re-wakes' tools at the
+// executor for real, and (2) flip this to a regression guard. It reads the compiled
+// framework source and FAILS LOUD if an anchor moves, because a refactor could BE the fix.
+func TestTripwireExecutorHonorsPerLoopToolAllowlist(t *testing.T) {
+	src := readSemstreamsSource(t, "processor", "agentic-tools", "component.go")
+
+	// Anchor 0 (call-site floor): the execution gate is still WIRED to isToolAllowed, so the
+	// signature/body anchors below guard the LIVE gate, not dead code. If the call site
+	// vanishes, the gate moved — re-verify by hand.
+	if !strings.Contains(src, "isToolAllowed(call.Name)") {
+		t.Fatal("component.go no longer gates via isToolAllowed(call.Name) — the tool-admission gate " +
+			"moved, so the signature/body anchors below may now guard dead code. Re-verify MEDIUM-3 by " +
+			"hand and re-anchor.")
+	}
+
+	// Anchor 1: the execution gate helper still exists and takes ONLY a tool NAME —
+	// no loop id, no per-loop allowed-set, no context. A per-loop enforcement fix MUST
+	// change this signature (or add a loop-scoped gate beside it).
+	const gate = "func (c *Component) isToolAllowed(toolName string) bool"
+	if !strings.Contains(src, gate) {
+		t.Fatalf("agentic-tools gate %q not found in component.go — the framework refactored the "+
+			"tool-admission gate. RE-VERIFY BY HAND whether it now honors the spawning loop's "+
+			"advertised tool set (which would CLOSE MEDIUM-3): if so, scope the coordinator re-wakes' "+
+			"tools at the executor and flip this tripwire to a regression guard; if it merely moved, "+
+			"re-anchor.", gate)
+	}
+
+	// Anchor 2: the gate BODY reads the GLOBAL allowlist and references nothing
+	// per-loop. Extract the helper body (gofmt puts the closing brace at column 0, so
+	// the first "\n}" ends it) and assert the shape.
+	body := src[strings.Index(src, gate):]
+	if end := strings.Index(body, "\n}"); end >= 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "AllowedTools") {
+		t.Fatalf("the isToolAllowed gate no longer reads c.config.AllowedTools — the admission gate "+
+			"changed shape; re-verify MEDIUM-3 by hand and re-anchor. Body:\n%s", body)
+	}
+	// The trip condition: any per-loop / per-role token entering the gate means the
+	// executor may now scope tools beyond the global list — MEDIUM-3 may be CLOSED.
+	for _, perLoop := range []string{"LoopID", "loopID", "Categor", "category", "advertised", "Advertised", "PerLoop", "perLoop"} {
+		if strings.Contains(body, perLoop) {
+			t.Fatalf("REACHED (MEDIUM-3): the isToolAllowed gate now references %q — the agentic-tools "+
+				"executor appears to scope tools PER LOOP/ROLE, not just by the global AllowedTools. "+
+				"VERIFY the spawning loop's advertised `tools` (or a role/category scope) is now ENFORCED "+
+				"at execution; if so, scope the coordinator re-wakes' tools at the executor for real and "+
+				"flip this tripwire to a regression guard (semstreams per-loop tool-enforcement ask "+
+				"landed). Body:\n%s", perLoop, body)
+		}
+	}
+
+	// Anchor 3 (floor + secondary trip): the role-based category seam is still DECLARED
+	// but DEAD. If config.EnableCategories vanishes, the scoping story moved — re-verify.
+	// If it appears in the EXECUTOR (component.go), the fix may be wiring it — trip.
+	cfg := readSemstreamsSource(t, "processor", "agentic-tools", "config.go")
+	if !strings.Contains(cfg, "EnableCategories") {
+		t.Fatalf("agentic-tools config.go no longer declares EnableCategories — the role-based " +
+			"tool-category seam moved or was removed; re-verify MEDIUM-3's scoping story by hand and re-anchor")
+	}
+	if strings.Contains(src, "EnableCategories") || strings.Contains(src, "GetToolCategory") {
+		t.Fatal("REACHED (MEDIUM-3): agentic-tools component.go now references the category seam " +
+			"(EnableCategories / GetToolCategory) in the execution path — role-based tool filtering may " +
+			"be wired. Verify whether per-role tool scoping is now ENFORCED at execution; if so, adopt it " +
+			"for the coordinator re-wakes and flip this tripwire to a regression guard.")
+	}
+
+	// Anchor 4 (the framework's OWN likely closing shape): semstreams enforces per-task execution
+	// policy via ADR-067 dispatch-stamped metadata — DispatchEnforcedMetadataKeys in
+	// agentic/exec_policy.go, the keys dispatchToolCall stamps AUTHORITATIVELY onto every ToolCall
+	// and the executor then enforces (filesystem policy, scratch paths, decide-action allowlist). The
+	// most likely way MEDIUM-3 closes is a NEW tool-name allowlist key added to THIS set + a gate in
+	// handleToolCall — which would leave isToolAllowed's signature/body AND EnableCategories untouched
+	// (Anchors 0-3 all stay green). So watch the set directly: it is EXACTLY the three known keys
+	// today; a vanished key, a fourth key, or a tool-scoping key by name trips.
+	policy := readSemstreamsSource(t, "agentic", "exec_policy.go")
+	const sliceAnchor = "DispatchEnforcedMetadataKeys = []string{"
+	si := strings.Index(policy, sliceAnchor)
+	if si < 0 {
+		t.Fatalf("agentic/exec_policy.go no longer declares %q — the ADR-067 dispatch-enforced metadata "+
+			"mechanism moved or was renamed; a per-loop tool allowlist would most likely land in this set, "+
+			"so re-verify MEDIUM-3's closing shape by hand and re-anchor.", sliceAnchor)
+	}
+	set := policy[si+len(sliceAnchor):]
+	if end := strings.Index(set, "}"); end >= 0 {
+		set = set[:end]
+	}
+	for _, known := range []string{"MetadataKeyFilesystemPolicy", "MetadataKeyScratchPaths", "MetadataKeyDecideActionAllowlist"} {
+		if !strings.Contains(set, known) {
+			t.Fatalf("DispatchEnforcedMetadataKeys no longer lists %q — the ADR-067 enforced-key set changed "+
+				"shape; re-verify whether a per-loop TOOL allowlist key was added (which would CLOSE MEDIUM-3) "+
+				"and re-anchor. Set:\n%s", known, set)
+		}
+	}
+	if n := strings.Count(set, "MetadataKey"); n != 3 {
+		t.Fatalf("REACHED (MEDIUM-3?): DispatchEnforcedMetadataKeys now has %d enforced keys, not the 3 known "+
+			"(filesystem policy, scratch paths, decide-action allowlist). A NEW dispatch-enforced key landed — "+
+			"if it scopes per-loop TOOL NAMES (the ADR-067 shape that closes MEDIUM-3), adopt it for the "+
+			"coordinator re-wakes and flip this tripwire to a regression guard. Set:\n%s", n, set)
+	}
+	// Belt-and-suspenders: a tool-scoping enforcement key declared by NAME in the policy file or the
+	// wire type, in case it lands before being added to the enforced set.
+	wire := readSemstreamsSource(t, "agentic", "tools.go")
+	for _, hay := range []string{policy, wire} {
+		for _, tok := range []string{"MetadataKeyToolAllowlist", "MetadataKeyAllowedTools", "MetadataKeyToolScope", "MetadataKeyToolAllowed"} {
+			if strings.Contains(hay, tok) {
+				t.Fatalf("REACHED (MEDIUM-3): the framework declares %q — a per-loop tool-name enforcement key "+
+					"exists. Verify it is stamped at dispatch and enforced by the executor; if so, scope the "+
+					"coordinator re-wakes' tools for real and flip this tripwire to a regression guard.", tok)
+			}
+		}
 	}
 }
 

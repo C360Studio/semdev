@@ -67,7 +67,14 @@ The beta.148 tripwires (#519 scalar `.value`, #528 per-spawn max_iterations, #52
 exhaustion sentinel) are now REGRESSION GUARDS — the fixes landed; the routing-behavior
 UPGRADES they enable (per-task iteration/attempt budgets, a reason-aware escalate route)
 are deferred M0.5 follow-ups, not required (the uniform-cap / literal-3 / outcome=failed
-behavior stays e2e-proven). Remaining before a first real-LLM token: the pre-real-LLM
-carry-forwards (bootstrap `allowed_tools` scoping; the `target_files`-includes-test
-contract; a few developer-prompt field descriptions). Donor checkouts for reference:
+behavior stays e2e-proven). The pre-real-LLM carry-forwards are now resolved or correctly
+tracked: the `target_files`-includes-test contract and the developer/tool-schema field
+descriptions are DONE; the `allowed_tools` scoping is done at the MODEL boundary (every spawn
+advertises a scoped `tools` list ⊆ populated `allowed_tools`, two conformance pins) — but its
+residual **MEDIUM-3** is an EXECUTOR-side defense-in-depth gap that is a FRAMEWORK limitation,
+not an in-tree fix: verified against beta.148, `agentic-tools` admits a call solely on its
+GLOBAL `allowed_tools` (`component.go isToolAllowed`), never the loop's advertised set. It is an
+UPSTREAM semstreams ask (per-loop/role executor enforcement) FILED as semstreams #551, tracked by
+the gap-open tripwire `TestTripwireExecutorHonorsPerLoopToolAllowlist`, and it BLOCKS the first
+real-LLM token (inert under the mock; mock-ladder-green is the backstop). Donor checkouts for reference:
 `~/Code/c360/semteams` (shape), `~/Code/c360/semspec` (floors + audits).
