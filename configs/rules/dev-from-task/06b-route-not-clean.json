@@ -2,18 +2,19 @@
   "id": "dev_from_task_route_not_clean_red",
   "type": "expression",
   "name": "Floors route → NOT-CLEAN (measured red): stamp the intermediate",
-  "description": "The not-clean intermediate, branch 1 of 2 (design R1, group 5). 'Not clean' = the attempt measured red (route.passed=false, incl. the fail-closed 'never measured' case) OR a structural floor rejected it (route.rejected=true). That is a DISJUNCTION, and the retry/escalate routes must AND it with the budget count — but a rule has ONE flat logic (never mixed AND/OR), so '(A or B) and count' is not one rule. This is the OR-collapse: two GUARDED pure-AND rules (this one on route.passed, 06e on route.rejected) each stamp a single-valued route.not_clean='true', and the retry (06c)/escalate (06d) rules read that intermediate with pure-AND conditions.\n\nWHY TWO GUARDED RULES rather than one logic:or rule: a rule's add_triple appends unconditionally and bumps the entity version (graph-ingest has no 'nothing-changed' skip on the ADD path, verified against beta.146), so a GUARDLESS rule whose trigger stays true would re-fire and re-append every rescan (unbounded churn). The route.not_clean length_eq 0 self-extinguish guard makes each branch fire-once (a fresh developer loop L_n per attempt re-arms it) — but a guard is an AND condition, which cannot coexist with a logic:or over the signals. So the disjunction is split into two guarded AND rules. Both stamp the SAME single-valued route.not_clean='true' (idempotent for the reader: 06c/06d read route.not_clean eq 'true'); if both branches match (passed=false AND rejected=true) both fire ONCE, then the shared guard blocks re-fire — bounded, no churn.\n\nTRIGGER = the developer loop L_n: route.passed eq \"false\" (required:false — the scalar exists only on a floors loop, so it fires only there and only when measured red) AND route.not_clean length_eq 0 (the self-extinguish guard). Mutually exclusive with the advance route (06a requires route.passed=true).\n\nG2: this fires no lifecycle transition and no spawn — it records the harness-derived not-clean verdict as a fact the retry/escalate RULES compose the route from. The route DECISION lives entirely in 06c/06d, never in Go.",
+  "description": "The not-clean intermediate, branch 1 of 2 (design R1, group 5). 'Not clean' = the attempt measured red (route.attempt.passed=false, incl. the fail-closed 'never measured' case) OR a structural floor rejected it (route.attempt.rejected=true). That is a DISJUNCTION, and the retry/escalate routes must AND it with the budget count — but a rule has ONE flat logic (never mixed AND/OR), so '(A or B) and count' is not one rule. This is the OR-collapse: two GUARDED pure-AND rules (this one on route.attempt.passed, 06e on route.attempt.rejected) each stamp a single-valued route.attempt.unclean='true', and the retry (06c)/escalate (06d) rules read that intermediate with pure-AND conditions.\n\nWHY TWO GUARDED RULES rather than one logic:or rule: a rule's add_triple appends unconditionally and bumps the entity version (graph-ingest has no 'nothing-changed' skip on the ADD path, verified against beta.146), so a GUARDLESS rule whose trigger stays true would re-fire and re-append every rescan (unbounded churn). The route.attempt.unclean length_eq 0 self-extinguish guard makes each branch fire-once (a fresh developer loop L_n per attempt re-arms it) — but a guard is an AND condition, which cannot coexist with a logic:or over the signals. So the disjunction is split into two guarded AND rules. Both stamp the SAME single-valued route.attempt.unclean='true' (idempotent for the reader: 06c/06d read route.attempt.unclean eq 'true'); if both branches match (passed=false AND rejected=true) both fire ONCE, then the shared guard blocks re-fire — bounded, no churn.\n\nTRIGGER = the developer loop L_n: route.attempt.passed eq \"false\" (required:false — the scalar exists only on a floors loop, so it fires only there and only when measured red) AND route.attempt.unclean length_eq 0 (the self-extinguish guard). Mutually exclusive with the advance route (06a requires route.attempt.passed=true).\n\nG2: this fires no lifecycle transition and no spawn — it records the harness-derived not-clean verdict as a fact the retry/escalate RULES compose the route from. The route DECISION lives entirely in 06c/06d, never in Go.",
   "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
   "conditions": [
-    { "field": "route.passed", "operator": "eq", "value": "false", "required": false },
-    { "field": "route.not_clean", "operator": "length_eq", "value": 0, "required": true }
+    { "field": "route.attempt.passed", "operator": "eq", "value": "false", "required": false },
+    { "field": "route.attempt.unclean", "operator": "length_eq", "value": 0, "required": true }
   ],
   "logic": "and",
   "on_enter": [
     {
       "type": "add_triple",
       "subject": "$entity.id",
-      "predicate": "route.not_clean",
+      "predicate": "route.attempt.unclean",
       "object": "true"
     }
   ],
@@ -23,7 +24,7 @@
     "capability": "dev-from-task",
     "gate": "route",
     "station": "route not_clean (measured red) — the OR-collapse branch 1 (R1, group 5)",
-    "or_collapse": "the not-clean disjunction (route.passed=false OR route.rejected=true) is split into TWO GUARDED pure-AND rules (this + 06e) so each carries the route.not_clean length_eq 0 self-extinguish guard — a guardless logic:or rule would re-fire and re-append unbounded (the ADD path bumps version with no nothing-changed skip). Both stamp the same single-valued route.not_clean='true' the retry/escalate rules read.",
-    "self_extinguish": "route.not_clean length_eq 0 guard → fire-once; a fresh developer loop L_n per attempt re-arms it. Bounded even if both branches match (each fires once, then the guard blocks)."
+    "or_collapse": "the not-clean disjunction (route.attempt.passed=false OR route.attempt.rejected=true) is split into TWO GUARDED pure-AND rules (this + 06e) so each carries the route.attempt.unclean length_eq 0 self-extinguish guard — a guardless logic:or rule would re-fire and re-append unbounded (the ADD path bumps version with no nothing-changed skip). Both stamp the same single-valued route.attempt.unclean='true' the retry/escalate rules read.",
+    "self_extinguish": "route.attempt.unclean length_eq 0 guard → fire-once; a fresh developer loop L_n per attempt re-arms it. Bounded even if both branches match (each fires once, then the guard blocks)."
   }
 }

@@ -2,19 +2,20 @@
   "id": "agent_run_handoff_marker",
   "type": "expression",
   "name": "Coordinator handoff confirmed → stamp agent.run.handoff on the run entity",
-  "description": "The dispatched→executing bridge, half 1 (loop→run-entity bridge). ported from semteams agent-run/01. lifecycle_transition acts on the FIRING entity, but the handoff evidence lives on the coordinator LOOP while the run-phase advance must fire on the RUN entity — this rule bridges the two. It fires on the coordinator loop once its child task is CONFIRMED published (rule.spawned_task, stamped by run_scope=new AFTER the child publish succeeds — genuine handoff evidence, not the bare mint) and stamps agent.run.handoff on the run entity via the subject override. Half 2 (02-dispatched-to-executing) matches that marker on the run entity and advances the phase.\n\nWHY rule.spawned_task and not the freshly-minted `dispatched` phase: run_scope=new mints the run BEFORE the child publish, and the publish can fail — which would strand a childless run. rule.spawned_task lands only on publish success, so triggering on it means a publish failure leaves the run in `dispatched` with no handoff marker (correctly wedged for a human, not falsely advanced to `executing`).\n\nThe subject override $entity.triple.agent.run.entity_id resolves because run_scope=new stamps agent.run.entity_id (the 6-part run entity id) on the firing coordinator entity. The agent.run.entity_id != \"\" condition is also the run-less-chat guard (a non-delegating coordinator that minted no run has no anchor and stamps no handoff). The length_eq 1 single-anchor guard keeps this to the common case where the firing coordinator carries exactly one run anchor (its own freshly-minted, or one inherited run); the dual-anchor recovery case (semteams 01b) is out of scope at M0 (semdev has no recovery coordinator, and the mint rule's front-door-only guard prevents a coordinator accumulating two anchors).",
+  "description": "The dispatched→executing bridge, half 1 (loop→run-entity bridge). ported from semteams agent-run/01. lifecycle_transition acts on the FIRING entity, but the handoff evidence lives on the coordinator LOOP while the run-phase advance must fire on the RUN entity — this rule bridges the two. It fires on the coordinator loop once its child task is CONFIRMED published (rule.task.spawned, stamped by run_scope=new AFTER the child publish succeeds — genuine handoff evidence, not the bare mint) and stamps agent.run.handoff on the run entity via the subject override. Half 2 (02-dispatched-to-executing) matches that marker on the run entity and advances the phase.\n\nWHY rule.task.spawned and not the freshly-minted `dispatched` phase: run_scope=new mints the run BEFORE the child publish, and the publish can fail — which would strand a childless run. rule.task.spawned lands only on publish success, so triggering on it means a publish failure leaves the run in `dispatched` with no handoff marker (correctly wedged for a human, not falsely advanced to `executing`).\n\nThe subject override $entity.triple.agent.run.entity-id resolves because run_scope=new stamps agent.run.entity-id (the 6-part run entity id) on the firing coordinator entity. The agent.run.entity-id != \"\" condition is also the run-less-chat guard (a non-delegating coordinator that minted no run has no anchor and stamps no handoff). The length_eq 1 single-anchor guard keeps this to the common case where the firing coordinator carries exactly one run anchor (its own freshly-minted, or one inherited run); the dual-anchor recovery case (semteams 01b) is out of scope at M0 (semdev has no recovery coordinator, and the mint rule's front-door-only guard prevents a coordinator accumulating two anchors).",
   "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
   "conditions": [
     { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
-    { "field": "rule.spawned_task", "operator": "ne", "value": "", "required": true },
-    { "field": "agent.run.entity_id", "operator": "ne", "value": "", "required": true },
-    { "field": "agent.run.entity_id", "operator": "length_eq", "value": 1, "required": true }
+    { "field": "rule.task.spawned", "operator": "ne", "value": "", "required": true },
+    { "field": "agent.run.entity-id", "operator": "ne", "value": "", "required": true },
+    { "field": "agent.run.entity-id", "operator": "length_eq", "value": 1, "required": true }
   ],
   "logic": "and",
   "on_enter": [
     {
       "type": "add_triple",
-      "subject": "$entity.triple.agent.run.entity_id",
+      "subject": "$entity.triple.agent.run.entity-id",
       "predicate": "agent.run.handoff",
       "object": "$entity.instance"
     }
@@ -25,8 +26,8 @@
     "role": "handoff-marker (dispatched→executing, half 1: loop→run-entity bridge)",
     "joins_with": "02-dispatched-to-executing.json",
     "ported_from": "semteams configs/rules/agent-run/01-handoff-marker.json",
-    "confirmed_handoff_rationale": "rule.spawned_task is post-publish-success, NOT the bare mint — a publish failure leaves the run wedged in dispatched rather than falsely executing.",
+    "confirmed_handoff_rationale": "rule.task.spawned is post-publish-success, NOT the bare mint — a publish failure leaves the run wedged in dispatched rather than falsely executing.",
     "dual_anchor_note": "semteams' 01b (dual-anchor recovery coordinator) is intentionally not ported: no recovery coordinator at M0, and the mint rule's front-door-only guard prevents a coordinator carrying two run anchors. TestDualAnchorHandoffPresentWhenMultipleRunScopeNew fails the moment a second run_scope=new rule lands without 01b, so this cannot regress silently.",
-    "stranded_dispatched_gap": "KNOWN M0 GAP (semstreams-reviewer MEDIUM, unreachable under the mock where publish+stamp succeed): run_scope=new mints the run (dispatched) BEFORE the child publish, and the anchor stamp is best-effort — if either fails, no rule.spawned_task lands, the handoff never fires, and the run sits in dispatched with no human-facing signal (no run-lifecycle rule fires on a handoff-less dispatched run). semteams' D3 MilestoneSubscriber catches this; semdev has no equivalent. Before this becomes reachable (real-LLM / real forge-io publish), file the upstream semstreams ask (rule-expressible stranded-run detector, or D3-on-dispatched-terminal) and add a documented interim park-toward-human (G2: fail toward the human, never a silent stall)."
+    "stranded_dispatched_gap": "KNOWN M0 GAP (semstreams-reviewer MEDIUM, unreachable under the mock where publish+stamp succeed): run_scope=new mints the run (dispatched) BEFORE the child publish, and the anchor stamp is best-effort — if either fails, no rule.task.spawned lands, the handoff never fires, and the run sits in dispatched with no human-facing signal (no run-lifecycle rule fires on a handoff-less dispatched run). semteams' D3 MilestoneSubscriber catches this; semdev has no equivalent. Before this becomes reachable (real-LLM / real forge-io publish), file the upstream semstreams ask (rule-expressible stranded-run detector, or D3-on-dispatched-terminal) and add a documented interim park-toward-human (G2: fail toward the human, never a silent stall)."
   }
 }

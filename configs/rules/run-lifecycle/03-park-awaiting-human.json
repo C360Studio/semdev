@@ -2,19 +2,20 @@
   "id": "run_park_awaiting_human",
   "type": "expression",
   "name": "Park toward the human (ask_human)",
-  "description": "When the coordinator decides it cannot progress by rule and needs a human — next_action == ask_human — record run.awaiting_human on the run entity and post the question to the channel-agnostic user-response bus. The run then waits for a human signal; no Go reconciler, backstop ticker, or app-side state machine advances it while parked (G2/B3/B7). The reason carried by the decision is surfaced to the human. run.awaiting_human's single writer is this park rule (G5). Park is marker-only: it does NOT reflect the phase, to avoid conflating with the change-approval awaiting_approval gate (a run can await a human for either reason, distinguished by the fact, not the phase). FORWARD CONTRACT for later groups (design D15): rules that advance or terminate a run MUST exclude runs with run.awaiting_human present, and the `respond` handler (group 5) MUST remove run.awaiting_human on resume so a resumed run is not read as still-parked. The agent.run.entity_id guard is the run-less-chat guard (semteams agent-run/07): without a run anchor the subject would not resolve and the marker would be silently dropped.",
+  "description": "When the coordinator decides it cannot progress by rule and needs a human — next_action == ask_human — record run.awaiting.human on the run entity and post the question to the channel-agnostic user-response bus. The run then waits for a human signal; no Go reconciler, backstop ticker, or app-side state machine advances it while parked (G2/B3/B7). The reason carried by the decision is surfaced to the human. run.awaiting.human's single writer is this park rule (G5). Park is marker-only: it does NOT reflect the phase, to avoid conflating with the change-approval awaiting_approval gate (a run can await a human for either reason, distinguished by the fact, not the phase). FORWARD CONTRACT for later groups (design D15): rules that advance or terminate a run MUST exclude runs with run.awaiting.human present, and the `respond` handler (group 5) MUST remove run.awaiting.human on resume so a resumed run is not read as still-parked. The agent.run.entity-id guard is the run-less-chat guard (semteams agent-run/07): without a run anchor the subject would not resolve and the marker would be silently dropped.",
   "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
   "conditions": [
     { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
-    { "field": "coordinator.decision.next_action", "operator": "eq", "value": "ask_human", "required": true },
-    { "field": "agent.run.entity_id", "operator": "ne", "value": "", "required": true }
+    { "field": "coordinator.decision.next-action", "operator": "eq", "value": "ask_human", "required": true },
+    { "field": "agent.run.entity-id", "operator": "ne", "value": "", "required": true }
   ],
   "logic": "and",
   "on_enter": [
     {
       "type": "add_triple",
-      "subject": "$entity.triple.agent.run.entity_id",
-      "predicate": "run.awaiting_human",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "run.awaiting.human",
       "object": "$entity.triple.coordinator.decision.reason"
     },
     {
