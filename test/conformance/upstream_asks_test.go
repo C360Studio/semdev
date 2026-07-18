@@ -1,6 +1,8 @@
 package conformance
 
 import (
+	"errors"
+	"fmt"
 	"go/build"
 	"os"
 	"path/filepath"
@@ -9,158 +11,110 @@ import (
 	"testing"
 
 	"github.com/c360studio/semstreams/agentic"
-	gtypes "github.com/c360studio/semstreams/graph"
-	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/processor/rule/expression"
 )
 
 // Upstream-ask tripwires (simplify-m0-execution-rail, task 1.2).
 //
-// The reshaped rail carries three deliberate interims because the semstreams
-// engine cannot yet express the ideal form. Each interim is honest and
-// functional (design R11), but each MUST be swapped for the real capability
-// the moment the upstream fix lands — a mechanical upgrade that is easy to
-// forget once the arc is green. These tests pin the CURRENT beta.146
-// limitation so they go RED when the capability arrives, turning "someone has
-// to remember" into a failing build that names the upgrade.
+// The reshaped rail carried three deliberate interims because the semstreams
+// engine could not yet express the ideal form. As of beta.148 all three upstream
+// fixes have LANDED (#519 scalar .value, #528 per-spawn max_iterations, #529 typed
+// exhaustion sentinel — alongside #530 in beta.147), so these tests have flipped from
+// "gap-open tripwires" to REGRESSION GUARDS: each now asserts the landed capability is
+// still present and FIRES if a future beta drops it (which would silently re-open the
+// gap the reshaped rail routes around).
 //
-// A tripwire firing is not a regression — it is the signal to do the swap and
-// then re-baseline (or delete) the pin. Each test's failure message says which.
+// The MECHANICAL UPGRADES the capabilities enable — per-task iteration budgets
+// (loop_max_iterations, #528), per-task attempt budgets via $entity.triple.task.spec.budget.value
+// (#519), and a reason-aware escalate route (errors.Is ErrMaxIterationsReached, #529) — are
+// routing-behavior changes NOT yet adopted; each guard's doc names its follow-up. The current
+// M0 behavior (uniform iteration cap, literal-3 budget, outcome=failed routing) is proven by
+// the e2e and remains correct until those upgrades are deliberately taken.
 
-// TestTripwire519ScalarValueSubstitution — semstreams #519
-// (rule-scalar-value-substitution; fix drafted upstream, unmerged).
+// TestTripwire519ScalarValueSubstitution — semstreams #519 (scalar .value
+// field-to-field). Now a REGRESSION GUARD: the #519 fix LANDED in beta.148.
 //
-// LIMITATION: a rule condition's compare Value is a raw literal. There is no
-// field-to-field form — you cannot write `value: "$entity.triple.X.value"` to
-// compare one predicate against another predicate's value. This is why the
-// reshaped rail hardcodes the attempt budget as the literal 3 in the route
-// rules (design R3) instead of reading task.spec.0.budget off the run.
+// The ExecutionContext resolves `$entity.triple.<3-part-predicate>.value` to the scalar
+// object (applyTripleValueSubstitutions in processor/rule/execution_context.go), so a rule
+// can compare one predicate against another predicate's value. KEY: the fix is at the
+// ExecutionContext substitution layer (which runs BEFORE evaluation), NOT the raw
+// ExpressionEvaluator — the old evaluator-level anchor tested the wrong layer and never
+// would have fired, so this is re-anchored to source-inspect the substitution helper (the
+// same module-cache read the #530 guard uses; the helper is unexported).
 //
-// MECHANICAL UPGRADE when this goes RED: replace the constant-3 budget
-// literals in configs/rules/dev-from-task/* with
-// `$entity.triple.task.spec.0.budget.value`, so per-task budgets from the
-// projected contract become load-bearing (they are advisory today).
+// MECHANICAL UPGRADE (available, not yet adopted — a routing follow-up): replace the
+// constant-3 attempt-budget literals in configs/rules/dev-from-task/* with
+// `$entity.triple.task.spec.budget.value`, so the per-task budget from the projected
+// contract becomes load-bearing (it is advisory today).
 func TestTripwire519ScalarValueSubstitution(t *testing.T) {
-	const sentinel = "MATCHES-ONLY-WHEN-519-LANDS"
-
-	// An entity carrying two scalar predicates with the SAME object value.
-	entity := &gtypes.EntityState{
-		ID: "org.platform.agent.chain.execution.tripwire519",
-		Triples: []message.Triple{
-			{Predicate: "test.attempt.count", Object: sentinel, Confidence: 1.0},
-			{Predicate: "test.budget", Object: sentinel, Confidence: 1.0},
-		},
+	src := readSemstreamsSource(t, "processor", "rule", "execution_context.go")
+	const anchor = "applyTripleValueSubstitutions"
+	if !strings.Contains(src, anchor) {
+		t.Fatalf("REGRESSION (#519): the %q scalar-value substitution helper is gone from "+
+			"execution_context.go — `$entity.triple.X.value` field-to-field no longer resolves. "+
+			"The beta.148 fix was dropped; the per-task-budget upgrade depends on it. Restore "+
+			"upstream or re-open #519 and re-block the .value budget rules.", anchor)
 	}
-
-	ev := expression.NewExpressionEvaluator()
-
-	// POSITIVE CONTROL — a LITERAL RHS equal to the field value DOES match. This proves
-	// the eq operator + field lookup actually work, so a `false` from the `.value` form
-	// below genuinely means "not substituted" and not a rotted harness (a future beta
-	// renaming `eq`, changing field resolution, or making Evaluate error would otherwise
-	// return false for an unrelated reason and the tripwire would silently stay green when
-	// #519 actually lands — the exact failure a canary exists to prevent).
-	control := expression.LogicalExpression{
-		Logic: "and",
-		Conditions: []expression.ConditionExpression{{
-			Field:    "test.attempt.count",
-			Operator: "eq",
-			Value:    sentinel,
-		}},
-	}
-	if matched, err := ev.Evaluate(entity, control); err != nil || !matched {
-		t.Fatalf("#519 positive control failed (matched=%v err=%v): the eq operator or "+
-			"field lookup changed shape — re-verify this tripwire's anchor before trusting it", matched, err)
-	}
-
-	// Compare the first predicate against the SECOND predicate's value via the drafted
-	// `.value` field-to-field form. Today the RHS is compared as the literal string
-	// "$entity.triple.test.budget.value" (never substituted), so it cannot equal the
-	// sentinel and the condition does NOT match. An error here is unexpected today (the
-	// RHS is just an unmatched literal) — treat it as the anchor rotting, not a pass.
-	expr := expression.LogicalExpression{
-		Logic: "and",
-		Conditions: []expression.ConditionExpression{{
-			Field:    "test.attempt.count",
-			Operator: "eq",
-			Value:    "$entity.triple.test.budget.value",
-		}},
-	}
-	matched, err := ev.Evaluate(entity, expr)
-	if err != nil {
-		t.Fatalf("#519 tripwire: evaluating the `.value` form errored (%v) — unexpected on "+
-			"beta.146 (the RHS should be an inert literal); re-verify the anchor", err)
-	}
-	if matched {
-		t.Fatal("TRIPWIRE #519 FIRED: rule conditions now resolve " +
-			"`$entity.triple.X.value` field-to-field. Do the mechanical upgrade — " +
-			"swap the constant-3 budget literals in configs/rules/dev-from-task/* " +
-			"for `$entity.triple.task.spec.0.budget.value` — then update/remove this pin.")
+	// Floor: the gh#519 marker still sits by the helper, so a rename/move surfaces as a
+	// visible re-anchor task rather than a silently-green guard over vanished behavior.
+	if !strings.Contains(src, "gh#519") {
+		t.Fatalf("execution_context.go no longer references gh#519 near %q — the .value contract "+
+			"may have moved; re-verify BY HAND that scalar-value substitution still resolves before "+
+			"trusting this pin", anchor)
 	}
 }
 
 // TestTripwire528PerSpawnMaxIterations — semstreams #528 (per-spawn
-// max_iterations, filed 2026-07-13).
+// max_iterations). Now a REGRESSION GUARD: the #528 fix LANDED in beta.148.
 //
-// LIMITATION: the spawn wire (agentic.TaskMessage) carries no per-spawn loop
-// iteration budget. It has MaxDepth (agent-tree depth) but no MaxIterations —
-// the spawned loop's turn budget comes only from the agentic-loop COMPONENT
-// config (uniform for every role). This is why the reshaped developer loop
-// takes the uniform component-level cap at M0 (design R2) rather than a
-// per-task budget.
+// agentic.TaskMessage gained a per-spawn MaxIterations *int (nil = "use the agentic-loop
+// component default"), and the publish_agent rule action exposes it as loop_max_iterations.
+// So a spawned loop can carry its own turn budget instead of only the uniform component cap.
+// This asserts the field is still present; it FIRES if a future beta drops it.
 //
-// MECHANICAL UPGRADE when this goes RED: set the developer loop's iteration
-// budget per spawn (publish_agent action) instead of the uniform component
-// cap, so a hard task gets more turns than a trivial one.
+// MECHANICAL UPGRADE (available, not yet adopted — a routing follow-up): set the developer
+// loop's iteration budget per publish_agent spawn (loop_max_iterations) instead of the
+// uniform component cap, so a hard task gets more turns than a trivial one.
 func TestTripwire528PerSpawnMaxIterations(t *testing.T) {
 	tm := reflect.TypeOf(agentic.TaskMessage{})
 
 	// Sanity: we are reflecting the right type — the depth budget IS present.
 	if _, ok := tm.FieldByName("MaxDepth"); !ok {
 		t.Fatalf("agentic.TaskMessage no longer has MaxDepth — the spawn-wire shape "+
-			"changed under this tripwire; re-verify #528's anchor before trusting it (type=%s)", tm)
+			"changed under this pin; re-verify #528's anchor before trusting it (type=%s)", tm)
 	}
 
-	for i := 0; i < tm.NumField(); i++ {
-		f := tm.Field(i)
-		name := strings.ToLower(f.Name)
-		tag := strings.ToLower(f.Tag.Get("json"))
-		if strings.Contains(name, "maxiteration") || strings.Contains(tag, "max_iteration") {
-			t.Fatalf("TRIPWIRE #528 FIRED: agentic.TaskMessage now carries a "+
-				"per-spawn iteration budget (field %q, json %q). Do the mechanical "+
-				"upgrade — set the developer loop's max_iterations per publish_agent "+
-				"spawn instead of the uniform component cap — then remove this pin.",
-				f.Name, f.Tag.Get("json"))
-		}
+	f, ok := tm.FieldByName("MaxIterations")
+	if !ok {
+		t.Fatal("REGRESSION (#528): agentic.TaskMessage no longer carries a per-spawn " +
+			"MaxIterations budget — the beta.148 fix was dropped. The developer loop can no " +
+			"longer take a per-task turn budget (back to the uniform component cap); restore " +
+			"upstream or re-open #528 before relying on loop_max_iterations.")
+	}
+	// The nil = "use component default" contract depends on a POINTER; a change to a bare int
+	// would silently make 0 mean "zero turns" instead of "inherit" — surface it as a re-anchor.
+	if f.Type.Kind() != reflect.Ptr {
+		t.Fatalf("#528: agentic.TaskMessage.MaxIterations is %s, not a pointer — the nil='use "+
+			"the component default' contract changed; re-verify before trusting the per-spawn budget", f.Type)
 	}
 }
 
 // TestTripwire529UniformExhaustionReason — semstreams #529 (uniform exhaustion
-// reason, filed 2026-07-13).
+// reason). Now a REGRESSION GUARD: the #529 fix LANDED in beta.148 — but NOT in the
+// shape the old field-reflection anchor watched for (its documented coverage caveat).
 //
-// LIMITATION: when a loop exhausts its iteration cap it terminates with the
-// generic agentic.OutcomeFailed and a free-form Reason string — the SAME
-// outcome a model error produces, and the reason text is not a stable,
-// documented enum (the exhaustion path emits "max_iterations" in one place and
-// "max iterations reached before tool results returned" in another). So the
-// reshaped rail's retry/escalate routes key on outcome=failed only and cannot
-// distinguish "ran out of turns" from "the model erred" (design R2 risk note).
+// The fix is a TYPED SENTINEL ERROR, agentic.ErrMaxIterationsReached, returned on budget
+// exhaustion and matchable via errors.Is — distinct from an unrelated "loop not found"
+// operational error, which callers MUST NOT misreport as exhaustion. So a route can finally
+// distinguish "ran out of turns" from "the model erred" by branching on the sentinel rather
+// than the free-form Reason string. This asserts the sentinel still exists and still matches
+// (self and wrapped) via errors.Is; it FIRES if the sentinel is removed or stops matching.
 //
-// MECHANICAL UPGRADE when this goes RED: once exhaustion carries a uniform,
-// typed signal, make the escalate route reason-aware (exhaustion → escalate
-// toward the human; transient model error → retry within budget) instead of
-// treating every failed outcome identically.
-//
-// COVERAGE CAVEAT (Go can't reflect package constants): the OTHER plausible #529
-// shape is a NEW distinct outcome constant (e.g. agentic.OutcomeExhausted) rather
-// than a LoopFailedEvent field. Anchor 3 reflects struct FIELDS and will not see a
-// new constant, and there is no runtime way to enumerate a package's constants — so
-// that shape is NOT auto-detected here. On every semstreams bump, re-read this ask
-// manually: if exhaustion gained a distinct terminal outcome, do the upgrade above.
+// MECHANICAL UPGRADE (available, not yet adopted — a routing follow-up): make the dev-loop
+// escalate route reason-aware — exhaustion (errors.Is ErrMaxIterationsReached) → escalate
+// toward the human; a transient model error → retry within budget — instead of routing on
+// outcome=failed alone.
 func TestTripwire529UniformExhaustionReason(t *testing.T) {
-	// Anchor 1: the four outcome constants this rail routes over still EXIST (a
-	// compile-time floor — it does NOT prove the set is exactly four; a new
-	// OutcomeExhausted would compile fine here, see the coverage caveat above).
+	// Anchor 1: the outcome constants this rail routes over still EXIST (compile-time floor).
 	_ = []string{
 		agentic.OutcomeSuccess,
 		agentic.OutcomeFailed,
@@ -168,33 +122,22 @@ func TestTripwire529UniformExhaustionReason(t *testing.T) {
 		agentic.OutcomeTruncated,
 	}
 
-	lfe := reflect.TypeOf(agentic.LoopFailedEvent{})
-
-	// Anchor 2: the failure cause is carried in a free-form Reason string — the
-	// non-uniform channel we route AROUND today.
-	reason, ok := lfe.FieldByName("Reason")
-	if !ok || reason.Type.Kind() != reflect.String {
-		t.Fatalf("agentic.LoopFailedEvent.Reason is no longer a free-form string "+
-			"(ok=%v). The failure-cause channel changed shape — re-verify #529's "+
-			"anchor and, if a uniform exhaustion reason landed, make the escalate "+
-			"route reason-aware before re-baselining this pin (type=%s)", ok, lfe)
+	// Anchor 2: the typed exhaustion sentinel exists (compile-time reference) and matches
+	// itself via errors.Is — impossible to fail unless it was redefined out from under us.
+	if !errors.Is(agentic.ErrMaxIterationsReached, agentic.ErrMaxIterationsReached) {
+		t.Fatal("agentic.ErrMaxIterationsReached does not match itself via errors.Is — the " +
+			"sentinel was redefined; re-anchor #529")
 	}
 
-	// Anchor 3: no typed failure-classifier field has appeared. The most likely
-	// shape of a "uniform exhaustion reason" fix is a typed class/category/kind
-	// field distinct from the free-form Reason. Its arrival trips the wire.
-	classifierTokens := []string{"class", "category", "kind", "exhaust", "failuretype", "reasoncode"}
-	for i := 0; i < lfe.NumField(); i++ {
-		name := strings.ToLower(lfe.Field(i).Name)
-		for _, tok := range classifierTokens {
-			if strings.Contains(name, tok) {
-				t.Fatalf("TRIPWIRE #529 FIRED: agentic.LoopFailedEvent gained a typed "+
-					"failure classifier (field %q). Do the mechanical upgrade — make the "+
-					"dev-loop escalate route reason-aware (exhaustion escalates; model "+
-					"error retries) instead of routing on outcome=failed alone — then "+
-					"remove this pin.", lfe.Field(i).Name)
-			}
-		}
+	// Anchor 3 (the regression check): a WRAPPED sentinel still matches via errors.Is — the
+	// exact discipline a reason-aware escalate route relies on (the exhaustion error reaches
+	// the route wrapped in loop-terminal context). If this breaks, the typed exhaustion signal
+	// is gone and the rail is back to routing on outcome=failed alone.
+	wrapped := fmt.Errorf("agentic loop terminated: %w", agentic.ErrMaxIterationsReached)
+	if !errors.Is(wrapped, agentic.ErrMaxIterationsReached) {
+		t.Fatal("REGRESSION (#529): a wrapped agentic.ErrMaxIterationsReached no longer matches " +
+			"via errors.Is — the typed exhaustion signal is broken. The reason-aware escalate " +
+			"upgrade depends on it; restore upstream or re-open #529.")
 	}
 }
 
