@@ -8,7 +8,7 @@ harness SHALL apply the diff to the run's isolated container checkout
 (path-guarded to the checkout, never the host) and SHALL reject any diff
 touching a file outside the approved `task.spec.target_files`. After a
 successful apply, the harness SHALL commit the checkout and stamp the commit
-as `attempt.commit` (latest-wins), so measurement and later verification
+as `attempt.commit.sha` (latest-wins), so measurement and later verification
 consume exactly the committed tree. The measurement harness SHALL stamp the
 pass/fail from actually running the task's command in the sandbox. No schema
 in this path SHALL accept an LLM-supplied outcome.
@@ -30,7 +30,7 @@ in this path SHALL accept an LLM-supplied outcome.
 
 #### Scenario: Each applied attempt is committed and stamped
 - **WHEN** apply_patch succeeds
-- **THEN** the checkout is committed and `attempt.commit` records the commit
+- **THEN** the checkout is committed and `attempt.commit.sha` records the commit
 - **AND** the measured tree is identical to the committed tree
 
 ### Requirement: Provisioning and readiness are rule-owned and self-extinguishing
@@ -53,18 +53,18 @@ state.
   it), so no duplicate sandbox or loop is spawned
 
 #### Scenario: A process restart does not wedge an admitted run
-- **WHEN** the process restarts after `sandbox.ready` was stamped and later work needs the checkout or container
+- **WHEN** the process restarts after `sandbox.provision.ready` was stamped and later work needs the checkout or container
 - **THEN** the resolver reconstructs the checkout at its recorded commit and re-establishes the container from the pinned digest
 - **AND** the run proceeds to completion without human intervention
 
 #### Scenario: Reconstruction preserves committed attempt state
-- **WHEN** reconstruction runs for a checkout carrying a recorded `attempt.commit`
+- **WHEN** reconstruction runs for a checkout carrying a recorded `attempt.commit.sha`
 - **THEN** the reconstructed checkout is at that commit, not the pristine base
 
 ### Requirement: The clean room proves the committed artifact with no harness fixups
 
 The final clean-room verify SHALL prove the **committed** artifact — a
-`--recursive` clone of the run's checkout at its recorded `attempt.commit` —
+`--recursive` clone of the run's checkout at its recorded `attempt.commit.sha` —
 in a separate fresh cold environment, supplying only the declared ambient
 environment (image + governed creds-refs) and applying **no out-of-band
 fixups** to the artifact's resolution. An artifact that builds only because of
@@ -85,5 +85,5 @@ composite), not a thing the harness patches.
 
 #### Scenario: The clean room never sees the mutable working tree
 - **WHEN** the clean-room verify materializes its input
-- **THEN** it clones at the recorded `attempt.commit`
+- **THEN** it clones at the recorded `attempt.commit.sha`
 - **AND** uncommitted working-tree bytes cannot enter the proof

@@ -9,7 +9,7 @@ execution markers, not written as a separate authoritative status field — no
 second planning state machine is introduced.
 
 #### Scenario: Approval projects immutable task facts
-- **WHEN** `run.change_approved` is present for a run
+- **WHEN** `run.change.approved` is present for a run
 - **THEN** the change's tasks are projected as `task.spec` facts
 - **AND** an attempt to mutate a projected `task.spec` is rejected
 

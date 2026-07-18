@@ -343,8 +343,8 @@ func TestProjectRejectsMultipleTasks(t *testing.T) {
 	if err == nil {
 		t.Fatal("a change authoring more than one task must be refused at M0 (task.spec is single-keyed)")
 	}
-	if !strings.Contains(err.Error(), "2") {
-		t.Errorf("the refusal should name the authored task count, got: %v", err)
+	if !strings.Contains(err.Error(), "single-keyed") || !strings.Contains(err.Error(), "2 tasks") {
+		t.Errorf("the refusal should name the authored task count and the single-keyed reason, got: %v", err)
 	}
 	if len(w.replaces) != 0 {
 		t.Error("a refused multi-task projection must stamp nothing")

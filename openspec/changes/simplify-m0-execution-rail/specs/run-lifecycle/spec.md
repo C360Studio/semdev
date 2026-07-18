@@ -29,22 +29,22 @@ human"), never advance the run from Go.
 
 The `verify` action SHALL mean clean-room outcome verification (G4): the
 artifact builds and passes its own tests in fresh isolation, recorded as
-`verify.result`. semdev SHALL NOT introduce a separate coherence-verify action
+`verify.cleanroom.result`. semdev SHALL NOT introduce a separate coherence-verify action
 for "does the implementation match the change" — neither as an action nor as a
 Go-computed roll-up fact. Coherence is enforced structurally instead — by
-`openspec.validated` (artifacts well-formed), by task status derived from
+`openspec.change.validated` (artifacts well-formed), by task status derived from
 execution markers, and by the semantic `review.verdict` — because `task.spec`
 is the approved change projected immutably and cannot drift from it. The
-delivery route SHALL be a rule whose conditions read `verify.result`, the
-per-task review verdicts, and `openspec.validated` directly.
+delivery route SHALL be a rule whose conditions read `verify.cleanroom.result`, the
+per-task review verdicts, and `openspec.change.validated` directly.
 
 #### Scenario: Verify records an outcome, not a coherence judgment
 - **WHEN** the `verify` action runs for a run
-- **THEN** it records `verify.result` from a clean-room build-and-test outcome
+- **THEN** it records `verify.cleanroom.result` from a clean-room build-and-test outcome
 - **AND** no separate coherence-verify action or authoritative coherence fact is written
 
 #### Scenario: Delivery is routed by a rule reading the evidence directly
-- **WHEN** a run carries a passing `verify.result`, approving review verdicts, and `openspec.validated`
+- **WHEN** a run carries a passing `verify.cleanroom.result`, approving review verdicts, and `openspec.change.validated`
 - **THEN** the delivery rule fires from those facts directly
 - **AND** no intermediate coherence decision fact exists
 

@@ -127,7 +127,7 @@ and SHALL NOT record an unprovable claim as a passing outcome.
 #### Scenario: Docker absent parks, never false-verifies
 - **WHEN** docker is unavailable at run time
 - **THEN** the run parks toward the human
-- **AND** no `verify.result`, measurement, or "verified" fact is stamped
+- **AND** no `verify.cleanroom.result`, measurement, or "verified" fact is stamped
 
 #### Scenario: An unprovable claim is deferred, not passed
 - **WHEN** a claim can only be proven by an operator-CI / lab / SITL tier the

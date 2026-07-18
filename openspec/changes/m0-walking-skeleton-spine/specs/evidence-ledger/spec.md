@@ -7,7 +7,7 @@ vocabulary (e.g. `pass`, `exploratory`, `blocked`). A run whose artifact fails
 independent verification SHALL NOT be recorded as `pass`.
 
 #### Scenario: A failed verification is never recorded as pass
-- **WHEN** `verify.result` records a failure for a run
+- **WHEN** `verify.cleanroom.result` records a failure for a run
 - **THEN** the run's ledger status is not `pass`
 
 #### Scenario: Ledger schema rejects an out-of-vocabulary status

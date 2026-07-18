@@ -22,8 +22,8 @@ deterministically, targeting the change explicitly and running non-interactively
 interactive-only and fails non-interactively ("Nothing to validate"), so it MUST
 NOT be the harness invocation. The CLI is the compatibility oracle; semdev SHALL
 NOT substitute a re-implementation of its rules, and the pass/fail SHALL be
-stamped by the harness that ran the validator (`openspec.validated`), never by a
-model. The `openspec.validated` marker SHALL bind to the exact change CONTENT the
+stamped by the harness that ran the validator (`openspec.change.validated`), never by a
+model. The `openspec.change.validated` marker SHALL bind to the exact change CONTENT the
 validator blessed — its value is the change's content revision — so a later
 re-author of the same change (which changes the content) is detectably stale until
 the validator runs again against the new content. A consumer that acts
@@ -37,11 +37,11 @@ marker presence.
 
 #### Scenario: A valid change is blessed by the sponsor's own tool
 - **WHEN** a generated change passes `openspec validate <change> --strict --json --no-interactive`
-- **THEN** the harness that ran the validator records `openspec.validated` for the change bound to the change's current content
+- **THEN** the harness that ran the validator records `openspec.change.validated` for the change bound to the change's current content
 
 #### Scenario: A re-authored change must be re-validated before its tasks are frozen
 - **WHEN** a change that previously passed the validator is re-authored with changed content
-- **THEN** the prior `openspec.validated` marker no longer matches the change's current content revision, so the change's tasks are not projected into the immutable task specification
+- **THEN** the prior `openspec.change.validated` marker no longer matches the change's current content revision, so the change's tasks are not projected into the immutable task specification
 - **AND** projection succeeds only after the validator runs again against the new content
 
 ### Requirement: Archiving folds the merged change back into the specs via the CLI
@@ -50,13 +50,13 @@ The "back to OpenSpec" step SHALL fold a merged change's spec deltas into the
 target repository's living specs by shelling the real OpenSpec CLI
 (`openspec archive`) — the second deterministic CLI oracle alongside `validate`.
 The pass/fail SHALL be stamped by the harness that ran the archiver
-(`openspec.archived`), never by a model, and semdev SHALL NOT re-implement the
+(`openspec.change.archived`), never by a model, and semdev SHALL NOT re-implement the
 CLI's archive rules. At M0 the fact and the shell path are declared; the
 merge-event trigger and the live archive call are wired at M1.
 
 #### Scenario: A merged change is archived by the sponsor's own tool
 - **WHEN** a delivered change's PR is merged (M1 trigger)
-- **THEN** `openspec archive` is shelled and the harness records `openspec.archived`
+- **THEN** `openspec archive` is shelled and the harness records `openspec.change.archived`
 - **AND** semdev does not substitute a re-implementation of the CLI's archive rules
 
 ### Requirement: Brownfield OpenSpec artifacts are ingested deterministically

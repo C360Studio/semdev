@@ -3,9 +3,9 @@
 ### Requirement: Clean-room verification is the terminal gate
 
 No run SHALL reach `open_pr` until clean-room verification has recorded a
-passing result (`verify.result`). Verification SHALL consume an immutable
+passing result (`verify.cleanroom.result`). Verification SHALL consume an immutable
 snapshot — a clone of the run's checkout at the attempt's recorded commit
-(`attempt.commit`) — never a copy of the mutable warm working tree. Only work
+(`attempt.commit.sha`) — never a copy of the mutable warm working tree. Only work
 carrying an approving review verdict SHALL be verified; rejected work
 re-enters development instead. Verification SHALL run in a fresh isolated
 environment with a distinct build-cache home per run, resolve and build
@@ -13,7 +13,7 @@ dependencies from the artifact's own declarations, and run the artifact's
 own tests.
 
 #### Scenario: PR blocked until verify passes
-- **WHEN** `verify.result` is absent or failing for a run
+- **WHEN** `verify.cleanroom.result` is absent or failing for a run
 - **THEN** the `open_pr` action does not fire
 
 #### Scenario: Verification runs in fresh isolation
@@ -23,7 +23,7 @@ own tests.
 
 #### Scenario: Verification consumes the committed snapshot
 - **WHEN** verification materializes its input
-- **THEN** it clones the run's checkout at the recorded `attempt.commit`
+- **THEN** it clones the run's checkout at the recorded `attempt.commit.sha`
 - **AND** files present only in the mutable warm working tree do not enter the clean room
 
 #### Scenario: Rejected work is not cold-verified

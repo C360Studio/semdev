@@ -9,9 +9,11 @@
 // entries; the census tests in test/conformance enforce the invariants.
 //
 // beta.147: every name is CANONICAL (three lower-kebab segments domain.category.property,
-// no digit-start, no underscore) and CONCRETE (no ".*" namespaces) — Register()
-// declares each exact name with the framework vocabulary registry so the engine's
-// UNCONDITIONAL rule-load predicate-declaration check passes. Single-task at M0
+// no digit-start, no underscore). The census is CONCRETE except for the single deferred
+// namespace openspec.spec.* (the brownfield living-spec tree, its blob treatment is group
+// 9) — Register() declares each concrete name with the framework vocabulary registry
+// (skipping the ".*" entry) so the engine's UNCONDITIONAL rule-load predicate-declaration
+// check passes; no rule reads openspec.spec.*, so skipping it drops nothing. Single-task at M0
 // (beta.147 D1): the per-task/-change index left the predicate (it keys the entity ID
 // at M1), so the old task.spec.<i>/measurement.result.<i>/openspec.change.<slug> shapes
 // collapsed to flat names.
@@ -224,10 +226,11 @@ func Names() []string {
 
 // WriterOf returns the single writer declared for a predicate name. It matches
 // exactly first, then falls back to a declared namespace (a name under a ".*" entry
-// resolves to that entry's writer). ok is false when the name is in neither. The M0
-// census is fully CONCRETE — no ".*" entries — so the namespace fallback is currently
-// DORMANT (every lookup resolves by exact match or misses); it is kept for the M1
-// seam, when a per-task/-change entity may reintroduce a keyed namespace.
+// resolves to that entry's writer). ok is false when the name is in neither. The
+// namespace fallback is ACTIVE at M0: openspec.spec.* is the one ".*" entry (the deferred
+// brownfield living-spec tree), so a lookup of openspec.spec.<cap>.* resolves via this
+// fallback — the G5 brownfield pin (TestWriterOfNamespaceMember, brownfield_test.go)
+// depends on it, so the second loop is NOT dead code. Every other name is concrete.
 func WriterOf(name string) (writer string, ok bool) {
 	for _, p := range Predicates {
 		if p.Name == name {

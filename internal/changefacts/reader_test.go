@@ -78,7 +78,7 @@ func TestHydrateRoundTripsAuthoredFacts(t *testing.T) {
 	// namespace to leak from; what the exact-predicate read still must exclude is
 	// an unrelated owner's fact on the same entity.
 	triples = append(triples,
-		message.Triple{Subject: runEntity, Predicate: "run.issue_ref", Object: "gh#7"},
+		message.Triple{Subject: runEntity, Predicate: "run.issue.ref", Object: "gh#7"},
 	)
 	r := &fakeReader{triples: triples}
 
@@ -153,7 +153,7 @@ func TestFilterByPrefixDropsForeignOwners(t *testing.T) {
 		{Predicate: "openspec.change.fix-null-deref.proposal.intent", Object: "mine"},
 		{Predicate: "openspec.change.fix-null-deref.task.0.text", Object: "mine too"},
 		{Predicate: "openspec.change.other-change.proposal.intent", Object: "not mine"},
-		{Predicate: "run.issue_ref", Object: "gh#7"},
+		{Predicate: "run.issue.ref", Object: "gh#7"},
 		{Predicate: "prefixed.openspec.change.fix-null-deref.x", Object: "substring, not prefix"},
 	}
 	got := filterByPrefix(triples, prefix)
