@@ -42,7 +42,8 @@
 
 - [ ] 7.1 Re-project the change specs (predicate renames across forge-io/run-lifecycle/dev-from-task/harness-measurement/openspec-io/clean-room-verify/sandbox — these live in the sibling changes' `specs/` on this draft branch; G10 hygiene)
 - [x] 7.2 CLAUDE.md status pinned to beta.147 + deferred items noted (the beta.148 follow-up, pre-real-LLM carry-forwards). NOTE: `openspec validate --strict` on THIS change reports "no deltas" — it is a pure code migration with no capability-spec delta; archiving needs either a delta or an out-of-band archive (open decision).
-- [ ] 7.3 Adversarial review (semstreams-reviewer + go-reviewer): every product-code group (3a/3b/vocab/rules) reviewed + passed; the test-fixture groups' deferred holistic review is IN FLIGHT; archive pending that + the 7.1/validate decisions.
+- [x] 7.1 Sibling-change specs re-projected to canonical beta.147 (11 spec files across m0/sandbox/reshape).
+- [x] 7.3 Adversarial review DONE: every product-code group (3a/3b/vocab/rules) reviewed + passed; the holistic pre-archive review (groups 5+6 + vocab census correction) APPROVED — its MEDIUM (stale vocab.go .*-namespace comments) + two nits fixed. ARCHIVE DEFERRED to branch merge: this is a draft-PR branch with four unarchived changes, and the migration is a pure code change with no capability-spec delta (so `openspec validate --strict` reports "no deltas" — a synthetic delta would be dishonest, G7). All four changes archive together at merge.
 
 ## Discoveries (beta.147 ground truth that the plan undersold)
 
