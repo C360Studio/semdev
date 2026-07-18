@@ -35,7 +35,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,37 +66,34 @@ const Source = "reviewer-quinn"
 const RouteMirrorSource = "route-mirror"
 
 // The route-mirror predicates submit_review stamps on ITS OWN review loop (not the run):
-// route.verdict is the copy of review.verdict.<i>, and route.attempt is the append-mirror
-// of task.attempt.<i>'s distinct objects (review cycles share the one attempt budget, R4),
-// so the review-route rules can count the budget via length_* on the loop.
+// route.review.verdict is the copy of review.verdict.value, and route.attempt.instance is
+// the append-mirror of task.attempt.instance's distinct objects (review cycles share the
+// one attempt budget, R4), so the review-route rules can count the budget via length_* on
+// the loop. The budget rule MUST bind route.attempt.instance exactly (length_* resolves by
+// exact predicate), never the route.attempt. prefix.
 const (
-	RouteVerdictPredicate = "route.verdict"
-	RouteAttemptPrefix    = "route.attempt."
+	RouteVerdictPredicate = "route.review.verdict"
+	RouteAttemptPredicate = "route.attempt.instance"
 )
 
-// VerdictPrefix is the namespace this tool owns on the run entity: the reviewer's
-// current per-task verdict, keyed by task index (review.verdict.<i>). Per-task
-// keying makes each task's verdict its own predicate — independently upserted on a
-// re-review, mirroring measurement.result.* — so the open_pr gate can require every
-// task's verdict without one task clobbering another (the graph merges replace
-// per-(subject, predicate)).
-const VerdictPrefix = "review.verdict."
+// VerdictPredicate is the predicate this tool owns on the run entity: the reviewer's
+// current verdict (review.verdict.value). Single-task at M0 (beta.147 D1): the per-task
+// index is out of the predicate; a re-review upserts it (the graph merges replace
+// per-(subject, predicate)). The M1 multi-task future keys the task into the entity ID.
+const VerdictPredicate = "review.verdict.value"
 
-// FindingsPrefix is the namespace this tool owns for the reviewer's per-task PROSE
-// findings (review.findings.<i>) — the required changes Quinn raised, joined into one
-// scalar. A changes_requested re-entry (D16) tells the fresh Amelia to re-read them off
-// the run and address them. Same single writer as the verdict (reviewer-quinn).
-const FindingsPrefix = "review.findings."
+// FindingsPredicate is the predicate this tool owns for the reviewer's PROSE findings
+// (review.findings.value) — the required changes Quinn raised, joined into one scalar.
+// A changes_requested re-entry (D16) tells the fresh Amelia to re-read them off the run
+// and address them. Same single writer as the verdict (reviewer-quinn).
+const FindingsPredicate = "review.findings.value"
 
-// findingsPredicate returns the per-task findings predicate for a task index.
-func findingsPredicate(taskIndex int) string {
-	return FindingsPrefix + strconv.Itoa(taskIndex)
-}
+// findingsPredicate returns the findings predicate (idx retained for call-site
+// continuity; single-task at M0 so it does not key the predicate).
+func findingsPredicate(taskIndex int) string { _ = taskIndex; return FindingsPredicate }
 
-// verdictPredicate returns the per-task verdict predicate for a task index.
-func verdictPredicate(taskIndex int) string {
-	return VerdictPrefix + strconv.Itoa(taskIndex)
-}
+// verdictPredicate returns the verdict predicate (idx retained for call-site continuity).
+func verdictPredicate(taskIndex int) string { _ = taskIndex; return VerdictPredicate }
 
 // The two verdicts. A rule gates open_pr on VerdictApproved (wired later).
 const (
@@ -238,9 +234,8 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		}
 		now := time.Now().UTC()
 		mirror := []message.Triple{{Subject: loopEntityID, Predicate: RouteVerdictPredicate, Object: verdict, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0}}
-		attemptPred := RouteAttemptPrefix + idxStr
 		for _, obj := range attempts {
-			mirror = append(mirror, message.Triple{Subject: loopEntityID, Predicate: attemptPred, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0})
+			mirror = append(mirror, message.Triple{Subject: loopEntityID, Predicate: RouteAttemptPredicate, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0})
 		}
 		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, mirror, []string{RouteVerdictPredicate}); merr != nil {
 			return errResult(call, writeErrKind(merr), "submit_review: stamp the route mirror on %s: %v", loopEntityID, merr)
@@ -257,11 +252,12 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
-// stampVerdict upserts review.verdict.<taskIndex> AND review.findings.<taskIndex> on the
-// run entity (replace-by-predicate, so a re-review of that task replaces its prior verdict
-// and findings rather than appending; other tasks' facts, being distinct predicates, are
-// untouched). The findings are Quinn's prose (joined into one scalar) — model JUDGMENT the
-// changes_requested re-entry (D16) tells the fresh Amelia to re-read and address.
+// stampVerdict upserts review.verdict.value AND review.findings.value on the run entity
+// (replace-by-predicate, so a re-review replaces the prior verdict and findings rather than
+// appending). Single-task at M0 (beta.147 D1): the per-task index is out of the predicate;
+// taskIndex is retained for call-site continuity. The findings are Quinn's prose (joined
+// into one scalar) — model JUDGMENT the changes_requested re-entry (D16) tells the fresh
+// Amelia to re-read and address.
 func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskIndex int, verdict string, findings []string) error {
 	now := time.Now().UTC()
 	mk := func(pred, obj string) message.Triple {
@@ -276,12 +272,14 @@ func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskInd
 	return e.writer.ReplaceTriples(ctx, runEntityID, triples, nil)
 }
 
-// readAttemptObjects reads the distinct objects of the run's task.attempt.<idx> counter
+// readAttemptObjects reads the distinct objects of the run's task.attempt.instance counter
 // (each object is a developer-loop instance, one per attempt) so the review-route mirror
 // can append them onto the review loop and the route rules count the shared attempt budget
-// via length_* (R4: review cycles and measurement retries share the one budget).
+// via length_* (R4: review cycles and measurement retries share the one budget). idx is
+// retained for call-site continuity (single-task at M0; the index is out of the predicate).
 func (e *Executor) readAttemptObjects(ctx context.Context, runEntityID string, idx int) ([]string, error) {
-	want := "task.attempt." + strconv.Itoa(idx)
+	_ = idx
+	want := "task.attempt.instance"
 	triples, err := e.reader.ReadFacts(ctx, runEntityID, want)
 	if err != nil {
 		return nil, err
@@ -298,36 +296,17 @@ func (e *Executor) readAttemptObjects(ctx context.Context, runEntityID string, i
 	return objs, nil
 }
 
-// projectedTaskIDs returns the distinct projected task indices (as strings, matching
-// measurement Result.TaskID) present under the task.spec.* namespace, sorted — the
-// set a reviewed task_index must belong to.
+// projectedTaskIDs returns the projected task IDs (matching measurement Result.TaskID)
+// present under the task.spec.* family — the set a reviewed task_index must belong to.
+// Single-task at M0 (beta.147 D1): the index is out of the predicate, so ANY task.spec
+// fact means the one task (ID "0") is projected.
 func projectedTaskIDs(triples []message.Triple) []string {
-	seen := map[int]bool{}
 	for _, tr := range triples {
-		rest, ok := strings.CutPrefix(tr.Predicate, devtask.TaskSpecPrefix)
-		if !ok {
-			continue
+		if strings.HasPrefix(tr.Predicate, devtask.TaskSpecPrefix) {
+			return []string{"0"}
 		}
-		idxStr, _, ok := strings.Cut(rest, ".")
-		if !ok {
-			continue
-		}
-		i, err := strconv.Atoi(idxStr)
-		if err != nil {
-			continue
-		}
-		seen[i] = true
 	}
-	ids := make([]int, 0, len(seen))
-	for i := range seen {
-		ids = append(ids, i)
-	}
-	sort.Ints(ids)
-	out := make([]string, len(ids))
-	for k, i := range ids {
-		out[k] = strconv.Itoa(i)
-	}
-	return out
+	return nil
 }
 
 // nonBlank drops empty/whitespace-only findings so a stray "" cannot count as a

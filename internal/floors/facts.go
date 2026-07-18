@@ -6,39 +6,60 @@ package floors
 // how it lands on the graph, shared between the writer and any future reader so they
 // cannot drift.
 //
-// Keying is per (task, floor): floor.finding.<taskIndex>.<floorName>.<field>. The
-// graph merges replace-per-(subject,predicate), so a single exact predicate would
-// hold only ONE finding; keying the task index AND the floor name into the predicate
-// gives each floor its own sub-package, re-stamped each attempt (latest-attempt-wins)
-// so a task's current floor verdicts never clobber another task's. Mirrors the
-// measurement.result.* / task.spec.* namespaces rather than an append log — the
-// current attempt's verdict is what the gate reads; attempt history is task.attempt.
+// beta.147 D1/D4: the findings FLATTEN. The old per-(task, floor) tree
+// floor.finding.<i>.<floor>.<field> is not canonicalizable (>3 segments, a digit
+// segment), so it collapses to three flat predicates on the run: the aggregate the
+// route reads, one human-legible detail scalar (the per-floor prose concatenated), and
+// the attempt binding. Single-task at M0 (the index is out of the predicate); the
+// route only ever read the aggregate, so nothing loses a matched condition.
 
-// FindingPrefix is the owned namespace floor findings live under on the run entity:
-// floor.finding.<taskIndex>.<floorName>.<field>. It anchors to the floor.finding.*
-// vocab namespace (writer floor-tools, G5).
-const FindingPrefix = "floor.finding."
-
-// Fact-key suffixes for one floor's finding. Passed is the harness-DERIVED verdict
-// (the floor is deterministic Go, not a model claim — G3); Detail is the reason,
-// kept so a park-toward-human on a rejecting floor is legible (G7).
-const (
-	FactPassed = "passed"
-	FactDetail = "detail"
+import (
+	"fmt"
+	"strings"
 )
 
-// FactAttempt is the per-task sub-key holding the attempt identity (AttemptID) the
-// finding set evaluated: floor.finding.<taskIndex>.attempt. It binds the whole
-// finding set to a specific attempt so a gate can require the findings belong to the
-// run's CURRENT attempt before reading them as a pass — without it, a stale earlier
-// pass is indistinguishable from a current one. It is a sibling of the per-floor
-// sub-keys (no floor is named "attempt"), a scalar at the task level.
-const FactAttempt = "attempt"
+// FindingPrefix is the shared prefix of the flattened finding predicates — the
+// read/clear scope for the whole finding package on the run entity (writer
+// floor-tools, G5).
+const FindingPrefix = "floor.finding."
 
-// FactRejected is the per-task AGGREGATE verdict sub-key: floor.finding.<taskIndex>.
-// rejected, "true" iff ANY floor rejected (floors.AnyRejected). It is the single bool
-// the dev-loop gate reads to route (advance vs retry) rather than re-deriving it from
-// the six per-floor sub-keys — the gate stays a simple literal read. A sibling of the
-// per-floor sub-keys and of attempt (no floor is named "rejected"), scalar at the task
-// level. The per-floor findings stay stamped alongside it for the human-legible reason.
-const FactRejected = "rejected"
+// The flattened finding predicates (writer floor-tools, G5). These are WHOLE
+// predicates (not suffixes concatenated onto FindingPrefix) — the *Predicate naming
+// signals that, distinct from measurement's Fact* suffixes which ARE concatenated.
+const (
+	// RejectedPredicate is the AGGREGATE verdict the dev-loop route reads: "true" iff
+	// ANY floor rejected (floors.AnyRejected). One literal read, not a re-derivation
+	// from per-floor sub-keys. The route stays a simple literal read.
+	RejectedPredicate = "floor.finding.rejected"
+	// DetailPredicate is the per-floor prose, concatenated into one human-legible
+	// scalar — kept so a park-toward-human on a rejecting floor is legible (G7). It was
+	// never matched in a rule condition, so folding the per-floor sub-keys into one
+	// scalar loses no routing surface.
+	DetailPredicate = "floor.finding.detail"
+	// AttemptPredicate binds the whole finding set to the AttemptID it evaluated, so a
+	// gate can require the findings belong to the run's CURRENT attempt before reading
+	// them as a pass — without it, a stale earlier pass is indistinguishable from a current one.
+	AttemptPredicate = "floor.finding.attempt"
+)
+
+// FormatDetail renders the per-floor findings into the one human-legible detail
+// scalar (D4). Each line names the floor, its pass/reject, and its reason — so a
+// park-toward-human keeps the full floor breakdown the per-floor triples used to
+// carry. Order is CheckAll's fixed floor order, so the output is stable.
+func FormatDetail(findings []Finding) string {
+	var b strings.Builder
+	for i, f := range findings {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		status := "passed"
+		if !f.Passed {
+			status = "REJECTED"
+		}
+		fmt.Fprintf(&b, "%s: %s", f.Floor, status)
+		if f.Detail != "" {
+			fmt.Fprintf(&b, " — %s", f.Detail)
+		}
+	}
+	return b.String()
+}

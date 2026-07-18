@@ -8,38 +8,35 @@ package measurement
 // (the reviewer) is the same anti-drift discipline devtask.Fact* applies to the
 // task.spec seam: one declaration, two consumers, no silent divergence.
 //
-// The keying is PER-TASK on purpose. The graph merges replace-per-(subject,
-// predicate) (graph.MergeTriples), so a single exact predicate could hold only the
-// LAST task's measurement — a second task would clobber the first. Keying the task
-// index into the predicate (measurement.result.<i>.<field>) gives each task its own
-// owned sub-package, upserted independently: re-measuring task i replaces task i's
-// facts and leaves the others untouched, which is exactly the "latest per task"
-// shape CanApprove expects (one measurement per required task). It mirrors the
-// task.spec.* namespace (owned, per-task, replace) rather than the append-evidence
-// shape, because a measurement is a task's CURRENT outcome, not an accumulating log
-// (attempt history is task.attempt's job, a separate writer).
+// Single-task at M0 (reshape R9 / beta.147 D1): the per-task index is OUT of the
+// predicate. beta.147's canonical-predicate contract forbids the old
+// measurement.result.<i>.<field> shape (>3 segments, a digit-start segment), so a
+// task's measurement is now ONE owned package on the run — measurement.result.<field>
+// — re-stamped latest-wins each attempt. The M1 multi-task future keys the task into
+// the ENTITY ID (a per-task entity), an explicit seam, never back into the predicate.
 
 // ResultPrefix is the owned namespace measurement facts live under on the run
-// entity: measurement.result.<taskIndex>.<field>. It anchors to the
-// measurement.result.* vocab namespace (writer measurement-harness, G5). The task
-// index in the middle is the same devtask task index task.spec.<i> is keyed by.
+// entity: measurement.result.<field>. It anchors to the measurement.result.* vocab
+// family (writer measurement-harness, G5) and is the read prefix for the whole
+// single-task measurement package.
 const ResultPrefix = "measurement.result."
 
-// Fact-key suffixes for one task's measurement, under
-// measurement.result.<taskIndex>.<suffix>. Passed is the harness-DERIVED headline
-// (G3 — computed here from the real exit status, never a caller-supplied outcome);
-// Ran/ExitCode/TimedOut are the raw evidence a reader re-derives the pass from
-// (ignoring a possibly-stale Passed), and Command records exactly what ran (G7).
+// Fact-key suffixes for the run's measurement, under measurement.result.<suffix>.
+// Passed is the harness-DERIVED headline (G3 — computed here from the real exit
+// status, never a caller-supplied outcome); Ran/ExitCode/TimedOut are the raw
+// evidence a reader re-derives the pass from (ignoring a possibly-stale Passed), and
+// Command records exactly what ran (G7). ExitCode/TimedOut kebab per the canonical
+// predicate grammar (no underscore).
 const (
 	FactCommand  = "command"
 	FactRan      = "ran"
-	FactExitCode = "exit_code"
-	FactTimedOut = "timed_out"
+	FactExitCode = "exit-code"
+	FactTimedOut = "timed-out"
 	FactPassed   = "passed"
 	// FactCommit binds the measurement to the SNAPSHOT it ran against — the run's
-	// attempt.commit at measure time. It is NOT part of the pass derivation (CanApprove
+	// attempt.commit.sha at measure time. It is NOT part of the pass derivation (CanApprove
 	// ignores it, and ResultsFromFacts collects but does not read it — an extra sub-key is
 	// harmless); it lets the floors route treat a green measurement as stale (fail-closed)
-	// when a later attempt was re-applied but never re-measured (a different attempt.commit).
+	// when a later attempt was re-applied but never re-measured (a different attempt.commit.sha).
 	FactCommit = "commit"
 )

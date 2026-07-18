@@ -42,10 +42,10 @@ const Source = "sandbox-provisioner"
 const (
 	// ReadyPredicate is the readiness gate the dev loop proceeds on: "true" only
 	// when a sandbox-scope tier proved the claim on a cold-built environment.
-	ReadyPredicate = "sandbox.ready"
+	ReadyPredicate = "sandbox.provision.ready"
 	// BlockedPredicate carries the (scrubbed) reason provisioning could not prove
 	// the sandbox ready — a park rule routes it to the human/operator (SB5).
-	BlockedPredicate = "sandbox.blocked"
+	BlockedPredicate = "sandbox.provision.blocked"
 	// AttestationImagePredicate is the digest-pinned image the baseline proved
 	// (provenance: exactly which image built the repo cold).
 	AttestationImagePredicate = "sandbox.attestation.image"

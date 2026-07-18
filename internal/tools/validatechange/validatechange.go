@@ -60,7 +60,7 @@ const Source = "openspec-validate-harness"
 
 // ValidatedPredicate is the milestone fact this harness owns: present on the run
 // entity == the run's change passed the OpenSpec CLI validator.
-const ValidatedPredicate = "openspec.validated"
+const ValidatedPredicate = "openspec.change.validated"
 
 // openspecBin is the OpenSpec CLI binary shelled as the oracle.
 const openspecBin = "openspec"

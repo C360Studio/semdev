@@ -182,7 +182,7 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 	out := measurementTriples(runEntityID, idx, result, now)
 	out = append(out, message.Triple{
-		Subject: runEntityID, Predicate: measurement.ResultPrefix + strconv.Itoa(idx) + "." + measurement.FactCommit,
+		Subject: runEntityID, Predicate: measurement.ResultPrefix + measurement.FactCommit,
 		Object: measuredCommit, Source: Source, Timestamp: now, Confidence: 1.0,
 	})
 	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
@@ -221,7 +221,7 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 // committed) so the measurement can be bound to the snapshot it ran against. Returns ""
 // (no error) when absent — measure ran before any apply, which the route reads as stale.
 func (e *Executor) readAttemptCommit(ctx context.Context, runEntityID string) (string, error) {
-	const attemptCommit = "attempt.commit"
+	const attemptCommit = "attempt.commit.sha"
 	triples, err := e.reader.ReadFacts(ctx, runEntityID, attemptCommit)
 	if err != nil {
 		return "", err
@@ -260,12 +260,14 @@ func (e *Executor) readTestCommand(ctx context.Context, runEntityID string, idx 
 	return "", nil
 }
 
-// measurementTriples projects one task's measurement into the owned per-task fact
-// package on the run entity: measurement.result.<idx>.<field>. The fixed sub-key
-// set upserts by predicate (no removePredicates needed), so re-measuring the task
-// replaces its prior facts and leaves other tasks untouched.
+// measurementTriples projects the run's measurement into the owned fact package on
+// the run entity: measurement.result.<field> (single-task at M0, beta.147 D1; idx is
+// retained for logging/schema continuity but no longer keys the predicate). The fixed
+// sub-key set upserts by predicate (no removePredicates needed), so re-measuring
+// replaces the prior facts.
 func measurementTriples(runEntityID string, idx int, r measurement.Result, now time.Time) []message.Triple {
-	prefix := measurement.ResultPrefix + strconv.Itoa(idx) + "."
+	_ = idx
+	prefix := measurement.ResultPrefix
 	mk := func(field, obj string) message.Triple {
 		return message.Triple{
 			Subject:    runEntityID,

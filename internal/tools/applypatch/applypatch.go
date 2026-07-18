@@ -34,7 +34,7 @@ const ToolName = "apply_patch"
 // CommitPredicate is the run-entity fact apply_patch owns: the SHA of the latest committed
 // attempt. Exact predicate → latest-wins (a retry's commit upserts it). The cold verify and
 // read_diff read it to target the immutable snapshot rather than the warm working tree.
-const CommitPredicate = "attempt.commit"
+const CommitPredicate = "attempt.commit.sha"
 
 // Source is stamped on the attempt.commit triple. It MUST equal the single writer declared
 // for attempt.commit in the vocabulary (G5).

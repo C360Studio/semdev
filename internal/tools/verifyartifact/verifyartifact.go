@@ -57,7 +57,7 @@ const Source = "verify-harness"
 // predicate → latest-wins (a retry re-run upserts). The rule-native delivery route reads it
 // directly (08a coherent on eq "pass", 08b blocked on eq "fail"; a "retry" matches neither),
 // which is why RunVerify stamps no loop chaining marker (the reshape, R1).
-const ResultPredicate = "verify.result"
+const ResultPredicate = "verify.cleanroom.result"
 
 // dockerBin is the docker CLI binary the cold proof shells (matches cleanroom's and
 // provision_sandbox's default). A package const keeps the surface small; a fake Prover

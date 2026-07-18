@@ -47,15 +47,19 @@ const RouteMirrorSource = "route-mirror"
 // The route-mirror predicates check_floors stamps on ITS OWN floors loop (not the run). A
 // rule condition reads only the firing entity's triples, so the floors-route rules (which
 // fire on this loop) cannot read the run's measurement / attempt facts — the harness copies
-// them here as RAW facts (never a derived route decision, G2). route.passed is the copy of
-// measurement.result.<i>.passed (fail-closed "false" if absent — the "never measured"
-// case); route.rejected is the copy of this run's floor.finding.<i>.rejected; route.attempt
-// is the append-mirror of task.attempt.<i>'s distinct objects, so the route rules can count
-// the budget via length_* on the loop.
+// them here as RAW facts (never a derived route decision, G2). route.attempt.passed is the
+// copy of measurement.result.passed (fail-closed "false" if absent — the "never measured"
+// case); route.attempt.rejected is the copy of this run's floor.finding.rejected;
+// route.attempt.instance is the append-mirror of task.attempt.instance's distinct objects,
+// so the route rules can count the budget via length_* on the loop.
 const (
-	RoutePassedPredicate   = "route.passed"
-	RouteRejectedPredicate = "route.rejected"
-	RouteAttemptPrefix     = "route.attempt."
+	RoutePassedPredicate   = "route.attempt.passed"
+	RouteRejectedPredicate = "route.attempt.rejected"
+	// RouteAttemptPredicate is the MULTI-VALUED mirrored attempt counter. The budget
+	// route counts its objects via length_* — which resolves by EXACT predicate, so the
+	// single-valued route.attempt.passed/rejected siblings (same route.attempt. prefix)
+	// never inflate the count. Rules MUST bind this exact name, never the prefix.
+	RouteAttemptPredicate = "route.attempt.instance"
 )
 
 // Attempts resolves a task's current dev-loop attempt — the files it authored (with
@@ -139,48 +143,44 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 	return FloorResult{Rejected: rejected, Findings: findings, AttemptID: attemptID}, nil
 }
 
-// findingTriples projects the floor findings into the owned per-task package on the
-// run entity: floor.finding.<idx>.{attempt,rejected} plus floor.finding.<idx>.<floor>.
-// {passed,detail}. attempt binds the whole set to the source it evaluated; rejected is
-// the aggregate verdict the dev-loop gate reads (true iff any floor rejected), so the
-// gate stays a single literal read rather than re-deriving from the per-floor keys. The
-// floor set is fixed (CheckAll always returns the same floors), so the sub-keys upsert
-// by predicate and re-evaluating the task replaces its prior findings without leaving a
-// stale sub-key.
+// findingTriples projects the floor findings into the owned FLAT package on the run
+// entity (beta.147 D4): floor.finding.{attempt,rejected,detail}. attempt binds the set
+// to the source it evaluated; rejected is the aggregate verdict the dev-loop route
+// reads (true iff any floor rejected), so the route stays a single literal read; detail
+// is the per-floor prose concatenated into one human-legible scalar (the per-floor
+// sub-keys were never matched in a condition). The fixed key set upserts by predicate,
+// so re-evaluating replaces the prior findings without leaving a stale sub-key. idx is
+// retained for logging/schema continuity but no longer keys the predicate (single-task).
 func findingTriples(runEntityID string, idx int, attemptID string, rejected bool, findings []floors.Finding, now time.Time) []message.Triple {
-	base := floors.FindingPrefix + strconv.Itoa(idx) + "."
-	out := make([]message.Triple, 0, len(findings)*2+2)
-	mk := func(pred, obj string) {
-		out = append(out, message.Triple{
+	_ = idx
+	mk := func(pred, obj string) message.Triple {
+		return message.Triple{
 			Subject:    runEntityID,
 			Predicate:  pred,
 			Object:     obj,
 			Source:     Source,
 			Timestamp:  now,
 			Confidence: 1.0,
-		})
+		}
 	}
-	mk(base+floors.FactAttempt, attemptID)
-	mk(base+floors.FactRejected, strconv.FormatBool(rejected))
-	for _, f := range findings {
-		p := base + f.Floor + "."
-		mk(p+floors.FactPassed, strconv.FormatBool(f.Passed))
-		mk(p+floors.FactDetail, f.Detail)
+	return []message.Triple{
+		mk(floors.AttemptPredicate, attemptID),
+		mk(floors.RejectedPredicate, strconv.FormatBool(rejected)),
+		mk(floors.DetailPredicate, floors.FormatDetail(findings)),
 	}
-	return out
 }
 
-// readMeasuredPassed reads measurement.result.<idx>.passed off the run for the route
+// readMeasuredPassed reads measurement.result.passed off the run for the route
 // mirror and FAILS CLOSED to "false" in three cases (SB5): the measurement is absent (the
 // "model never measured" case), passed is not exactly "true", OR the measurement is STALE —
-// it was bound (measurement.result.<idx>.commit) to a DIFFERENT snapshot than the run's
-// current attempt.commit. The staleness check is the semstreams-reviewer HIGH fix: because
+// it was bound (measurement.result.commit) to a DIFFERENT snapshot than the run's
+// current attempt.commit.sha. The staleness check is the semstreams-reviewer HIGH fix: because
 // the measurement is keyed by task index and persists across attempts, a green from attempt
 // N could otherwise advance an attempt N+1 that was re-applied but never re-measured. Only a
 // measurement whose recorded commit equals the current (non-empty) attempt.commit is trusted.
 func readMeasuredPassed(ctx context.Context, reader changefacts.Reader, runEntityID string, idx int) (string, error) {
-	prefix := measurement.ResultPrefix + strconv.Itoa(idx) + "."
-	triples, err := reader.ReadFacts(ctx, runEntityID, prefix)
+	_ = idx
+	triples, err := reader.ReadFacts(ctx, runEntityID, measurement.ResultPrefix)
 	if err != nil {
 		return "", err
 	}
@@ -188,9 +188,9 @@ func readMeasuredPassed(ctx context.Context, reader changefacts.Reader, runEntit
 	for _, tr := range triples {
 		s, _ := tr.Object.(string)
 		switch tr.Predicate {
-		case prefix + measurement.FactPassed:
+		case measurement.ResultPrefix + measurement.FactPassed:
 			passed = s
-		case prefix + measurement.FactCommit:
+		case measurement.ResultPrefix + measurement.FactCommit:
 			measuredCommit = s
 		}
 	}
@@ -213,7 +213,7 @@ func readMeasuredPassed(ctx context.Context, reader changefacts.Reader, runEntit
 // committed) so a green measurement can be correlated to the snapshot it ran against.
 // Returns "" (no error) when absent.
 func readAttemptCommit(ctx context.Context, reader changefacts.Reader, runEntityID string) (string, error) {
-	const attemptCommit = "attempt.commit"
+	const attemptCommit = "attempt.commit.sha"
 	triples, err := reader.ReadFacts(ctx, runEntityID, attemptCommit)
 	if err != nil {
 		return "", err
@@ -250,8 +250,10 @@ func readAttemptObjects(ctx context.Context, reader changefacts.Reader, runEntit
 	return objs, nil
 }
 
-// attemptPredicate is the run's per-task attempt counter predicate (task.attempt.<idx>).
-func attemptPredicate(idx int) string { return "task.attempt." + strconv.Itoa(idx) }
+// attemptPredicate is the run's attempt counter predicate (task.attempt.instance).
+// Single-task at M0 (beta.147 D1): the index is out of the predicate (idx retained
+// for call-site continuity).
+func attemptPredicate(idx int) string { _ = idx; return "task.attempt.instance" }
 
 // routeMirrorTriples builds the route mirror the floors-route rules fire on: the scalar
 // route.passed / route.rejected copies plus one route.attempt.<idx> triple per distinct
@@ -262,23 +264,23 @@ func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bo
 	mk := func(pred, obj string) message.Triple {
 		return message.Triple{Subject: loopEntityID, Predicate: pred, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0}
 	}
+	_ = idx
 	out := []message.Triple{
 		mk(RoutePassedPredicate, passed),
 		mk(RouteRejectedPredicate, strconv.FormatBool(rejected)),
 	}
-	attemptPred := RouteAttemptPrefix + strconv.Itoa(idx)
 	for _, obj := range attempts {
-		out = append(out, mk(attemptPred, obj))
+		out = append(out, mk(RouteAttemptPredicate, obj))
 	}
 	return out
 }
 
-// clearFindings removes this task's entire floor.finding.<idx>.* package (the "clear
-// my prefix" pattern), so a stale earlier attempt's pass is not left readable when
-// the current attempt cannot be evaluated. A no-op when nothing is stamped yet.
+// clearFindings removes the entire floor.finding.* package (the "clear my prefix"
+// pattern), so a stale earlier attempt's pass is not left readable when the current
+// attempt cannot be evaluated. A no-op when nothing is stamped yet.
 func clearFindings(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string, idx int) error {
-	prefix := floors.FindingPrefix + strconv.Itoa(idx) + "."
-	preds, err := writer.ReadOwnedPredicates(ctx, runEntityID, prefix)
+	_ = idx
+	preds, err := writer.ReadOwnedPredicates(ctx, runEntityID, floors.FindingPrefix)
 	if err != nil {
 		return err
 	}

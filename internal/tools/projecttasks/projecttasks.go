@@ -133,6 +133,16 @@ func Project(ctx context.Context, reader changefacts.Reader, writer agentictools
 		return 0, fmt.Errorf("project_tasks: task(s) %v run `go test` but their target_files include no *_test.go the test would measure — the developer could not author the test that measures its own work (fails toward the human)", bad)
 	}
 
+	// Single-task at M0 (beta.147 D1): task.spec.<field> is flat (no per-task index), so
+	// a change with >1 task would silently clobber all but the last spec (ReplaceTriples
+	// is replace-per-predicate) and mislabel the survivor as task 0. Fail CLOSED toward the
+	// human (G2) — stamp nothing, atomic like the schema/contract gaps above — rather than
+	// develop a scrambled, partial task set. The M1 multi-task future keys the task into the
+	// ENTITY ID (a per-task entity), lifting this limit at an explicit seam.
+	if len(specs) > 1 {
+		return 0, fmt.Errorf("project_tasks: change %q authored %d tasks, but the M0 rail develops exactly one (task.spec is single-keyed) — split it into single-task changes", slug, len(specs))
+	}
+
 	out := taskSpecTriples(runEntityID, specs, time.Now().UTC())
 	if err := writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
 		return 0, fmt.Errorf("project_tasks: stamp %d task.spec facts on %s: %w", len(out), runEntityID, err)
@@ -284,7 +294,9 @@ func targetsIncludeGoTest(targets []string) bool {
 }
 
 // taskSpecTriples projects the immutable task.spec facts on the run entity:
-// task.spec.<i>.<field> for each projected task, budgets already clamped.
+// task.spec.<field> for the projected task, budgets already clamped. Single-task at
+// M0 (beta.147 D1): the index is out of the predicate; the M1 multi-task future keys
+// the task into the entity ID (a per-task entity), so multiple specs do not collide.
 func taskSpecTriples(runEntityID string, specs []devtask.TaskSpec, now time.Time) []message.Triple {
 	var out []message.Triple
 	mk := func(pred, obj string) {

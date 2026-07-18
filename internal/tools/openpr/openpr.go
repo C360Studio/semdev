@@ -34,7 +34,7 @@ const Source = "open-pr"
 
 // RefPredicate is the terminal delivery fact this package owns on the run entity. Exact
 // predicate → latest-wins.
-const RefPredicate = "pr.ref"
+const RefPredicate = "delivery.pr.ref"
 
 // localStubPrefix marks pr.ref as an M0 LOCAL delivery reference, not a live forge PR URL —
 // so a reader (or a human) can tell an M0 stub from an M2 real PR at a glance. The forge-io
