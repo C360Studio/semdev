@@ -7,7 +7,7 @@
 // Amelia's BOUNDED MULTI-TURN dev loop (apply_patch → measure in-container →
 // stop) → structural floors + route mirror → FLOORS ROUTE advance → review
 // (Quinn) → REVIEW ROUTE approved → cold clean-room verify → DELIVERY ROUTE
-// coherent → open_pr → pr.ref. Routing is RULE-NATIVE (the reshape deleted the
+// coherent → open_pr → delivery.pr.ref. Routing is RULE-NATIVE (the reshape deleted the
 // check_gate/check_coherence route-token tools — routes compose from harness facts).
 //
 // This is a bridge proof, NOT a completeness claim (G7/G10): it proves the rail
@@ -43,6 +43,8 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/boot"
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/floors"
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/mockllm"
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -64,8 +66,16 @@ const journeyIssueRef = "c360studio/semdev-journey#1"
 const journeyDecideAction = "issue_intake"
 
 // journeyChangeSlug is the slug the mock's scripted create_change authors. The
-// change facts land on the run entity under openspec.change.<slug>.*.
+// change facts land on the run entity as ONE scalar document (beta.147 D3:
+// openspec.change.document) plus the flat openspec.change.slug/.revision pointers
+// — not a openspec.change.<slug>.* triple tree.
 const journeyChangeSlug = "journey-spine-change"
+
+// journeyChangeIntent is the proposal intent the mock's scripted create_change
+// authors (journeyChangeArgs). requireChangeAuthored decodes the run's authored
+// openspec.change.document and asserts it round-trips, so the fixture and the
+// assertion share this constant rather than risking independent literals drifting.
+const journeyChangeIntent = "make the spine journey author a real change"
 
 // journeyDevAction is the action the re-woken coordinator decides after the human
 // approves the change — the entry to the dev-loop rail.
@@ -225,7 +235,7 @@ var wantAgenticHealthy = []string{
 // run mints, the change authors + validates, the human approves, Amelia's bounded
 // multi-turn loop develops → measures in-loop, the floors route advances, Quinn's
 // review approves, the cold verify passes, and the delivery route opens the PR
-// (pr.ref). Routing is rule-native. A bridge proof of connection, not a claim of
+// (delivery.pr.ref). Routing is rule-native. A bridge proof of connection, not a claim of
 // completeness (G7/G10).
 func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// The mock scripts the arc's sequential turns as a POSITIONAL sequence
@@ -250,7 +260,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Amelia's prompt) so — with tool results present — the mock returns a COMPLETION, ending
 	// her loop (StatusComplete → outcome=success). The stations + route rules then chain the
 	// rest with NO model turns of their own: the provision STATION cold-proves off approval →
-	// sandbox.ready releases the dev re-wake; her terminal → the floors STATION (06a advance)
+	// sandbox.provision.ready releases the dev re-wake; her terminal → the floors STATION (06a advance)
 	// spawns Quinn → review route (07a approved) PUBLISHES the verify-station component →
 	// delivery route (08a coherent) PUBLISHES the delivery-station component. The
 	// validate/projection/PROVISION/FLOORS/verify/delivery deterministic stations are all
@@ -280,8 +290,8 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 		// provision rule (sandbox/01) each fire a plain `publish` to their station component,
 		// which validates / freezes task.spec / cold-proves the sandbox with ZERO model turns —
 		// so there are no validate_change / project_tasks / provision_sandbox fixtures to script.
-		// The gate rule (openspec.validated), the provision gate (task.spec), and the dev re-wake
-		// gate (sandbox.ready) all wait on the components' stamped facts, not on a model turn.
+		// The gate rule (openspec.change.validated), the provision gate (task.spec), and the dev re-wake
+		// gate (sandbox.provision.ready) all wait on the components' stamped facts, not on a model turn.
 		mockllm.Fixture{
 			Marker: journeyDevRewakeMarker,
 			Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
@@ -308,11 +318,11 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 		},
 		// Verify is a publish-triggered COMPONENT now (R6, group 6): the review-approved route
 		// (dev-from-task/07a) fires a plain `publish` to the verify-station component, which
-		// cold-proves the committed artifact and stamps verify.result with ZERO model turns — so
+		// cold-proves the committed artifact and stamps verify.cleanroom.result with ZERO model turns — so
 		// there is no verify_artifact fixture to script.
 		// Delivery is likewise a publish-triggered COMPONENT (R6): the delivery route
 		// (dev-from-task/08a) fires a plain `publish` to the delivery-station component, which
-		// records pr.ref with ZERO model turns — so there is no open_pr fixture to script.
+		// records delivery.pr.ref with ZERO model turns — so there is no open_pr fixture to script.
 	)
 	// The provision station builds the fixture's declared golang image and proves it cold
 	// (real docker, real go build), and the measure station then runs `go test` in the warm
@@ -342,25 +352,26 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// Station 4 — the coordinator re-woke, decided create_change, and a rule
 	// spawned an authoring coordinator loop that called create_change. Assert the
 	// change facts landed on the run entity: proof the create_change spawn rule
-	// fired, the author inherited the run anchor, and the tool stamped
-	// openspec.change.<slug>.* on the run (the create_change→validate→approval arc
-	// hangs off these facts).
+	// fired, the author inherited the run anchor, and the tool stamped the whole
+	// change document (beta.147 D3: openspec.change.document, decoded and content-
+	// checked against the fixture) on the run (the create_change→validate→approval
+	// arc hangs off these facts).
 	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
 	t.Logf("station 4: change %q authored onto run %s (mock RequestCount=%d)", journeyChangeSlug, runEntityID, mock.RequestCount())
 
 	// Station 5 — the authored marker published the VALIDATION STATION component (R6),
-	// which ran the OpenSpec CLI oracle and stamped openspec.validated on the run, firing
+	// which ran the OpenSpec CLI oracle and stamped openspec.change.validated on the run, firing
 	// the existing change-approval gate (run-lifecycle/01) executing→awaiting_approval.
 	// Asserting the phase reached awaiting_approval proves the whole chain WITH ZERO model
 	// turns for the validate step: create_change's loop marker → the validate rule's publish
-	// → the validation-station component → openspec.validated → the gate. (The gate requires
-	// openspec.validated present, so awaiting_approval implies the component stamped it.)
+	// → the validation-station component → openspec.change.validated → the gate. (The gate requires
+	// openspec.change.validated present, so awaiting_approval implies the component stamped it.)
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
 	t.Logf("station 5: validation-station validated the change → run reached awaiting_approval (gate fired, no model turn); mock RequestCount=%d", mock.RequestCount())
 
 	// Station 6 — the human approves the change. The journey stands in for the
 	// group-5 approval adapter (a forge-io path, deferred): it stamps
-	// run.change_approved=true on the RUN entity exactly as that adapter will
+	// run.change.approved=true on the RUN entity exactly as that adapter will
 	// (Source approval-adapter, on the run entity per D15). The EXISTING
 	// run-lifecycle/02-resume-after-change-approval rule then fires
 	// awaiting_approval→executing — the release side of the first human gate.
@@ -373,14 +384,14 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	t.Logf("station 6: human approved → run resumed to executing (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 7 — approval PROJECTS the immutable task surface BEFORE the dev loop
-	// routes into development (dev-from-task spec: WHEN run.change_approved present
+	// routes into development (dev-from-task spec: WHEN run.change.approved present
 	// THEN tasks projected as task.spec; Codex P1 on f1eed5c). Two rules fire on the
 	// run entity: dev-from-task/01 stamps the bare agent.run anchor, then
 	// dev-from-task/03 fires a `publish` to the PROJECTION STATION component (R6),
 	// which reads the change's task facts, binds to the validated content (D15 #0), and
 	// stamps task.spec.<i>.* on the run with ZERO model turns. The projection rule threads
 	// the slug via the run-level openspec.change.slug pointer create_change stamped, as a
-	// publish property. Assert task.spec.0 is present — proof the projection component ran
+	// publish property. Assert task.spec.test-command is present — proof the projection component ran
 	// against the real change (exercising the revision guard projecttasks.Project carries)
 	// and the dev loop has an immutable spec to converge on before it kicks off.
 	requireTaskSpecProjected(ctx, t, runEntityID)
@@ -392,21 +403,21 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// turn), which materializes the run's checkout off boot's SHARED checkouts, builds
 	// the fixture's DECLARED golang image, proves the Go module resolves + builds cold
 	// in a fresh container, stands up the WARM dev container in boot's SHARED sandboxes
-	// (the one measure_task later Execs into), then stamps sandbox.ready + the
+	// (the one measure_task later Execs into), then stamps sandbox.provision.ready + the
 	// digest-pinned attestation. This runs the REAL cold proof (docker build + go build),
-	// the exact class both predecessors faked — zero model turns. Assert sandbox.ready ==
+	// the exact class both predecessors faked — zero model turns. Assert sandbox.provision.ready ==
 	// true AND the image attestation is present — proof the provision station ran the real
 	// proof on the committed artifact and the readiness gate can release. Red-first:
 	// disable sandbox/01 (or the provision-station component) and this station times out.
 	requireSandboxReady(ctx, t, runEntityID)
-	t.Logf("station 8: provision-station provisioned + proved cold (no model turn) — sandbox.ready stamped (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 8: provision-station provisioned + proved cold (no model turn) — sandbox.provision.ready stamped (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 9 — with task.spec frozen AND the sandbox proven ready, the resumed run
-	// kicks off the dev loop. dev-from-task/02 (gated on task.spec.0.test_command ne ""
-	// AND sandbox.ready eq true, so it fires only AFTER projection and provisioning)
+	// kicks off the dev loop. dev-from-task/02 (gated on task.spec.test-command ne ""
+	// AND sandbox.provision.ready eq true, so it fires only AFTER projection and provisioning)
 	// does the inherit publish — spawning a fresh coordinator loop bound to THIS run,
 	// which re-decides and picks dev_from_task. Assert that a coordinator loop BOUND
-	// TO THIS RUN (agent.run.entity_id == runEntityID) stamped next_action=dev_from_task
+	// TO THIS RUN (agent.run.entity-id == runEntityID) stamped next_action=dev_from_task
 	// — proof the projection+readiness-gated re-wake fired and routed into development.
 	// Bind by the run anchor + the distinct action so an earlier decision (issue_intake
 	// / create_change) on the same run cannot false-green.
@@ -417,7 +428,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// fires on the coordinator's dev_from_task decision and spawns AMELIA (a developer
 	// loop bound to this run), forced to apply_patch. Amelia authors the fixture's real
 	// fix diff; the harness applies it to the run's checkout for real (git apply).
-	// Assert a DEVELOPER loop bound to THIS run (agent.run.entity_id == runEntityID)
+	// Assert a DEVELOPER loop bound to THIS run (agent.run.entity-id == runEntityID)
 	// reached agent.loop.outcome=success — proof the dispatch fired, Amelia inherited
 	// the run, apply_patch ran and applied cleanly. The fix actually working is proven
 	// by the in-container measure (Amelia's in-loop turn); here we prove the author station chained.
@@ -428,16 +439,16 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// The reshape moved measure INTO Amelia's bounded loop: her SECOND turn calls
 	// measure_task (no StopLoop), which Execs the task's frozen test command (`go test ./...`)
 	// IN the run's WARM sandbox container — the one the provision station stood up over the SAME
-	// checkout apply_patch wrote — and stamps the harness-derived measurement.result.0 as her
+	// checkout apply_patch wrote — and stamps the harness-derived measurement.result as her
 	// in-loop feedback. Because the developer's diff actually fixed the boundary bug, the
-	// in-container `go test` PASSES: assert measurement.result.0.passed == "true" — proof the
+	// in-container `go test` PASSES: assert measurement.result.passed == "true" — proof the
 	// loop did REAL work (author → apply → build cold → test), not theater. Also assert the
-	// attempt counter task.attempt.0 was appended (by dispatch at spawn, R3 — the route counts
+	// attempt counter task.attempt.instance was appended (by dispatch at spawn, R3 — the route counts
 	// it against the budget). Red-first: break the warm container (or measure over unpatched
 	// bytes) and passed comes back "false".
 	requireMeasurementPassed(ctx, t, runEntityID)
-	requireTriplePresent(ctx, t, runEntityID, "task.attempt.0")
-	t.Logf("station 11: task measured IN-LOOP, in-container — measurement.result.0.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
+	requireTriplePresent(ctx, t, runEntityID, "task.attempt.instance")
+	t.Logf("station 11: task measured IN-LOOP, in-container — measurement.result.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 12 — the structural floors run on the developer's REAL diff (R6: the floors
 	// STATION component, zero model turns). The floors trigger (dev-from-task/05) fires on
@@ -445,56 +456,56 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// there is no separate measure loop) and PUBLISHES the floors-station component, which runs
 	// the deterministic go/ast floors over the task's target files in the checkout — the SAME
 	// bytes measure ran over (via boot's SHARED runspace.Checkouts, the DI seam) — stamps the
-	// aggregate floor.finding.0.rejected + the per-floor findings on the run, AND mirrors the
-	// routing inputs (route.passed/route.rejected/route.attempt) onto L_n for the route. Because
+	// aggregate floor.finding.rejected + the per-floor findings on the run, AND mirrors the
+	// routing inputs (route.attempt.passed/route.attempt.rejected/route.attempt.instance) onto L_n for the route. Because
 	// the fix is a clean edit (real test present, source parses, no stub/mock, targets authored),
-	// NO floor rejects: assert floor.finding.0.rejected == "false" — the structural verdict the
+	// NO floor rejects: assert floor.finding.rejected == "false" — the structural verdict the
 	// floors route advances on. Also assert the presence floor ran (the H1 gate). Red-first:
 	// disable dev-from-task/05 and this station times out.
 	requireFloorsPassed(ctx, t, runEntityID)
-	t.Logf("station 12: floors-station ran on the diff (no model turn) — floor.finding.0.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 12: floors-station ran on the diff (no model turn) — floor.finding.rejected=false (no fabrication) (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 13 — the FLOORS ROUTE advances (rule-native, the reshape replaced check_gate).
 	// The floors STATION mirrored the routing inputs onto Amelia's DEVELOPER loop L_n:
-	// route.passed (=measurement.result.0.passed=true, bound to the current attempt.commit),
-	// route.rejected (=floor.finding.0.rejected=false), route.attempt.0 (the attempt mirror). The
+	// route.attempt.passed (=measurement.result.passed=true, bound to the current attempt.commit.sha),
+	// route.attempt.rejected (=floor.finding.rejected=false), route.attempt.instance (the attempt mirror). The
 	// floors ROUTE (dev-from-task/06a) then fires ON L_n (the make-or-break coupling: the route
-	// moved from the deleted check_floors loop to the developer loop): because route.passed=true
-	// AND route.rejected=false, it ADVANCES — spawning Quinn's reviewer loop directly (NO gate
+	// moved from the deleted check_floors loop to the developer loop): because route.attempt.passed=true
+	// AND route.attempt.rejected=false, it ADVANCES — spawning Quinn's reviewer loop directly (NO gate
 	// tool, NO route-token, NO extra model turn for the route rule). Quinn reviews the cleared
 	// task (D16): submit_review reads the task's task.spec + measurement.result and DERIVES the
 	// floored verdict (G3). Because the task measured green and the mock raises no findings, the
-	// verdict is approved: assert review.verdict.0 == approved. Red-first: break the measurement
+	// verdict is approved: assert review.verdict.value == approved. Red-first: break the measurement
 	// and the floors route goes not_clean→retry instead of advance→review, so no verdict lands.
 	requireReviewApproved(ctx, t, runEntityID)
-	t.Logf("station 13: floors route advanced on L_n → Quinn reviewed the cleared task — review.verdict.0=approved (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 13: floors route advanced on L_n → Quinn reviewed the cleared task — review.verdict.value=approved (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 14 — the CLEAN-ROOM COLD VERIFY of the committed artifact (the make-or-break).
-	// The review ROUTE (dev-from-task/07a) fires on Quinn's loop reading the route.verdict
-	// mirror: because route.verdict=approved, it PUBLISHES the verify-station COMPONENT (R6, no
+	// The review ROUTE (dev-from-task/07a) fires on Quinn's loop reading the route.review.verdict
+	// mirror: because route.review.verdict=approved, it PUBLISHES the verify-station COMPONENT (R6, no
 	// model turn), threading run_entity_id as a property (Q_n is the firing entity, so the run
 	// travels as a property). The verify station CLONES the run's checkout into a fresh dir off
 	// boot's SHARED checkouts (CloneForVerify), builds the operator-declared image, and proves
 	// the artifact resolves + passes its own tests COLD in a SEPARATE fresh container with a
 	// fresh dependency cache. Because the fix is real and self-contained, the cold verify
-	// PASSES: assert verify.result == "pass". This runs the REAL docker cold proof — zero model
+	// PASSES: assert verify.cleanroom.result == "pass". This runs the REAL docker cold proof — zero model
 	// turns. Red-first: a non-self-contained fix (or a warm-cache-masked fabrication) comes back
-	// "fail"; disable the verify-station component and verify.result never lands.
+	// "fail"; disable the verify-station component and verify.cleanroom.result never lands.
 	requireVerifyPassed(ctx, t, runEntityID)
-	t.Logf("station 14: verify-station cold-proved the committed artifact (no model turn) — verify.result=pass (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 14: verify-station cold-proved the committed artifact (no model turn) — verify.cleanroom.result=pass (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 15 — the ISSUE→PR ARC CONNECTS end-to-end. The DELIVERY ROUTE (dev-from-task/08a)
 	// fires ON THE RUN (delivery is terminal, so it routes on run facts directly — no loop, no
-	// mirror, no check_coherence tool): because verify.result=pass AND review.verdict.0=approved
-	// AND openspec.validated present, it PUBLISHES the delivery-station COMPONENT (R6), which
-	// records pr.ref with zero model turns. This is the bridge proof's terminal: under the mock,
+	// mirror, no check_coherence tool): because verify.cleanroom.result=pass AND review.verdict.value=approved
+	// AND openspec.change.validated present, it PUBLISHES the delivery-station COMPONENT (R6), which
+	// records delivery.pr.ref with zero model turns. This is the bridge proof's terminal: under the mock,
 	// an issue drove all the way to a reviewed, clean-room-verified PR — the rail CONNECTS (not a
-	// completeness claim). Assert pr.ref is present (an M0 local-delivery stub — the real forge-io
+	// completeness claim). Assert delivery.pr.ref is present (an M0 local-delivery stub — the real forge-io
 	// PR is a later group; the gate genuinely passed, only the delivery target is stubbed).
 	// Red-first: break any signal (verify/validate/review) and the delivery route blocks (08b
-	// parks) instead of delivering; disable the delivery-station component and pr.ref never lands.
+	// parks) instead of delivering; disable the delivery-station component and delivery.pr.ref never lands.
 	requirePRDelivered(ctx, t, runEntityID)
-	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded pr.ref (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded delivery.pr.ref (mock RequestCount=%d)", mock.RequestCount())
 
 	// Exactly eight model turns drove the FULL arc. The route rules chain the stations with NO
 	// model turns of their own, and the deterministic stations validate / project / PROVISION /
@@ -563,7 +574,7 @@ func TestBridgeProofRetryFailThenPass(t *testing.T) {
 	t.Logf("retry station: attempt 1 measured RED → floors route retried → 2 attempts dispatched on run %s", runEntityID)
 
 	// The run RECOVERED: attempt 2 measured GREEN and advanced to review → cold verify → delivery.
-	// requirePRDelivered fails loud if the run PARKED instead (run.awaiting_human, no pr.ref) — a
+	// requirePRDelivered fails loud if the run PARKED instead (run.awaiting.human, no delivery.pr.ref) — a
 	// broken retry that exhausted to a park surfaces here rather than as a bare timeout. attempt 2's
 	// measure is WARM (attempt 1 already compiled), so the review gate's tighter window suffices.
 	requireReviewApproved(ctx, t, runEntityID)
@@ -624,12 +635,12 @@ func TestBridgeProofReviewRejectionReentry(t *testing.T) {
 	t.Logf("rejection station: Quinn rejected attempt 1 (finding) → review route re-entered dev (07b) → 2 attempts on run %s", runEntityID)
 
 	// The run RECOVERED: attempt 2 addressed the finding, Quinn's SECOND review approved → verify →
-	// delivery. Use the rejection-tolerant wait — review.verdict.0 is TRANSIENTLY changes_requested
+	// delivery. Use the rejection-tolerant wait — review.verdict.value is TRANSIENTLY changes_requested
 	// (Quinn's first review) before it becomes approved, which the happy-path requireReviewApproved
 	// would (correctly, for its path) treat as a hard failure. requirePRDelivered fails loud if the
 	// run PARKED instead (a broken 07b would exhaust to the review-park 07c).
 	if sawRejection := requireReviewEventuallyApproved(ctx, t, runEntityID, 90*time.Second); sawRejection {
-		t.Logf("rejection station: observed the transient review.verdict.0=changes_requested before approval on run %s", runEntityID)
+		t.Logf("rejection station: observed the transient review.verdict.value=changes_requested before approval on run %s", runEntityID)
 	}
 	requireVerifyPassed(ctx, t, runEntityID)
 	requirePRDelivered(ctx, t, runEntityID)
@@ -647,10 +658,10 @@ func TestBridgeProofReviewRejectionReentry(t *testing.T) {
 // converging, the run PARKS toward the human — it never ships a PR and never claims a green. Here
 // Quinn rejects THREE times (a finding each), so each attempt re-enters development (07b) until the
 // budget is spent, and the third rejection at count 3 triggers the review-exhaustion park (07c,
-// route.verdict=changes_requested ∧ route.attempt.0 count ≥ 3). Zero paid tokens.
+// route.review.verdict=changes_requested ∧ route.attempt.instance count ≥ 3). Zero paid tokens.
 //
 // This journeys the REVIEW-exhaustion park (07c). The floors-exhaustion park (06d, three RED
-// measurements → escalate) is the SAME park writer (run.awaiting_human) with a different trigger
+// measurements → escalate) is the SAME park writer (run.awaiting.human) with a different trigger
 // and is NOT separately journeyed: consecutive 06c floors-retry loops share one prompt, so the
 // positional mock cursor cannot cleanly separate them — whereas the review path interleaves a Quinn
 // review (a distinct marker) between Amelia's retry loops, which terminates each cleanly. All three
@@ -693,7 +704,7 @@ func TestBridgeProofBudgetExhaustionParks(t *testing.T) {
 	// 90s (matching the rejection sibling): after the count-3 gate returns, attempt 3 still has to
 	// apply + measure (warm) + floors + the third review + 07c before the park lands.
 	requireRunParked(ctx, t, runEntityID, 90*time.Second)
-	t.Logf("exhaustion station: run parked (run.awaiting_human), no pr.ref, no verify.result — fail-closed (SB5)")
+	t.Logf("exhaustion station: run parked (run.awaiting.human), no delivery.pr.ref, no verify.cleanroom.result — fail-closed (SB5)")
 
 	// Turn accounting: front-of-arc 4 + three dev loops (3 each = 9) + three Quinn reviews (1 each =
 	// 3) = 16. A different count means the budget did not exhaust at exactly three attempts, an extra
@@ -796,7 +807,7 @@ func resetNATS(ctx context.Context, t *testing.T) {
 	}
 }
 
-// requireAttemptCount polls up to timeout until the run carries exactly want task.attempt.0
+// requireAttemptCount polls up to timeout until the run carries exactly want task.attempt.instance
 // triples — the per-task attempt counter each developer dispatch appends at spawn
 // (dispatch-developer 04 = #1; the retry routes 06c/07b = +1 each). Exactly want proves the
 // retry machinery dispatched the expected number of attempts. The objects are distinct loop
@@ -808,7 +819,7 @@ func requireAttemptCount(ctx context.Context, t *testing.T, runEntityID string, 
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const pred = "task.attempt.0"
+	const pred = "task.attempt.instance"
 	deadline := time.Now().Add(timeout)
 	for {
 		count := 0
@@ -884,7 +895,7 @@ func publishCoordinatorWake(ctx context.Context, t *testing.T) string {
 }
 
 // approveChange stands in for the group-5 approval adapter (a forge-io path,
-// deferred): it stamps run.change_approved=true on the run entity via the same
+// deferred): it stamps run.change.approved=true on the run entity via the same
 // OwnedFactWriter transport the tools use, with the vocab writer Source
 // (approval-adapter). The predicate + Source mirror the run-lifecycle/02 resume
 // rule's condition and the vocab table; D15 puts the fact on the RUN entity so the
@@ -898,14 +909,14 @@ func approveChange(ctx context.Context, t *testing.T, runEntityID string) {
 	writer := agentictools.NewNATSOwnedFactWriter(client)
 	tr := message.Triple{
 		Subject:    runEntityID,
-		Predicate:  "run.change_approved",
+		Predicate:  "run.change.approved",
 		Object:     "true",
 		Source:     "approval-adapter",
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
 	if err := writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil); err != nil {
-		t.Fatalf("stamp run.change_approved on %s: %v", runEntityID, err)
+		t.Fatalf("stamp run.change.approved on %s: %v", runEntityID, err)
 	}
 }
 
@@ -935,7 +946,7 @@ func requireCoordinatorDecision(ctx context.Context, t *testing.T, wantTaskID, w
 }
 
 // requireRunCoordinatorDecision polls until SOME coordinator loop BOUND TO
-// runEntityID (agent.run.entity_id == runEntityID) carries
+// runEntityID (agent.run.entity-id == runEntityID) carries
 // coordinator.decision.next_action == wantAction. Unlike requireCoordinatorDecision
 // (which binds by the front-door wake's task id), the dev re-wake coordinator is
 // spawned by a rule with no journey-known task id, so it is bound by the run anchor
@@ -961,7 +972,7 @@ func requireRunCoordinatorDecision(ctx context.Context, t *testing.T, runEntityI
 }
 
 // requireDeveloperLoopCompleted polls until SOME developer loop bound to runEntityID
-// (agent.loop.role == "developer" ∧ agent.run.entity_id == runEntityID) reaches
+// (agent.loop.role == "developer" ∧ agent.run.entity-id == runEntityID) reaches
 // agent.loop.outcome == "success" — the framework's atomic loop-terminal stamp
 // (WriteLoopCompletion). Its presence is the proof dispatch-developer fired, Amelia
 // inherited the run, and her forced apply_patch ran and applied cleanly (a failed
@@ -989,7 +1000,7 @@ func requireDeveloperLoopCompleted(ctx context.Context, t *testing.T, runEntityI
 		"run_scope=inherit binds Amelia, apply_patch is advertised/scripted, and the fixture fix diff applies cleanly")
 }
 
-// requireMeasurementPassed polls the run entity until measurement.result.0.passed ==
+// requireMeasurementPassed polls the run entity until measurement.result.passed ==
 // "true" — the proof the measure-trigger rule (dev-from-task/05) fired on Amelia's
 // successful terminal, the forced measure_task loop resolved the run's WARM sandbox,
 // Exec'd the frozen `go test ./...` IN the container (over the patched checkout), and
@@ -1003,15 +1014,15 @@ func requireMeasurementPassed(ctx context.Context, t *testing.T, runEntityID str
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const passed = "measurement.result.0.passed"
+	const passed = "measurement.result.passed"
 	requireEventually(t, 3*time.Minute, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
 			return false
 		}
 		if got := tripleString(e, passed); got == "false" {
-			t.Fatalf("measure_task stamped a FAILING in-container measurement (%s=false, exit_code=%s) — the fix did not make the test pass in the warm sandbox, or measure ran over unpatched bytes / a wrong sandbox: check apply_patch wrote the SAME checkout the warm container bind-mounts, and that task.spec.0.test_command matches the fixture (`go test ./...`)",
-				passed, tripleString(e, "measurement.result.0.exit_code"))
+			t.Fatalf("measure_task stamped a FAILING in-container measurement (%s=false, exit_code=%s) — the fix did not make the test pass in the warm sandbox, or measure ran over unpatched bytes / a wrong sandbox: check apply_patch wrote the SAME checkout the warm container bind-mounts, and that task.spec.test-command matches the fixture (`go test ./...`)",
+				passed, tripleString(e, "measurement.result.exit-code"))
 		}
 		return tripleString(e, passed) == "true"
 	}, "run entity "+runEntityID+" never gained "+passed+"=true — Amelia did not call measure_task in her loop, "+
@@ -1020,38 +1031,52 @@ func requireMeasurementPassed(ctx context.Context, t *testing.T, runEntityID str
 		"container Up over the run's checkout")
 }
 
-// requireFloorsPassed polls the run entity until floor.finding.0.rejected == "false"
-// — the proof the floors-trigger (dev-from-task/06) fired on the measure loop, the
-// forced check_floors loop ran the deterministic floors over the task's target files
-// in the checkout, and NO floor rejected the developer's real diff. A stamped
+// requireFloorsPassed polls the run entity until floor.finding.rejected == "false"
+// — the proof the floors-trigger (dev-from-task/05) fired on the developer's
+// terminal, the floors STATION ran the deterministic floors over the task's target
+// files in the checkout, and NO floor rejected the developer's real diff. beta.147
+// D4 FLATTENED the per-floor findings (the old per-floor floor.finding.0.presence.passed
+// sub-key is GONE — floors.FormatDetail concatenates every floor's line into one
+// scalar instead): floor.finding.rejected is now the AGGREGATE across every floor
+// (floors.AnyRejected), so rejected=="false" is a STRONGER assertion than the old
+// single per-floor presence check — it proves ALL floors passed, presence included,
+// not just the one. To keep the explicit presence signal legible (not just folded
+// into the aggregate), this ALSO asserts the human-legible floor.finding.detail
+// (floors.FormatDetail) carries the presence floor's OWN passed line (the H1 gate) —
+// so a partial/absent finding set cannot false-green the aggregate check. A stamped
 // rejected="true" is a hard failure (a floor caught fabrication in the fixed code, or
-// the floors ran over the wrong files), surfaced immediately rather than by timeout. It
-// also asserts the presence floor ran (the H1 gate) so the finding set is the full one.
+// the floors ran over the wrong files), surfaced immediately rather than by timeout.
 func requireFloorsPassed(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const rejected = "floor.finding.0.rejected"
-	const presencePassed = "floor.finding.0.presence.passed"
+	const rejected = "floor.finding.rejected"
+	const detail = "floor.finding.detail"
+	// The presence floor's line in floors.FormatDetail's concatenated output:
+	// "<floors.FloorPresence>: passed[ — <detail>]" (floors.go pass()/FormatDetail).
+	presencePassedLine := floors.FloorPresence + ": passed"
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
 			return false
 		}
 		if got := tripleString(e, rejected); got == "true" {
-			t.Fatalf("check_floors REJECTED the developer's diff (%s=true) — a structural floor caught fabrication in the fixed code, or the floors ran over the wrong target files: check task.spec.0.target_files includes the test and that the checkout holds the patched bytes", rejected)
+			t.Fatalf("the floors station REJECTED the developer's diff (%s=true; %s=%q) — a structural floor caught fabrication in the fixed code, or the floors ran over the wrong target files: check task.spec.target-files includes the test and that the checkout holds the patched bytes",
+				rejected, detail, tripleString(e, detail))
 		}
-		// Require the aggregate present AND a per-floor finding, so a partial/absent
-		// finding set cannot false-green the "not true" check above.
-		return tripleString(e, rejected) == "false" && tripleString(e, presencePassed) != ""
-	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set — the floors trigger (dev-from-task/05) did not fire, "+
-		"or check_floors could not resolve the attempt: check Amelia's developer loop reached a terminal (the floors trigger fires on agent.loop.outcome ne \"\"), "+
-		"check_floors is advertised/scripted, and the Attempts seam resolves the target files from the checkout")
+		// Require the aggregate AND the presence floor's own passed line in the
+		// concatenated detail, so a partial/absent finding set cannot false-green
+		// the "not true" check above.
+		return tripleString(e, rejected) == "false" && strings.Contains(tripleString(e, detail), presencePassedLine)
+	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set (including the "+
+		"\""+presencePassedLine+"\" line in "+detail+") — the floors trigger (dev-from-task/05) did not fire, "+
+		"or the floors station could not resolve the attempt: check Amelia's developer loop reached a terminal "+
+		"(the floors trigger fires on agent.loop.outcome ne \"\"), and the Attempts seam resolves the target files from the checkout")
 }
 
-// requireReviewApproved polls the run entity until review.verdict.0 == "approved" — the
-// proof the floors route advanced (dev-from-task/06a, on route.passed=true+route.rejected=
+// requireReviewApproved polls the run entity until review.verdict.value == "approved" — the
+// proof the floors route advanced (dev-from-task/06a, on route.attempt.passed=true+route.attempt.rejected=
 // false) and spawned Quinn's reviewer loop, which DERIVED an approving verdict from the
 // task's passing measurement with no findings. A stamped changes_requested is a hard failure
 // (the measurement floor blocked, or a finding was raised), surfaced immediately.
@@ -1060,24 +1085,24 @@ func requireReviewApproved(ctx context.Context, t *testing.T, runEntityID string
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const verdict = "review.verdict.0"
+	const verdict = "review.verdict.value"
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
 			return false
 		}
 		if got := tripleString(e, verdict); got == "changes_requested" {
-			t.Fatalf("submit_review stamped %s=changes_requested — the measurement floor blocked approval (measurement.result.0 not passing) or Quinn raised a finding: check the floors route advanced on a green measurement and the mock submit_review fixture supplies no findings", verdict)
+			t.Fatalf("submit_review stamped %s=changes_requested — the measurement floor blocked approval (measurement.result not passing) or Quinn raised a finding: check the floors route advanced on a green measurement and the mock submit_review fixture supplies no findings", verdict)
 		}
 		return tripleString(e, verdict) == "approved"
 	}, "run entity "+runEntityID+" never gained "+verdict+"=approved — the floors advance route (dev-from-task/06a) did not fire, "+
-		"or submit_review could not derive the verdict: check check_floors mirrored route.passed=true+route.rejected=false onto its loop, the advance route spawns Quinn on that mirror, "+
-		"submit_review is advertised/scripted as a role=reviewer loop, and the task's measurement.result.0 is passing")
+		"or submit_review could not derive the verdict: check check_floors mirrored route.attempt.passed=true+route.attempt.rejected=false onto its loop, the advance route spawns Quinn on that mirror, "+
+		"submit_review is advertised/scripted as a role=reviewer loop, and the task's measurement.result is passing")
 }
 
-// requireReviewEventuallyApproved polls until review.verdict.0 == "approved", TOLERATING a
+// requireReviewEventuallyApproved polls until review.verdict.value == "approved", TOLERATING a
 // transient "changes_requested" along the way and reporting whether one was seen. The rejection
-// journey's first review rejects (a finding) before its second approves, so review.verdict.0 is
+// journey's first review rejects (a finding) before its second approves, so review.verdict.value is
 // changes_requested for the duration of the re-entry — unlike requireReviewApproved, which treats
 // any changes_requested as a hard failure (correct for the happy/retry paths, wrong here). timeout
 // must cover attempt 2's measure + the second review. The transient verdict persists for seconds
@@ -1088,7 +1113,7 @@ func requireReviewEventuallyApproved(ctx context.Context, t *testing.T, runEntit
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const verdict = "review.verdict.0"
+	const verdict = "review.verdict.value"
 	deadline := time.Now().Add(timeout)
 	for {
 		if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
@@ -1109,11 +1134,11 @@ func requireReviewEventuallyApproved(ctx context.Context, t *testing.T, runEntit
 	}
 }
 
-// requireRunParked polls until the run carries run.awaiting_human — the fail-closed terminal for
-// an exhausted/blocked run — while asserting it did NOT ship (no pr.ref) and never reached a false
-// green (no verify.result). It fails FAST and loud if a pr.ref appears (a parked run that somehow
+// requireRunParked polls until the run carries run.awaiting.human — the fail-closed terminal for
+// an exhausted/blocked run — while asserting it did NOT ship (no delivery.pr.ref) and never reached a false
+// green (no verify.cleanroom.result). It fails FAST and loud if a delivery.pr.ref appears (a parked run that somehow
 // delivered is a worse bug than a timeout). The final no-verify check catches a run that parked yet
-// had already been cold-verified — a run must not both park and carry a green verify.result.
+// had already been cold-verified — a run must not both park and carry a green verify.cleanroom.result.
 func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, timeout time.Duration) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
@@ -1124,24 +1149,24 @@ func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, tim
 		if !ok {
 			return false
 		}
-		if ref := tripleString(e, "pr.ref"); ref != "" {
-			t.Fatalf("run %s DELIVERED (pr.ref=%q) but the exhausted-budget journey must PARK, never ship — "+
+		if ref := tripleString(e, "delivery.pr.ref"); ref != "" {
+			t.Fatalf("run %s DELIVERED (delivery.pr.ref=%q) but the exhausted-budget journey must PARK, never ship — "+
 				"the review-exhaustion park (dev-from-task/07c) did not fire, or a delivery route fired on an unapproved run", runEntityID, ref)
 		}
-		return tripleString(e, "run.awaiting_human") != ""
-	}, "run "+runEntityID+" never parked (run.awaiting_human absent) — the review-exhaustion park (dev-from-task/07c) "+
-		"must fire when Quinn rejects at budget count ≥ 3: check the third submit_review stamped route.verdict=changes_requested "+
-		"and route.attempt.0 reached count 3 (07b re-dispatch stops at count 3, 07c takes over)")
+		return tripleString(e, "run.awaiting.human") != ""
+	}, "run "+runEntityID+" never parked (run.awaiting.human absent) — the review-exhaustion park (dev-from-task/07c) "+
+		"must fire when Quinn rejects at budget count ≥ 3: check the third submit_review stamped route.review.verdict=changes_requested "+
+		"and route.attempt.instance reached count 3 (07b re-dispatch stops at count 3, 07c takes over)")
 
 	// No false green: an unapproved, parked run must never carry a passing cold verify.
 	if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
-		if v := tripleString(e, "verify.result"); v != "" {
-			t.Fatalf("parked run %s carries verify.result=%q — a parked (never-approved) run must never reach the cold verify (no false green, SB5)", runEntityID, v)
+		if v := tripleString(e, "verify.cleanroom.result"); v != "" {
+			t.Fatalf("parked run %s carries verify.cleanroom.result=%q — a parked (never-approved) run must never reach the cold verify (no false green, SB5)", runEntityID, v)
 		}
 	}
 }
 
-// requireVerifyPassed polls the run entity until verify.result == "pass" — the proof the
+// requireVerifyPassed polls the run entity until verify.cleanroom.result == "pass" — the proof the
 // review approved route (dev-from-task/07a) fired on Quinn's loop and PUBLISHED the
 // verify-station COMPONENT (R6, no model turn), which cloned the committed artifact and
 // proved it resolves + passes its own tests COLD in a fresh throwaway container, and the
@@ -1154,7 +1179,7 @@ func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) 
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const result = "verify.result"
+	const result = "verify.cleanroom.result"
 	requireEventually(t, 3*time.Minute, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
@@ -1165,24 +1190,24 @@ func requireVerifyPassed(ctx context.Context, t *testing.T, runEntityID string) 
 		}
 		return tripleString(e, result) == "pass"
 	}, "run entity "+runEntityID+" never gained "+result+"=pass — the review approved route (dev-from-task/07a) did not fire "+
-		"(agent.run.entity_id may not have propagated onto Quinn's review loop to thread the run_entity_id property), or the cold clean-room proof did not run: "+
-		"check submit_review mirrored route.verdict=approved onto its loop, the approved route publishes component.verify-station.dispatch, the verify-station component is healthy, "+
+		"(agent.run.entity-id may not have propagated onto Quinn's review loop to thread the run_entity_id property), or the cold clean-room proof did not run: "+
+		"check submit_review mirrored route.review.verdict=approved onto its loop, the approved route publishes component.verify-station.dispatch, the verify-station component is healthy, "+
 		"and docker is available (the journey builds the fixture image and runs go test in a fresh container)")
 }
 
-// requirePRDelivered polls the run entity until pr.ref is present — the proof the DELIVERY
-// ROUTE (dev-from-task/08a) fired ON THE RUN: because verify.result=pass AND review.verdict.0
-// =approved AND openspec.validated present cohere, it forced open_pr, which recorded the
-// delivery reference — the full issue→PR arc's terminal. A stamped run.awaiting_human (the
-// blocked delivery park, 08b) alongside no pr.ref is the blocked path; here we require
+// requirePRDelivered polls the run entity until delivery.pr.ref is present — the proof the DELIVERY
+// ROUTE (dev-from-task/08a) fired ON THE RUN: because verify.cleanroom.result=pass AND review.verdict.value
+// =approved AND openspec.change.validated present cohere, it forced open_pr, which recorded the
+// delivery reference — the full issue→PR arc's terminal. A stamped run.awaiting.human (the
+// blocked delivery park, 08b) alongside no delivery.pr.ref is the blocked path; here we require
 // delivery. The rule-native delivery route stamps no pr.coherence decision (check_coherence
-// is deleted) — the route conditions ARE the roll-up, so pr.ref present is the coherent proof.
+// is deleted) — the route conditions ARE the roll-up, so delivery.pr.ref present is the coherent proof.
 func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const prRef = "pr.ref"
+	const prRef = "delivery.pr.ref"
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
@@ -1190,12 +1215,12 @@ func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
 		}
 		// The blocked delivery route (08b) parks on a non-pass verify — if the run parked
 		// instead of delivering, surface it rather than timing out.
-		if park := tripleString(e, "run.awaiting_human"); park != "" && tripleString(e, prRef) == "" {
-			t.Fatalf("the run PARKED instead of delivering (run.awaiting_human=%q, no pr.ref) — the delivery route blocked (08b): a delivery signal did not cohere (verify not pass, change unvalidated, or the task unapproved). The happy-path journey expects all three green", park)
+		if park := tripleString(e, "run.awaiting.human"); park != "" && tripleString(e, prRef) == "" {
+			t.Fatalf("the run PARKED instead of delivering (run.awaiting.human=%q, no delivery.pr.ref) — the delivery route blocked (08b): a delivery signal did not cohere (verify not pass, change unvalidated, or the task unapproved). The happy-path journey expects all three green", park)
 		}
 		return tripleString(e, prRef) != ""
 	}, "run entity "+runEntityID+" never gained "+prRef+" — the coherent delivery route (dev-from-task/08a) did not fire or open_pr did not record it: "+
-		"check all three signals are on the run (verify.result=pass, review.verdict.0=approved, openspec.validated present), the delivery route fires on the run reading them, and open_pr is advertised/scripted")
+		"check all three signals are on the run (verify.cleanroom.result=pass, review.verdict.value=approved, openspec.change.validated present), the delivery route fires on the run reading them, and open_pr is advertised/scripted")
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for
@@ -1222,7 +1247,7 @@ func requireTriplePresent(ctx context.Context, t *testing.T, runEntityID, predic
 }
 
 // requireRunAnchor polls until THIS wake's coordinator loop carries an
-// agent.run.entity_id triple — the run anchor stamped by publish_agent
+// agent.run.entity-id triple — the run anchor stamped by publish_agent
 // run_scope=new — and returns that run entity id. Its presence is the proof the
 // issue_intake spawn rule fired and minted a run rooted at the coordinator loop.
 func requireRunAnchor(ctx context.Context, t *testing.T, wantTaskID string) string {
@@ -1243,7 +1268,7 @@ func requireRunAnchor(ctx context.Context, t *testing.T, wantTaskID string) stri
 			}
 		}
 		return false
-	}, "coordinator loop (task "+wantTaskID+") never gained an agent.run.entity_id anchor "+
+	}, "coordinator loop (task "+wantTaskID+") never gained an agent.run.entity-id anchor "+
 		"— the issue_intake spawn rule (run_scope=new) did not fire; check the rule conditions "+
 		"(coordinator role / next_action=issue_intake / no prior run anchor) and that the lifecycle manager is wired")
 	return runEntityID
@@ -1266,36 +1291,63 @@ func requireRunPhase(ctx context.Context, t *testing.T, runEntityID, wantPhase s
 		return tripleString(e, agentrun.PhasePredicate) == wantPhase
 	}, "run entity "+runEntityID+" never reached agent.run.phase="+wantPhase+
 		" — no rule advanced it there (for executing: the agent-run handoff→dispatched→executing bridge; "+
-		"for awaiting_approval: validate stamping openspec.validated → the change-approval gate)")
+		"for awaiting_approval: validate stamping openspec.change.validated → the change-approval gate)")
 }
 
-// requireChangeAuthored polls the run entity until it carries at least one
-// openspec.change.<slug>.* triple — the proof the authoring loop's create_change
-// call stamped the change package on the run (it targets the run entity via the
-// inherited agent.run_entity_id). Fails naming the likely cause.
+// requireChangeAuthored polls the run entity until it carries the whole authored
+// change DOCUMENT (beta.147 D3: openspec.change.document, one JSON scalar — the
+// old openspec.change.<slug>.* triple tree is gone) and DECODES it, asserting the
+// decoded document's slug and proposal intent match what the mock's create_change
+// call authored. Decoding — not mere presence — proves the change was authored
+// WITH the expected content (the authoring loop's create_change call really did
+// stamp THIS journey's change on the run via the inherited agent.run.entity-id),
+// not just that some string landed under the predicate. Fails naming the likely
+// cause.
 func requireChangeAuthored(ctx context.Context, t *testing.T, runEntityID, slug string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	prefix := "openspec.change." + slug + "."
+	var doc changefacts.ChangeDocument
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
 			return false
 		}
-		for _, tr := range e.Triples {
-			if strings.HasPrefix(tr.Predicate, prefix) {
-				return true
-			}
+		raw := tripleString(e, changefacts.DocumentPredicate)
+		if raw == "" {
+			return false
 		}
-		return false
-	}, "run entity "+runEntityID+" never gained openspec.change."+slug+".* facts — the create_change "+
-		"spawn rule did not fire, the author did not inherit the run anchor (agent.run_entity_id), or the "+
+		d, err := changefacts.UnmarshalDocument(raw)
+		if err != nil {
+			t.Fatalf("run %s carries an UNDECODABLE %s: %v — create_change stamped malformed JSON",
+				runEntityID, changefacts.DocumentPredicate, err)
+		}
+		doc = d
+		return true
+	}, "run entity "+runEntityID+" never gained "+changefacts.DocumentPredicate+" — the create_change "+
+		"spawn rule did not fire, the author did not inherit the run anchor (agent.run.entity-id), or the "+
 		"create_change tool call was not scripted/advertised")
+
+	// Presence alone only proves SOME document landed; decode the content to prove
+	// it is THIS journey's change (the create_change args round-tripped), not an
+	// artifact of a stale or wrong write.
+	if doc.Change == nil {
+		t.Fatalf("run %s decoded %s but Change is nil — create_change stamped an empty document",
+			runEntityID, changefacts.DocumentPredicate)
+	}
+	gotIntent := ""
+	if doc.Change.Proposal != nil {
+		gotIntent = doc.Change.Proposal.Intent
+	}
+	if doc.Change.Slug != slug || gotIntent != journeyChangeIntent {
+		t.Fatalf("run %s authored change slug=%q intent=%q, want slug=%q intent=%q — the create_change "+
+			"fixture args did not round-trip through the document blob",
+			runEntityID, doc.Change.Slug, gotIntent, slug, journeyChangeIntent)
+	}
 }
 
-// requireTaskSpecProjected polls the run entity until task.spec.0.test_command is
+// requireTaskSpecProjected polls the run entity until task.spec.test-command is
 // present and non-empty — the proof the approval-triggered projection rule
 // (dev-from-task/03) spawned a project_tasks loop that froze the change's tasks
 // into the immutable task.spec on the run. It is also the exact fact the dev
@@ -1306,7 +1358,7 @@ func requireTaskSpecProjected(ctx context.Context, t *testing.T, runEntityID str
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
-	const projected = "task.spec.0.test_command"
+	const projected = "task.spec.test-command"
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
@@ -1315,18 +1367,18 @@ func requireTaskSpecProjected(ctx context.Context, t *testing.T, runEntityID str
 		return tripleString(e, projected) != ""
 	}, "run entity "+runEntityID+" never gained "+projected+" — the projection rule (dev-from-task/03) "+
 		"did not fire or project_tasks refused: check the run-level openspec.change.slug pointer (threaded into the "+
-		"projection prompt), the D15 #0 revision bind (openspec.validated == openspec.change.<slug>.revision), and "+
+		"projection prompt), the D15 #0 revision bind (openspec.change.validated == openspec.change.revision, both flat run-level facts post-D3), and "+
 		"that project_tasks was advertised/scripted")
 }
 
-// requireSandboxReady polls the run entity until sandbox.ready == "true" and the
+// requireSandboxReady polls the run entity until sandbox.provision.ready == "true" and the
 // image attestation is present — the proof the provision rule (sandbox/01) PUBLISHED
 // the provision-station COMPONENT (R6, no model turn), which BUILT the declared image
 // and proved the repo builds cold, stamping the harness-derived readiness/attestation.
-// It also gates the dev re-wake (dev-from-task/02 requires sandbox.ready eq true), so
+// It also gates the dev re-wake (dev-from-task/02 requires sandbox.provision.ready eq true), so
 // asserting it here proves the provision-before-kickoff ordering. The timeout is
 // wide: this station runs the real docker build + cold go build. Fails naming the
-// likely cause — including a sandbox.blocked reason if provisioning parked instead.
+// likely cause — including a sandbox.provision.blocked reason if provisioning parked instead.
 func requireSandboxReady(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
@@ -1337,12 +1389,12 @@ func requireSandboxReady(ctx context.Context, t *testing.T, runEntityID string) 
 		if !ok {
 			return false
 		}
-		if blocked := tripleString(e, "sandbox.blocked"); blocked != "" {
+		if blocked := tripleString(e, "sandbox.provision.blocked"); blocked != "" {
 			t.Fatalf("the provision station blocked the run instead of proving it ready: %s", blocked)
 		}
-		return tripleString(e, "sandbox.ready") == "true" && tripleString(e, "sandbox.attestation.image") != ""
-	}, "run entity "+runEntityID+" never gained sandbox.ready=true + attestation — the provision rule (sandbox/01) "+
-		"did not publish or the provision-station component could not prove the fixture cold: check the sandbox.provisioned marker/guard, "+
+		return tripleString(e, "sandbox.provision.ready") == "true" && tripleString(e, "sandbox.attestation.image") != ""
+	}, "run entity "+runEntityID+" never gained sandbox.provision.ready=true + attestation — the provision rule (sandbox/01) "+
+		"did not publish or the provision-station component could not prove the fixture cold: check the sandbox.provision.marker guard, "+
 		"that the provision-station component is healthy, that SandboxSourceDir points at the fixture, and that docker can "+
 		"build the declared golang image")
 }
@@ -1370,7 +1422,7 @@ func journeySandboxSourceDir(t *testing.T) string {
 func journeyChangeArgs() map[string]any {
 	return map[string]any{
 		"slug":     journeyChangeSlug,
-		"proposal": map[string]any{"intent": "make the spine journey author a real change", "scope_in": []any{"the spine"}},
+		"proposal": map[string]any{"intent": journeyChangeIntent, "scope_in": []any{"the spine"}},
 		"deltas": []any{map[string]any{
 			"capability": "spine",
 			"added": []any{map[string]any{
