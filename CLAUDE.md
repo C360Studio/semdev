@@ -39,16 +39,17 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.25+; semstreams pinned at `v1.0.0-beta.148` (started at beta.134; beta.147
-  is the canonical-predicate + entity-ID breaking wave); NATS via docker compose
-  (never embedded).
+- Go 1.25+; semstreams pinned at `v1.0.0-beta.149` (started at beta.134; beta.147
+  is the canonical-predicate + entity-ID breaking wave; beta.149 landed the #551
+  per-loop executor tool-enforcement fix); NATS via docker compose (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
 
 ## Status
 
 M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers), now on
-**semstreams beta.148** (on the beta.147 breaking canonical-predicate + entity-ID wave).
+**semstreams beta.149** (on the beta.147 breaking canonical-predicate + entity-ID wave;
+beta.149 landed the #551 per-loop executor tool-enforcement fix).
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
 (the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
@@ -59,7 +60,7 @@ sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → struc
 floors → route (advance/retry/escalate) → review (Quinn) → **cold clean-room
 verify** of the committed artifact → coherence route → open_pr → `delivery.pr.ref`.
 Proven by `test/e2e/journey_test.go` — all four bridge-proof journeys (happy +
-retry + rejection + exhaustion) green on beta.148 (atop the beta.147 sweep) with zero paid tokens and zero
+retry + rejection + exhaustion) green on beta.149 (atop the beta.147 sweep) with zero paid tokens and zero
 predicate/entity-contract rejections, plus docker-gated cold-proof pins.
 beta.147 facts are CANONICAL (3-seg lower-kebab, declared via `internal/vocab.Register`);
 every rule carries an `entity.pattern` (required to fire on the entity-state lane).
@@ -67,14 +68,15 @@ The beta.148 tripwires (#519 scalar `.value`, #528 per-spawn max_iterations, #52
 exhaustion sentinel) are now REGRESSION GUARDS — the fixes landed; the routing-behavior
 UPGRADES they enable (per-task iteration/attempt budgets, a reason-aware escalate route)
 are deferred M0.5 follow-ups, not required (the uniform-cap / literal-3 / outcome=failed
-behavior stays e2e-proven). The pre-real-LLM carry-forwards are now resolved or correctly
-tracked: the `target_files`-includes-test contract and the developer/tool-schema field
-descriptions are DONE; the `allowed_tools` scoping is done at the MODEL boundary (every spawn
-advertises a scoped `tools` list ⊆ populated `allowed_tools`, two conformance pins) — but its
-residual **MEDIUM-3** is an EXECUTOR-side defense-in-depth gap that is a FRAMEWORK limitation,
-not an in-tree fix: verified against beta.148, `agentic-tools` admits a call solely on its
-GLOBAL `allowed_tools` (`component.go isToolAllowed`), never the loop's advertised set. It is an
-UPSTREAM semstreams ask (per-loop/role executor enforcement) FILED as semstreams #551, tracked by
-the gap-open tripwire `TestTripwireExecutorHonorsPerLoopToolAllowlist`, and it BLOCKS the first
-real-LLM token (inert under the mock; mock-ladder-green is the backstop). Donor checkouts for reference:
+behavior stays e2e-proven). The pre-real-LLM carry-forwards are now RESOLVED: the
+`target_files`-includes-test contract and the developer/tool-schema field descriptions were done,
+and the `allowed_tools` scoping is now COMPLETE end-to-end. It was done at the MODEL boundary
+(every spawn advertises a scoped `tools` list ⊆ populated `allowed_tools`, two conformance pins),
+and its residual **MEDIUM-3** — the EXECUTOR-side enforcement backstop, a FRAMEWORK limitation not
+closable in-tree — was filed as semstreams #551 and **LANDED in beta.149**: `agentic-loop` now
+stamps `agent.tools.advertised` (the loop's cached `tools`) on every tool call and `agentic-tools`
+`admitToolCall` rejects a call outside the advertised set (`ToolErrorPermission`), so semdev's
+already-scoped lists became load-bearing at execution on the bump alone (no rule/config change).
+The tripwire `TestTripwireExecutorHonorsPerLoopToolAllowlist` is now a REGRESSION GUARD; MEDIUM-3 no
+longer blocks the first real-LLM token. Donor checkouts for reference:
 `~/Code/c360/semteams` (shape), `~/Code/c360/semspec` (floors + audits).
