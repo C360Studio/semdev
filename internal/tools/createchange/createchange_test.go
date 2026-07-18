@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/types"
@@ -66,8 +67,33 @@ func sampleCall() agentic.ToolCall {
 	}
 }
 
-// The tool stamps openspec.change.* facts, all on the RUN entity (D15), tagged
-// with the vocab writer Source, and never an outcome fact.
+// stampedDocument runs the tool and decodes the stamped openspec.change.document
+// blob (beta.147 D3: create_change owns exactly {document,slug,revision} — no more
+// slug-scoped triple tree). Returns the decoded document plus the raw triples for
+// Source/subject/outcome-shape assertions.
+func stampedDocument(t *testing.T, call agentic.ToolCall) (changefacts.ChangeDocument, []message.Triple) {
+	t.Helper()
+	w := &fakeWriter{}
+	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
+	if err != nil || res.Error != "" {
+		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	}
+	if len(w.replaces) != 1 {
+		t.Fatalf("expected one replace, got %d", len(w.replaces))
+	}
+	triples := w.replaces[0].add
+	raw := objectOf(triples, changefacts.DocumentPredicate)
+	doc, err := changefacts.UnmarshalDocument(raw)
+	if err != nil {
+		t.Fatalf("decode stamped document: %v", err)
+	}
+	return doc, triples
+}
+
+// The tool stamps exactly the three flat openspec.change.* facts (D3: document
+// blob, slug, revision), all on the RUN entity (D15), tagged with the vocab writer
+// Source, and never an outcome fact. The document decodes back to the authored
+// content.
 func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 	w := &fakeWriter{}
 	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
@@ -84,11 +110,11 @@ func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 		t.Fatalf("expected one replace mutation, got %d", len(w.replaces))
 	}
 	triples := w.replaces[0].add
-	if len(triples) == 0 {
-		t.Fatal("no triples stamped")
+	if len(triples) != 3 {
+		t.Fatalf("expected exactly 3 flat facts (document/slug/revision), got %d: %+v", len(triples), triples)
 	}
 
-	var sawIntent, sawReq, sawTask bool
+	var doc string
 	for _, tr := range triples {
 		if tr.Subject != runEntity {
 			t.Errorf("triple subject = %q, want the run entity %q (D15)", tr.Subject, runEntity)
@@ -102,23 +128,29 @@ func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 		if strings.Contains(tr.Predicate, "outcome") || strings.HasSuffix(tr.Predicate, ".validated") || strings.HasSuffix(tr.Predicate, ".pass") {
 			t.Errorf("tool stamped an outcome-shaped fact %q (G3 violation)", tr.Predicate)
 		}
-		switch {
-		case tr.Predicate == "openspec.change.fix-null-deref.proposal.intent":
-			sawIntent = tr.Object == "fix the crash"
-		case strings.Contains(tr.Predicate, ".delta.handler.nil-guard.statement"):
-			sawReq = true
-		case strings.Contains(tr.Predicate, ".task.0.text"):
-			sawTask = true
+		if tr.Predicate == changefacts.DocumentPredicate {
+			doc, _ = tr.Object.(string)
 		}
 	}
-	if !sawIntent {
-		t.Error("proposal intent fact not stamped")
+	if doc == "" {
+		t.Fatal("no document blob stamped")
 	}
-	if !sawReq {
-		t.Error("requirement delta fact not stamped")
+
+	decoded, err := changefacts.UnmarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("decode stamped document: %v", err)
 	}
-	if !sawTask {
-		t.Error("task fact not stamped")
+	if decoded.Change == nil {
+		t.Fatal("decoded document has a nil Change")
+	}
+	if decoded.Change.Proposal == nil || decoded.Change.Proposal.Intent != "fix the crash" {
+		t.Errorf("decoded proposal intent = %+v, want %q", decoded.Change.Proposal, "fix the crash")
+	}
+	if len(decoded.Change.Deltas) != 1 || len(decoded.Change.Deltas[0].Added) != 1 || decoded.Change.Deltas[0].Added[0].Statement != "The system SHALL guard nil input." {
+		t.Errorf("decoded delta requirement missing/wrong: %+v", decoded.Change.Deltas)
+	}
+	if decoded.Change.Tasks == nil || len(decoded.Change.Tasks.Sections) != 1 || len(decoded.Change.Tasks.Sections[0].Tasks) != 1 || decoded.Change.Tasks.Sections[0].Tasks[0].Text != "add the guard" {
+		t.Errorf("decoded task missing/wrong: %+v", decoded.Change.Tasks)
 	}
 }
 
@@ -176,14 +208,14 @@ func TestCreateChangeSkipsMarkerWithoutLoopID(t *testing.T) {
 	}
 }
 
-// Re-author REPLACES the owned package: the prior predicates are cleared (passed
-// as removePredicates) so a shrunk/renamed re-author leaves no phantom facts.
+// Re-author REPLACES the owned package: beta.147 D3 fixed the owned set to exactly
+// three flat predicates (document/slug/revision) — create_change no longer discovers
+// what to clear via ReadOwnedPredicates (there is no slug-scoped tree to enumerate),
+// it clears the FIXED set unconditionally on every execute. That means a shrunk or
+// renamed re-author can never leave a phantom fact, independent of whatever a prior
+// author wrote.
 func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
-	prior := []string{
-		"openspec.change.fix-null-deref.task.9.text", // a task that no longer exists
-		"openspec.change.fix-null-deref.delta.handler.old-req.statement",
-	}
-	w := &fakeWriter{owned: prior}
+	w := &fakeWriter{}
 	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -195,18 +227,21 @@ func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 		t.Fatalf("expected one replace mutation, got %d", len(w.replaces))
 	}
 	got := w.replaces[0].remove
-	for _, p := range prior {
+	want := []string{changefacts.DocumentPredicate, SlugPredicate, RevisionPredicate}
+	for _, p := range want {
 		if !contains(got, p) {
-			t.Errorf("re-author did not clear prior owned predicate %q — a phantom fact would linger", p)
+			t.Errorf("re-author did not clear owned predicate %q — a phantom fact would linger", p)
 		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("remove-list = %v, want exactly the fixed owned package %v", got, want)
 	}
 }
 
 // The run-level slug pointer (openspec.change.slug = slug) is stamped in the same
 // atomic run-facts replace so the approval-triggered projection rule can thread
-// this run's slug into project_tasks (the other change facts are slug-scoped, so a
-// rule cannot wildcard the slug out of the key). It is added to removePredicates so
-// a re-author overwrites it (it sits outside the slug-scoped owned prefix).
+// this run's slug into project_tasks. It is added to removePredicates so a
+// re-author overwrites it.
 func TestCreateChangeStampsRunSlugPointer(t *testing.T) {
 	w := &fakeWriter{}
 	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
@@ -218,7 +253,7 @@ func TestCreateChangeStampsRunSlugPointer(t *testing.T) {
 		t.Errorf("run slug pointer %s = %q, want the slug %q", SlugPredicate, got, "fix-null-deref")
 	}
 	if !contains(run.remove, SlugPredicate) {
-		t.Errorf("slug pointer %s must be in removePredicates so a re-author overwrites it (it is outside the slug-scoped owned prefix)", SlugPredicate)
+		t.Errorf("slug pointer %s must be in removePredicates so a re-author overwrites it", SlugPredicate)
 	}
 }
 
@@ -242,27 +277,26 @@ func objectOf(triples []message.Triple, predicate string) string {
 	return ""
 }
 
-// D15 #0: create_change stamps the slug-scoped content revision
-// (openspec.change.<slug>.revision) on the run — project_tasks binds it, and
-// validate_change echoes it into openspec.validated — with the openspec.change.*
-// writer Source and a sha256 prefix (so the rule engine never compares it
-// numerically).
+// D15 #0: create_change stamps the flat content revision (openspec.change.revision,
+// single-change at M0 — beta.147 D1 dropped the slug from the key) on the run —
+// project_tasks binds it, and validate_change echoes it into
+// openspec.change.validated — with the openspec.change.* writer Source and a
+// sha256 prefix (so the rule engine never compares it numerically).
 func TestCreateChangeStampsContentRevision(t *testing.T) {
 	w := &fakeWriter{}
 	if res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall()); err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
 	triples := w.replaces[0].add
-	slugRevPredicate := SlugRevisionPredicate("fix-null-deref")
-	slugRev := objectOf(triples, slugRevPredicate)
-	if slugRev == "" {
-		t.Errorf("slug-scoped %s not stamped — project_tasks cannot bind slug+content", slugRevPredicate)
+	rev := objectOf(triples, RevisionPredicate)
+	if rev == "" {
+		t.Errorf("%s not stamped — project_tasks cannot bind content", RevisionPredicate)
 	}
-	if !strings.HasPrefix(slugRev, "sha256:") {
-		t.Errorf("revision %q must be sha256-prefixed so the rule engine never compares it numerically", slugRev)
+	if !strings.HasPrefix(rev, "sha256:") {
+		t.Errorf("revision %q must be sha256-prefixed so the rule engine never compares it numerically", rev)
 	}
 	for _, tr := range triples {
-		if tr.Predicate == slugRevPredicate && tr.Source != Source {
+		if tr.Predicate == RevisionPredicate && tr.Source != Source {
 			t.Errorf("revision Source = %q, want the vocab writer %q (G5)", tr.Source, Source)
 		}
 	}
@@ -281,7 +315,7 @@ func TestCreateChangeRevisionTracksContent(t *testing.T) {
 		if res, err := New(w, testPlatform, nil).Execute(context.Background(), c); err != nil || res.Error != "" {
 			t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 		}
-		return objectOf(w.replaces[0].add, SlugRevisionPredicate("fix-null-deref"))
+		return objectOf(w.replaces[0].add, RevisionPredicate)
 	}
 
 	base := revFor(nil)
@@ -299,27 +333,22 @@ func TestCreateChangeRevisionTracksContent(t *testing.T) {
 
 // The author tool must NOT honor a model-supplied task-completion field: a
 // freshly authored change's tasks are never pre-checked. Task status is DERIVED
-// from execution markers and gate facts (dev-from-task spec), not authored.
+// from execution markers and gate facts (dev-from-task spec), not authored. The
+// completion state now lives inside the decoded document's Task.Done (D3 — no
+// standalone task.<i>.done fact anymore).
 func TestCreateChangeIgnoresAuthoredTaskCompletion(t *testing.T) {
 	call := sampleCall()
 	// Inject done:true into the authored task args.
 	items := call.Arguments["tasks"].([]any)[0].(map[string]any)["items"].([]any)
 	items[0].(map[string]any)["done"] = true
 
-	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
-	if err != nil || res.Error != "" {
-		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
+	doc, _ := stampedDocument(t, call)
+	if doc.Change.Tasks == nil || len(doc.Change.Tasks.Sections) == 0 || len(doc.Change.Tasks.Sections[0].Tasks) == 0 {
+		t.Fatal("no task decoded from the stamped document")
 	}
-	for _, tr := range w.replaces[0].add {
-		if strings.HasSuffix(tr.Predicate, ".task.0.done") {
-			if tr.Object != "false" {
-				t.Errorf("authored done:true was honored — %s = %v, want \"false\" (status must be derived, not authored)", tr.Predicate, tr.Object)
-			}
-			return
-		}
+	if doc.Change.Tasks.Sections[0].Tasks[0].Done {
+		t.Error("authored done:true was honored — task completion must be derived, not authored (G3)")
 	}
-	t.Error("no task.0.done fact stamped")
 }
 
 // A traversal slug is rejected at the authoring source and writes no facts, so a

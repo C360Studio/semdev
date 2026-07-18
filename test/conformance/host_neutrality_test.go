@@ -27,7 +27,7 @@ func TestNoArcRuleReferencesHostSpecificField(t *testing.T) {
 func TestHostNeutralityCensusCatchesHostRefs(t *testing.T) {
 	bad := []ruleFile{
 		{ID: "reads-host-field", Conditions: []ruleCondition{{Field: "github.issue.state", Operator: "eq", Value: "open"}}},
-		{ID: "writes-host-subject", OnEnter: []ruleAction{{Type: "add_triple", Subject: "org.github.repo.x.issue.1", Predicate: "run.issue_ref", Object: "x#1"}}},
+		{ID: "writes-host-subject", OnEnter: []ruleAction{{Type: "add_triple", Subject: "org.github.repo.x.issue.1", Predicate: "run.issue.ref", Object: "x#1"}}},
 		{ID: "writes-host-predicate", OnEnter: []ruleAction{{Type: "add_triple", Subject: "$entity.id", Predicate: "github.issue.title", Object: "t"}}},
 		{ID: "dispatches-host-tool", OnEnter: []ruleAction{{Type: "publish_agent", Tools: []string{"decide", "github_list_comments"}}}},
 	}
@@ -37,8 +37,8 @@ func TestHostNeutralityCensusCatchesHostRefs(t *testing.T) {
 
 	clean := []ruleFile{{
 		ID:         "neutral",
-		Conditions: []ruleCondition{{Field: "coordinator.decision.next_action", Operator: "eq", Value: "issue_intake"}},
-		OnEnter:    []ruleAction{{Type: "add_triple", Subject: "$entity.triple.agent.run.entity_id", Predicate: "run.issue_ref", Object: "$entity.triple.intake.issue_ref"}},
+		Conditions: []ruleCondition{{Field: "coordinator.decision.next-action", Operator: "eq", Value: "issue_intake"}},
+		OnEnter:    []ruleAction{{Type: "add_triple", Subject: "$entity.triple.agent.run.entity_id", Predicate: "run.issue.ref", Object: "$entity.triple.intake.issue_ref"}},
 	}}
 	if got := hostSpecificRuleRefs(clean); len(got) != 0 {
 		t.Errorf("census flagged a host-neutral rule: %v", got)

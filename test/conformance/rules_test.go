@@ -162,7 +162,7 @@ func (r ruleFile) spawnsNewRun() bool {
 // firing in that case.
 func (r ruleFile) handlesDualAnchor() bool {
 	for _, c := range r.Conditions {
-		if c.Field == "agent.run.entity_id" && c.Operator == "length_gt" {
+		if c.Field == "agent.run.entity-id" && c.Operator == "length_gt" {
 			return true
 		}
 	}
@@ -241,10 +241,10 @@ func TestChangeApprovalGateOrdering(t *testing.T) {
 	if !ok {
 		t.Fatal("missing run_offer_change_approval rule")
 	}
-	if c, ok := offer.condition("openspec.validated"); !ok || c.Operator != "ne" {
+	if c, ok := offer.condition("openspec.change.validated"); !ok || c.Operator != "ne" {
 		t.Error("offer-approval must require openspec.validated present (ne \"\") — validate-before-approval ordering (3.7)")
 	}
-	if c, ok := offer.condition("run.change_approved"); !ok || c.Operator != "length_eq" {
+	if c, ok := offer.condition("run.change.approved"); !ok || c.Operator != "length_eq" {
 		t.Error("offer-approval must require run.change_approved absent (length_eq 0)")
 	}
 
@@ -252,7 +252,7 @@ func TestChangeApprovalGateOrdering(t *testing.T) {
 	if !ok {
 		t.Fatal("missing run_resume_after_change_approval rule")
 	}
-	if c, ok := resume.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
+	if c, ok := resume.condition("run.change.approved"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Error("resume must require run.change_approved == true — the gate holds until approval (3.5)")
 	}
 }
@@ -277,7 +277,7 @@ func TestChangeApprovalGateFreshnessForwardContract(t *testing.T) {
 	if !ok {
 		t.Fatal("missing run_offer_change_approval rule")
 	}
-	if c, ok := offer.condition("openspec.validated"); !ok || c.Operator != "ne" {
+	if c, ok := offer.condition("openspec.change.validated"); !ok || c.Operator != "ne" {
 		t.Error("offer-approval must still require openspec.validated present (ne \"\") — the validate-before-approval floor")
 	}
 	for _, c := range offer.Conditions {
@@ -307,7 +307,7 @@ func TestDevRewakeIsSelfExtinguishing(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_rewake_coordinator rule")
 	}
-	const marker = "run.dev_kickoff"
+	const marker = "run.dev.kickoff"
 	if !rewake.hasAbsenceGuard(marker) {
 		t.Errorf("dev re-wake must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-spawns a duplicate coordinator (publish_agent is not idempotent)", marker)
 	}
@@ -349,7 +349,7 @@ func TestProjectionSpawnIsSelfExtinguishing(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_project_tasks rule")
 	}
-	const marker = "run.projection_kickoff"
+	const marker = "run.projection.kickoff"
 	if !proj.hasAbsenceGuard(marker) {
 		t.Errorf("projection dispatch must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-dispatches a duplicate projection (the core-NATS publish is not deduped)", marker)
 	}
@@ -365,10 +365,10 @@ func TestProjectionSpawnIsSelfExtinguishing(t *testing.T) {
 	}
 	// It fires on approval and needs the run anchor (dev-from-task/01) so the run is
 	// the dispatch entity_id — assert both so the trigger is grounded.
-	if c, ok := proj.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
+	if c, ok := proj.condition("run.change.approved"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Error("projection dispatch must fire on run.change_approved == true (the spec trigger: approval projects task.spec)")
 	}
-	if c, ok := proj.condition("agent.run"); !ok || c.Operator != "ne" {
+	if c, ok := proj.condition("agent.loop.run"); !ok || c.Operator != "ne" {
 		t.Error("projection dispatch must require the agent.run anchor (ne \"\") so the run resolves as the dispatch entity_id")
 	}
 }
@@ -386,7 +386,7 @@ func TestDevRewakeGatedOnProjection(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_rewake_coordinator rule")
 	}
-	c, ok := rewake.condition("task.spec.0.test_command")
+	c, ok := rewake.condition("task.spec.test-command")
 	if !ok {
 		t.Fatal("dev re-wake must gate on projected task.spec (task.spec.0.test_command) — else it can decide dev_from_task before the immutable task surface exists (Codex P1)")
 	}
@@ -414,7 +414,7 @@ func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
 	if !ok {
 		t.Fatal("missing sandbox_provision rule")
 	}
-	const marker = "sandbox.provisioned"
+	const marker = "sandbox.provision.marker"
 	if !prov.hasAbsenceGuard(marker) {
 		t.Errorf("provision spawn must guard on %s length_eq 0 (fired-once) — else a graph replay with RULE_STATE lost re-publishes a duplicate provision dispatch (the core-NATS publish is not deduped)", marker)
 	}
@@ -432,10 +432,10 @@ func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
 	if prov.forcesFunction("provision_sandbox") {
 		t.Error("provision spawn must NOT force the provision_sandbox tool — provisioning is a publish-triggered component now (R6)")
 	}
-	if c, ok := prov.condition("run.change_approved"); !ok || c.Operator != "eq" || c.Value != "true" {
+	if c, ok := prov.condition("run.change.approved"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Error("provision spawn must fire on run.change_approved == true (provision the approved run's sandbox)")
 	}
-	if c, ok := prov.condition("agent.run"); !ok || c.Operator != "ne" {
+	if c, ok := prov.condition("agent.loop.run"); !ok || c.Operator != "ne" {
 		t.Error("provision spawn must require the agent.run anchor (ne \"\") — it identifies the run entity the dispatch fires on")
 	}
 }
@@ -451,7 +451,7 @@ func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_rewake_coordinator rule")
 	}
-	c, ok := rewake.condition("sandbox.ready")
+	c, ok := rewake.condition("sandbox.provision.ready")
 	if !ok {
 		t.Fatal("dev re-wake must gate on a proven sandbox (sandbox.ready) — else the dev loop can proceed over an absent/unproven sandbox (SB5, the semspec disease)")
 	}
@@ -513,7 +513,7 @@ func TestDispatchDeveloperIsMultiTurnAndSelfExtinguishing(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_dispatch_developer rule")
 	}
-	const marker = "dev.dispatched"
+	const marker = "dev.developer.dispatched"
 	if !disp.hasAbsenceGuard(marker) || !disp.hasTriple(marker) || !disp.markerBeforePublish(marker) {
 		t.Errorf("dispatch-developer must be self-extinguishing (%s guard + add_triple before the publish)", marker)
 	}
@@ -523,13 +523,13 @@ func TestDispatchDeveloperIsMultiTurnAndSelfExtinguishing(t *testing.T) {
 	if !disp.declaresTools() {
 		t.Error("dispatch-developer must declare an explicit tools allowlist (the config-lint; Amelia's scoped [read_workspace, apply_patch, measure_task, ask_human])")
 	}
-	if !disp.hasTriple("task.attempt.0") {
+	if !disp.hasTriple("task.attempt.instance") {
 		t.Error("dispatch-developer must append task.attempt.0 AT SPAWN (R3) — the attempt counter the route counts against the budget")
 	}
-	if c, ok := disp.condition("coordinator.decision.next_action"); !ok || c.Value != "dev_from_task" {
+	if c, ok := disp.condition("coordinator.decision.next-action"); !ok || c.Value != "dev_from_task" {
 		t.Error("dispatch-developer must fire on the coordinator's dev_from_task decision")
 	}
-	if c, ok := disp.condition("agent.run.entity_id"); !ok || c.Operator != "ne" {
+	if c, ok := disp.condition("agent.run.entity-id"); !ok || c.Operator != "ne" {
 		t.Error("dispatch-developer must require the run anchor (agent.run.entity_id ne \"\") so run_scope=inherit binds Amelia to the run")
 	}
 }
@@ -547,7 +547,7 @@ func TestFloorsTriggerFiresOnDeveloperTerminal(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_floors_trigger rule")
 	}
-	const marker = "dev.floors_dispatched"
+	const marker = "dev.floors.dispatched"
 	if !fl.hasAbsenceGuard(marker) || !fl.hasTriple(marker) || !fl.markerBeforeStationPublish(marker) {
 		t.Errorf("floors trigger must be self-extinguishing (%s guard + add_triple before the publish)", marker)
 	}
@@ -585,16 +585,16 @@ func TestFloorsTriggerFiresOnDeveloperTerminal(t *testing.T) {
 // partition the count (length_lt 3 / length_gt 2, no gap). Red-first: break any and this fails.
 func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	rules := runLifecycleRules(t)
-	const marker = "route.routed"
+	const marker = "route.attempt.routed"
 
 	adv, ok := rules["dev_from_task_route_advance"]
 	if !ok {
 		t.Fatal("missing dev_from_task_route_advance rule")
 	}
-	if c, ok := adv.condition("route.passed"); !ok || c.Operator != "eq" || c.Value != "true" || c.Required {
+	if c, ok := adv.condition("route.attempt.passed"); !ok || c.Operator != "eq" || c.Value != "true" || c.Required {
 		t.Errorf("advance must require route.passed eq \"true\" (required:false — a scalar eq with required:true ERRORS on entities lacking the field), got %+v", c)
 	}
-	if c, ok := adv.condition("route.rejected"); !ok || c.Operator != "eq" || c.Value != "false" || c.Required {
+	if c, ok := adv.condition("route.attempt.rejected"); !ok || c.Operator != "eq" || c.Value != "false" || c.Required {
 		t.Errorf("advance must require route.rejected eq \"false\" (required:false), got %+v", c)
 	}
 	if !adv.hasAbsenceGuard(marker) || !adv.hasTriple(marker) || !adv.markerBeforePublish(marker) {
@@ -615,8 +615,8 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	// bumps the version with no nothing-changed skip). Each branch carries the route.not_clean
 	// length_eq 0 self-extinguish guard (which an AND rule can, an OR rule cannot).
 	notCleanRules := map[string]string{
-		"dev_from_task_route_not_clean_red":   "route.passed",   // measured red
-		"dev_from_task_route_not_clean_floor": "route.rejected", // a floor rejected
+		"dev_from_task_route_not_clean_red":   "route.attempt.passed",   // measured red
+		"dev_from_task_route_not_clean_floor": "route.attempt.rejected", // a floor rejected
 	}
 	for id, signalField := range notCleanRules {
 		nc, ok := rules[id]
@@ -626,10 +626,10 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 		if nc.Logic == "or" {
 			t.Errorf("%s must be a GUARDED pure-AND rule, NOT logic:or — a guardless OR rule would re-fire and re-append route.not_clean unbounded", id)
 		}
-		if !nc.hasTriple("route.not_clean") {
+		if !nc.hasTriple("route.attempt.unclean") {
 			t.Errorf("%s must stamp route.not_clean (the intermediate the retry/escalate rules AND with the budget)", id)
 		}
-		if !nc.hasAbsenceGuard("route.not_clean") {
+		if !nc.hasAbsenceGuard("route.attempt.unclean") {
 			t.Errorf("%s must self-extinguish via route.not_clean length_eq 0 — else it re-fires every rescan (unbounded append)", id)
 		}
 		if _, ok := nc.condition(signalField); !ok {
@@ -641,13 +641,13 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_route_retry rule")
 	}
-	if c, ok := ret.condition("route.not_clean"); !ok || c.Operator != "eq" || c.Value != "true" {
+	if c, ok := ret.condition("route.attempt.unclean"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Errorf("retry must require route.not_clean eq \"true\", got %+v", c)
 	}
-	if c, ok := ret.condition("route.attempt.0"); !ok || c.Operator != "length_lt" {
+	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" {
 		t.Errorf("retry must require route.attempt.0 length_lt <budget> (budget remains), got %+v", c)
 	}
-	if !ret.hasAbsenceGuard(marker) || !ret.markerBeforePublish(marker) || !ret.hasTriple("task.attempt.0") {
+	if !ret.hasAbsenceGuard(marker) || !ret.markerBeforePublish(marker) || !ret.hasTriple("task.attempt.instance") {
 		t.Error("retry must be self-extinguishing (route.routed before the developer publish) and append task.attempt.0 at spawn (R3)")
 	}
 
@@ -655,19 +655,19 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_route_escalate rule")
 	}
-	if c, ok := esc.condition("route.not_clean"); !ok || c.Operator != "eq" || c.Value != "true" {
+	if c, ok := esc.condition("route.attempt.unclean"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Errorf("escalate must require route.not_clean eq \"true\", got %+v", c)
 	}
-	if c, ok := esc.condition("route.attempt.0"); !ok || c.Operator != "length_gt" {
+	if c, ok := esc.condition("route.attempt.instance"); !ok || c.Operator != "length_gt" {
 		t.Errorf("escalate must require route.attempt.0 length_gt <budget-1> (fail-closed: catches an over-count, and partitions the count with retry's length_lt), got %+v", c)
 	}
-	if !esc.hasTriple("run.awaiting_human") || esc.firesTransition() {
+	if !esc.hasTriple("run.awaiting.human") || esc.firesTransition() {
 		t.Error("escalate must park (run.awaiting_human) with NO lifecycle transition (G2)")
 	}
 	// The budget literals must partition the count with no gap: retry length_lt N, escalate
 	// length_gt N-1. Assert they use the SAME budget so no count falls through both.
-	retC, _ := ret.condition("route.attempt.0")
-	escC, _ := esc.condition("route.attempt.0")
+	retC, _ := ret.condition("route.attempt.instance")
+	escC, _ := esc.condition("route.attempt.instance")
 	retN, escN := toFloat(retC.Value), toFloat(escC.Value)
 	if retN != escN+1 {
 		t.Errorf("retry length_lt %v and escalate length_gt %v must partition the count with no gap (lt N, gt N-1) — a count could otherwise fall through both or match both", retN, escN)
@@ -682,13 +682,13 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 //   - 07d no-verdict (terminated, route.verdict absent) → park (fail-closed totality catch).
 func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	rules := runLifecycleRules(t)
-	const marker = "route.routed"
+	const marker = "route.attempt.routed"
 
 	app, ok := rules["dev_from_task_review_approved"]
 	if !ok {
 		t.Fatal("missing dev_from_task_review_approved rule")
 	}
-	if c, ok := app.condition("route.verdict"); !ok || c.Operator != "eq" || c.Value != "approved" || c.Required {
+	if c, ok := app.condition("route.review.verdict"); !ok || c.Operator != "eq" || c.Value != "approved" || c.Required {
 		t.Errorf("review-approved must require route.verdict eq \"approved\" (required:false), got %+v", c)
 	}
 	// R6: publishes the verify STATION carrying run_entity_id (Q_n is the firing entity, so
@@ -705,13 +705,13 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_review_retry rule (D16 re-entry)")
 	}
-	if c, ok := ret.condition("route.verdict"); !ok || c.Value != "changes_requested" {
+	if c, ok := ret.condition("route.review.verdict"); !ok || c.Value != "changes_requested" {
 		t.Errorf("review-retry must fire on route.verdict changes_requested, got %+v", c)
 	}
-	if c, ok := ret.condition("route.attempt.0"); !ok || c.Operator != "length_lt" {
+	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" {
 		t.Errorf("review-retry must require route.attempt.0 length_lt <budget> (the SHARED attempt budget, R4), got %+v", c)
 	}
-	if !ret.hasTriple("task.attempt.0") || !ret.markerBeforePublish(marker) {
+	if !ret.hasTriple("task.attempt.instance") || !ret.markerBeforePublish(marker) {
 		t.Error("review-retry must append task.attempt.0 at spawn (shared budget) and self-extinguish before the developer publish")
 	}
 	// D16: it must re-enter DEVELOPMENT (spawn a developer), not verify.
@@ -729,10 +729,10 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_review_park rule")
 	}
-	if c, ok := park.condition("route.attempt.0"); !ok || c.Operator != "length_gt" {
+	if c, ok := park.condition("route.attempt.instance"); !ok || c.Operator != "length_gt" {
 		t.Errorf("review-park must fire on route.attempt.0 length_gt <budget-1> (exhausted), got %+v", c)
 	}
-	if !park.hasTriple("run.awaiting_human") || park.firesTransition() {
+	if !park.hasTriple("run.awaiting.human") || park.firesTransition() {
 		t.Error("review-park must park with no transition (G2)")
 	}
 
@@ -743,10 +743,10 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := nv.condition("agent.loop.role"); !ok || c.Value != "reviewer" {
 		t.Error("review-no-verdict must fire on the reviewer loop (route.verdict is absent, so role is the discriminator)")
 	}
-	if c, ok := nv.condition("route.verdict"); !ok || c.Operator != "length_eq" {
+	if c, ok := nv.condition("route.review.verdict"); !ok || c.Operator != "length_eq" {
 		t.Error("review-no-verdict must require route.verdict ABSENT (length_eq 0) — the terminated-without-a-verdict case")
 	}
-	if !nv.hasTriple("run.awaiting_human") {
+	if !nv.hasTriple("run.awaiting.human") {
 		t.Error("review-no-verdict must park (no verdict is not approval, fail-closed SB5)")
 	}
 }
@@ -761,19 +761,19 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 // A verify.result of "retry" matches NEITHER (a flake never triggers delivery).
 func TestDeliveryRouteTotalityAndSelfExtinguish(t *testing.T) {
 	rules := runLifecycleRules(t)
-	const marker = "delivery.routed"
+	const marker = "delivery.route.routed"
 
 	pr, ok := rules["dev_from_task_delivery_open_pr"]
 	if !ok {
 		t.Fatal("missing dev_from_task_delivery_open_pr rule")
 	}
-	if c, ok := pr.condition("verify.result"); !ok || c.Operator != "eq" || c.Value != "pass" || c.Required {
+	if c, ok := pr.condition("verify.cleanroom.result"); !ok || c.Operator != "eq" || c.Value != "pass" || c.Required {
 		t.Errorf("delivery-open-pr must require verify.result eq \"pass\" (required:false — absent = false, no premature fire), got %+v", c)
 	}
-	if c, ok := pr.condition("review.verdict.0"); !ok || c.Operator != "eq" || c.Value != "approved" {
+	if c, ok := pr.condition("review.verdict.value"); !ok || c.Operator != "eq" || c.Value != "approved" {
 		t.Errorf("delivery-open-pr must require review.verdict.0 eq \"approved\" (defense in depth), got %+v", c)
 	}
-	if c, ok := pr.condition("openspec.validated"); !ok || c.Operator != "length_gt" {
+	if c, ok := pr.condition("openspec.change.validated"); !ok || c.Operator != "length_gt" {
 		t.Errorf("delivery-open-pr must require openspec.validated present (length_gt 0; a revision-match eq lands with #519's .value), got %+v", c)
 	}
 	if !pr.publishesTo("component.delivery-station.dispatch") || !pr.hasAbsenceGuard(marker) || !pr.markerBeforeStationPublish(marker) {
@@ -784,10 +784,10 @@ func TestDeliveryRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_delivery_park rule")
 	}
-	if c, ok := park.condition("verify.result"); !ok || c.Operator != "eq" || c.Value != "fail" {
+	if c, ok := park.condition("verify.cleanroom.result"); !ok || c.Operator != "eq" || c.Value != "fail" {
 		t.Errorf("delivery-park must fire on verify.result eq \"fail\" (mutually exclusive with the coherent route on the verify value; a \"retry\" matches neither), got %+v", c)
 	}
-	if !park.hasTriple("run.awaiting_human") || park.firesTransition() {
+	if !park.hasTriple("run.awaiting.human") || park.firesTransition() {
 		t.Error("delivery-park must park with no transition (G2)")
 	}
 	if !park.hasAbsenceGuard(marker) {
@@ -843,10 +843,10 @@ func TestDeliveryRoutedWithoutResultIsAKnownGap(t *testing.T) {
 		}
 		routedPresent, prAbsent := false, false
 		for _, c := range r.Conditions {
-			if c.Field == "delivery.routed" && c.Operator == "length_gt" {
+			if c.Field == "delivery.route.routed" && c.Operator == "length_gt" {
 				routedPresent = true
 			}
-			if c.Field == "pr.ref" && c.Operator == "length_eq" {
+			if c.Field == "delivery.pr.ref" && c.Operator == "length_eq" {
 				prAbsent = true
 			}
 		}
@@ -988,7 +988,7 @@ func TestOnlySanctionedParkWriters(t *testing.T) {
 	}
 	var writers []string
 	for _, r := range rules {
-		if r.hasTriple("run.awaiting_human") {
+		if r.hasTriple("run.awaiting.human") {
 			writers = append(writers, r.ID)
 			if !sanctioned[r.ID] {
 				t.Errorf("rule %q stamps run.awaiting_human but is not a sanctioned park writer — run.awaiting_human is ONE logical writer (G5); a new park realization must be added to the sanctioned set deliberately (and mean the identical thing: this run awaits a human)", r.ID)
@@ -1092,13 +1092,13 @@ func TestSandboxParkOnUnprovable(t *testing.T) {
 	if !ok {
 		t.Fatal("missing sandbox_park_unprovable rule")
 	}
-	if c, ok := park.condition("sandbox.blocked"); !ok || c.Operator != "ne" {
+	if c, ok := park.condition("sandbox.provision.blocked"); !ok || c.Operator != "ne" {
 		t.Error("sandbox park must fire on sandbox.blocked ne \"\" (an unprovable sandbox)")
 	}
-	if !park.hasTriple("run.awaiting_human") {
+	if !park.hasTriple("run.awaiting.human") {
 		t.Error("sandbox park must stamp run.awaiting_human (the park marker the whole system reads)")
 	}
-	if !park.hasAbsenceGuard("run.awaiting_human") {
+	if !park.hasAbsenceGuard("run.awaiting.human") {
 		t.Error("sandbox park must guard on run.awaiting_human length_eq 0 (fire once, don't re-post to the user bus each re-scan)")
 	}
 	if park.firesTransition() {
@@ -1113,15 +1113,15 @@ func TestParkRuleStampsAwaitingHuman(t *testing.T) {
 	if !ok {
 		t.Fatal("missing run_park_awaiting_human rule")
 	}
-	if c, ok := park.condition("coordinator.decision.next_action"); !ok || c.Value != "ask_human" {
+	if c, ok := park.condition("coordinator.decision.next-action"); !ok || c.Value != "ask_human" {
 		t.Error("park rule must fire on next_action == ask_human")
 	}
-	if !park.hasTriple("run.awaiting_human") {
+	if !park.hasTriple("run.awaiting.human") {
 		t.Error("park rule must stamp run.awaiting_human (G5 single writer = park-rule)")
 	}
 	// The run-anchor guard (semteams agent-run/07): without a run anchor the
 	// subject-override would not resolve and the marker would be silently dropped.
-	if c, ok := park.condition("agent.run.entity_id"); !ok || c.Operator != "ne" {
+	if c, ok := park.condition("agent.run.entity-id"); !ok || c.Operator != "ne" {
 		t.Error("park rule must carry the agent.run.entity_id run-anchor guard (ne \"\")")
 	}
 }
@@ -1138,10 +1138,10 @@ func TestLifecycleTransitionRulesExcludeParkedRuns(t *testing.T) {
 			continue
 		}
 		saw++
-		if r.clearsPredicate("run.awaiting_human") {
+		if r.clearsPredicate("run.awaiting.human") {
 			continue // resume-from-park rule: legitimately fires on a parked run to un-park it
 		}
-		if !r.hasAbsenceGuard("run.awaiting_human") {
+		if !r.hasAbsenceGuard("run.awaiting.human") {
 			t.Errorf("rule %s fires a lifecycle_transition but does not exclude parked runs (run.awaiting_human length_eq 0) — a parked run would be swept through the gate (design D15)", r.ID)
 		}
 	}
@@ -1158,24 +1158,24 @@ func TestParkExclusionPinLogic(t *testing.T) {
 	if !unguarded.firesTransition() {
 		t.Fatal("unguarded rule not seen as a transition")
 	}
-	if unguarded.hasAbsenceGuard("run.awaiting_human") || unguarded.clearsPredicate("run.awaiting_human") {
+	if unguarded.hasAbsenceGuard("run.awaiting.human") || unguarded.clearsPredicate("run.awaiting.human") {
 		t.Error("unguarded transition rule wrongly treated as guarded/exempt — pin would not fire")
 	}
 
 	resume := ruleFile{ID: "resume", OnEnter: []ruleAction{
-		{Type: "remove_triple", Predicate: "run.awaiting_human"},
+		{Type: "remove_triple", Predicate: "run.awaiting.human"},
 		{Type: "lifecycle_transition", Workflow: "agent-run", Phase: "executing"},
 	}}
-	if !resume.clearsPredicate("run.awaiting_human") {
+	if !resume.clearsPredicate("run.awaiting.human") {
 		t.Error("resume-from-park rule not recognized as clearing the marker")
 	}
 
 	guarded := ruleFile{
 		ID:         "guarded",
-		Conditions: []ruleCondition{{Field: "run.awaiting_human", Operator: "length_eq", Value: float64(0)}},
+		Conditions: []ruleCondition{{Field: "run.awaiting.human", Operator: "length_eq", Value: float64(0)}},
 		OnEnter:    []ruleAction{{Type: "lifecycle_transition"}},
 	}
-	if !guarded.hasAbsenceGuard("run.awaiting_human") {
+	if !guarded.hasAbsenceGuard("run.awaiting.human") {
 		t.Error("guarded rule not recognized as carrying the absence guard")
 	}
 }
@@ -1205,7 +1205,7 @@ func TestDualAnchorHandoffPresentWhenMultipleRunScopeNew(t *testing.T) {
 func TestDualAnchorGuardLogic(t *testing.T) {
 	mint := ruleFile{ID: "mint", Enabled: true, OnEnter: []ruleAction{{Type: "publish_agent", RunScope: "new"}}}
 	dualAnchor := ruleFile{ID: "handoff-01b", Enabled: true, Conditions: []ruleCondition{
-		{Field: "agent.run.entity_id", Operator: "length_gt", Value: float64(1)},
+		{Field: "agent.run.entity-id", Operator: "length_gt", Value: float64(1)},
 	}}
 
 	if msg := dualAnchorGuardViolation([]ruleFile{mint}); msg != "" {
@@ -1234,7 +1234,7 @@ func TestArchiveChangeIsDeclaredAndDisabled(t *testing.T) {
 	if archive.Enabled {
 		t.Error("archive_change loop-closer must be disabled at M0 (merge trigger + live archive land at M1)")
 	}
-	if _, ok := archive.condition("openspec.archived"); !ok {
+	if _, ok := archive.condition("openspec.change.archived"); !ok {
 		t.Error("archive loop-closer must reference openspec.archived (the fact its harness stamps)")
 	}
 }

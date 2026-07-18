@@ -139,7 +139,7 @@ func loadRules(root string) ([]ruleFile, error) {
 func (r ruleFile) nextActionValues() []string {
 	var out []string
 	for _, c := range r.Conditions {
-		if c.Field != "coordinator.decision.next_action" {
+		if c.Field != "coordinator.decision.next-action" {
 			continue
 		}
 		switch v := c.Value.(type) {

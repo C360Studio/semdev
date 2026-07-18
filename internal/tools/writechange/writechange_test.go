@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -44,12 +45,15 @@ func (r tempResolver) ChangeDir(_ context.Context, _ string, slug string) (strin
 	return filepath.Join(r.root, "openspec", "changes", slug), nil
 }
 
+// stamped builds the single document blob triple create_change would have
+// written on the run entity (beta.147 D3: the whole change serialized into ONE
+// scalar, not a slug-scoped triple tree).
 func stamped(runEntityID string, c *openspec.Change) []message.Triple {
-	var out []message.Triple
-	for _, f := range c.Facts() {
-		out = append(out, message.Triple{Subject: runEntityID, Predicate: f.Predicate, Object: f.Object})
+	raw, err := changefacts.MarshalDocument(changefacts.ChangeDocument{Change: c})
+	if err != nil {
+		panic("marshal fixture document: " + err.Error()) // test fixture construction only
 	}
-	return out
+	return []message.Triple{{Subject: runEntityID, Predicate: changefacts.DocumentPredicate, Object: raw}}
 }
 
 func sampleChange() *openspec.Change {
@@ -112,13 +116,16 @@ func TestWriteChangeMaterializesFolder(t *testing.T) {
 	}
 }
 
-// A slug with no facts must not materialize a hollow change folder.
+// A run with no authored change document at all must not materialize a hollow
+// change folder. Beta.147 D3 collapsed the document to ONE flat predicate at M0
+// (single-change) — Hydrate no longer scopes the read by slug, so the pre-D3
+// "wrong slug on an otherwise-populated run" case has no analogue.
 func TestWriteChangeFailsOnEmptyChange(t *testing.T) {
 	root := t.TempDir()
-	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
+	r := &fakeReader{} // no document fact at all
 	res, _ := New(r, tempResolver{root: root}, nil).Execute(context.Background(), call("never-authored"))
 	if res.Error == "" {
-		t.Fatal("expected an error writing a change with no facts")
+		t.Fatal("expected an error writing a run with no authored change")
 	}
 	if _, err := os.Stat(filepath.Join(root, "openspec", "changes", "never-authored")); !os.IsNotExist(err) {
 		t.Error("an empty change must not create a folder on disk")

@@ -33,14 +33,15 @@ func (f *fakeReader) ReadFacts(_ context.Context, _ string, prefix string) ([]me
 	return filterByPrefix(f.triples, prefix), nil
 }
 
-// stampFacts projects a change to the triples create_change would have written on
-// the run entity, so a hydrate round-trip is exercised end-to-end without NATS.
+// stampFacts projects a change to the single document blob triple create_change
+// would have written on the run entity (beta.147 D3: the whole change serialized
+// into ONE scalar), so a hydrate round-trip is exercised end-to-end without NATS.
 func stampFacts(runEntityID string, c *openspec.Change) []message.Triple {
-	var out []message.Triple
-	for _, f := range c.Facts() {
-		out = append(out, message.Triple{Subject: runEntityID, Predicate: f.Predicate, Object: f.Object})
+	raw, err := MarshalDocument(ChangeDocument{Change: c})
+	if err != nil {
+		panic("marshal fixture document: " + err.Error()) // test fixture construction only
 	}
-	return out
+	return []message.Triple{{Subject: runEntityID, Predicate: DocumentPredicate, Object: raw}}
 }
 
 func sampleChange() *openspec.Change {
@@ -65,17 +66,18 @@ func sampleChange() *openspec.Change {
 	}
 }
 
-// Hydrate reconstructs the change the author stamped: read facts → ChangeFromFacts
-// → semantically equal to the source. This is the read-side round-trip the tools
-// depend on.
+// Hydrate reconstructs the change the author stamped: read the document blob →
+// UnmarshalDocument → semantically equal to the source. This is the read-side
+// round-trip the tools depend on.
 func TestHydrateRoundTripsAuthoredFacts(t *testing.T) {
 	src := sampleChange()
 	triples := stampFacts(runEntity, src)
-	// Foreign facts sharing the run entity — a sibling change and a non-openspec
-	// owner — must NOT bleed into the hydrated change. This is what the read-side
-	// prefix scoping (filterByPrefix) exists to prevent.
+	// A foreign non-openspec owner sharing the run entity must NOT bleed into the
+	// hydrated change. Beta.147 D3 collapsed the change to ONE flat document
+	// predicate at M0 (single-change) — there is no longer a sibling-change
+	// namespace to leak from; what the exact-predicate read still must exclude is
+	// an unrelated owner's fact on the same entity.
 	triples = append(triples,
-		message.Triple{Subject: runEntity, Predicate: "openspec.change.other-change.proposal.intent", Object: "a different change"},
 		message.Triple{Subject: runEntity, Predicate: "run.issue_ref", Object: "gh#7"},
 	)
 	r := &fakeReader{triples: triples}
@@ -84,9 +86,10 @@ func TestHydrateRoundTripsAuthoredFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hydrate: %v", err)
 	}
-	// The read must be scoped to the change's owned prefix (not an unscoped pull).
-	if want := openspec.ChangeEntityPrefix(src.Slug); r.gotPrefix != want {
-		t.Errorf("read prefix = %q, want %q", r.gotPrefix, want)
+	// The read is scoped to the fixed document predicate (beta.147 D3: single flat
+	// blob at M0 — not a slug-scoped triple-tree prefix).
+	if r.gotPrefix != DocumentPredicate {
+		t.Errorf("read prefix = %q, want %q", r.gotPrefix, DocumentPredicate)
 	}
 	// Semantic equivalence: re-render both and compare (the round-trip contract is
 	// semantic, not byte — same as the engine's own round-trip pins).
@@ -95,16 +98,20 @@ func TestHydrateRoundTripsAuthoredFacts(t *testing.T) {
 	}
 }
 
-// A read scoped to a wrong slug yields no facts → an all-nil Change (absent, not
-// an error): the tool layer, not the substrate, decides that is a failure.
+// A run that never authored a change (no document fact at all) hydrates to an
+// all-nil Change (absent, not an error): the tool layer, not the substrate,
+// decides that is a failure. Beta.147 D3 collapsed the document to ONE flat
+// predicate at M0 (single-change) — Hydrate no longer scopes the read by slug, so
+// the pre-D3 "wrong slug on an otherwise-populated run" case has no analogue;
+// what remains testable is "nothing was ever authored."
 func TestHydrateEmptyWhenNoFacts(t *testing.T) {
-	r := &fakeReader{triples: stampFacts(runEntity, sampleChange())}
-	got, err := Hydrate(context.Background(), r, runEntity, "some-other-change")
+	r := &fakeReader{} // no document fact at all
+	got, err := Hydrate(context.Background(), r, runEntity, "some-change")
 	if err != nil {
 		t.Fatalf("hydrate: %v", err)
 	}
 	if got.Proposal != nil || got.Tasks != nil || len(got.Deltas) != 0 {
-		t.Errorf("expected an empty change for an unknown slug, got %+v", got)
+		t.Errorf("expected an empty change when nothing was authored, got %+v", got)
 	}
 }
 

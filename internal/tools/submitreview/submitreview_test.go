@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -44,12 +45,16 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]stri
 	return nil, nil
 }
 
-func taskSpecFact(i int, field, obj string) message.Triple {
-	return message.Triple{Predicate: "task.spec." + strconv.Itoa(i) + "." + field, Object: obj, Source: "task-projector"}
+// taskSpecFact builds one flat task.spec.<field> fact (beta.147 D1: single-task at
+// M0 — the per-task index is out of the predicate).
+func taskSpecFact(field, obj string) message.Triple {
+	return message.Triple{Predicate: devtask.TaskSpecPrefix + field, Object: obj, Source: "task-projector"}
 }
 
-func measurementFacts(i, exit int, ran, timedOut, passed bool) []message.Triple {
-	p := measurement.ResultPrefix + strconv.Itoa(i) + "."
+// measurementFacts builds the flat measurement.result.* quintet for the run's one
+// task (beta.147 D1: no per-task index in the predicate).
+func measurementFacts(exit int, ran, timedOut, passed bool) []message.Triple {
+	p := measurement.ResultPrefix
 	return []message.Triple{
 		{Predicate: p + measurement.FactCommand, Object: "go test ./...", Source: "measurement-harness"},
 		{Predicate: p + measurement.FactRan, Object: strconv.FormatBool(ran), Source: "measurement-harness"},
@@ -104,18 +109,18 @@ func runTask(t *testing.T, facts []message.Triple, w *fakeWriter, taskIndex int,
 	return verdictFor(w, taskIndex), res
 }
 
-// run reviews task 0 (the common single-task case).
+// run reviews task 0 (the only projected task, single-task at M0).
 func run(t *testing.T, facts []message.Triple, w *fakeWriter, findings ...string) (string, agentic.ToolResult) {
 	t.Helper()
 	return runTask(t, facts, w, 0, findings...)
 }
 
-// oneTaskPassing is a run with one projected task (index 0) and a passing
-// measurement for it.
+// oneTaskPassing is a run with one projected task and a passing measurement for it
+// (beta.147 D1: flat predicates, single task at M0 — there is no other task to key).
 func oneTaskPassing() []message.Triple {
 	var f []message.Triple
-	f = append(f, taskSpecFact(0, "goal", "add the guard"), taskSpecFact(0, "test_command", "go test ./..."))
-	f = append(f, measurementFacts(0, 0, true, false, true)...)
+	f = append(f, taskSpecFact(devtask.FactGoal, "add the guard"), taskSpecFact(devtask.FactTestCommand, "go test ./..."))
+	f = append(f, measurementFacts(0, true, false, true)...)
 	return f
 }
 
@@ -154,8 +159,8 @@ func TestReviewApprovesWhenMeasuredPassAndNoFindings(t *testing.T) {
 // and however the change describes itself. Approval reads the stamped fact.
 func TestReviewCannotApproveFalseSuccess(t *testing.T) {
 	var f []message.Triple
-	f = append(f, taskSpecFact(0, "test_command", "go test ./..."))
-	f = append(f, measurementFacts(0, 1, true, false /*passed=*/, true)...) // stored passed lies; exit is 1
+	f = append(f, taskSpecFact(devtask.FactTestCommand, "go test ./..."))
+	f = append(f, measurementFacts(1, true, false /*passed=*/, true)...) // stored passed lies; exit is 1
 	w := &fakeWriter{}
 	verdict, res := run(t, f, w)
 	if res.Error != "" {
@@ -166,39 +171,36 @@ func TestReviewCannotApproveFalseSuccess(t *testing.T) {
 	}
 }
 
-// The reviewed task with NO measurement blocks its approval — the per-task gate
-// proves THIS task's evidence EXISTS and passed, not merely that nothing failed.
+// The reviewed task with NO measurement at all blocks its approval — the per-task
+// gate proves THIS task's evidence EXISTS and passed, not merely that nothing failed.
 func TestReviewBlocksWhenThisTasksMeasurementMissing(t *testing.T) {
-	// Two tasks projected; only task 0 is measured. Reviewing task 1 (unmeasured)
-	// cannot approve.
-	var f []message.Triple
-	f = append(f, taskSpecFact(0, "test_command", "go test ./..."), taskSpecFact(1, "test_command", "go test ./..."))
-	f = append(f, measurementFacts(0, 0, true, false, true)...)
+	f := []message.Triple{taskSpecFact(devtask.FactTestCommand, "go test ./...")}
 	w := &fakeWriter{}
-	verdict, res := runTask(t, f, w, 1)
+	verdict, res := run(t, f, w)
 	if res.Error != "" {
 		t.Fatalf("tool error: %s", res.Error)
 	}
 	if verdict != VerdictChangesRequested {
-		t.Errorf("verdict = %q, want %q — task 1 has no measurement", verdict, VerdictChangesRequested)
+		t.Errorf("verdict = %q, want %q — the reviewed task has no measurement", verdict, VerdictChangesRequested)
 	}
 }
 
-// A passing task's verdict is unaffected by a DIFFERENT task's failure (the spec's
-// per-task-independence scenario): task 0 passes, task 1 fails; reviewing task 0
-// approves.
-func TestReviewIsIndependentPerTask(t *testing.T) {
-	var f []message.Triple
-	f = append(f, taskSpecFact(0, "test_command", "go test ./..."), taskSpecFact(1, "test_command", "go test ./..."))
-	f = append(f, measurementFacts(0, 0, true, false, true)...)  // task 0 passes
-	f = append(f, measurementFacts(1, 1, true, false, false)...) // task 1 fails
+// beta.147 D1 collapsed dev-from-task to single-task at M0: task.spec and
+// measurement.result are flat and carry no per-task index, so there is no longer a
+// fixture-shaped way to author "task 1" alongside "task 0" — the pre-D1
+// per-task-independence scenario has no analogue. What DOES survive: an index other
+// than the one projected task ("0") can never be reviewed at all — cross-task
+// leakage is structurally impossible because there is no way to address a second
+// task's evidence in the first place (the M1 multi-task future re-introduces
+// per-task addressing via a per-task entity ID, an explicit seam).
+func TestReviewRejectsUnprojectedTaskIndex(t *testing.T) {
 	w := &fakeWriter{}
-	verdict, res := runTask(t, f, w, 0)
-	if res.Error != "" {
-		t.Fatalf("tool error: %s", res.Error)
+	verdict, res := runTask(t, oneTaskPassing(), w, 1)
+	if res.Error == "" {
+		t.Fatal("reviewing task_index=1 when only the one task (id 0) is projected must error, not silently pass/fail")
 	}
-	if verdict != VerdictApproved {
-		t.Errorf("verdict = %q, want %q — task 0 passes; task 1's failure must not affect it", verdict, VerdictApproved)
+	if verdict != "" {
+		t.Errorf("no verdict should be stamped for an unprojected task index, got %q", verdict)
 	}
 }
 
@@ -215,7 +217,7 @@ func TestReviewFindingBlocksEvenWhenMeasuredPass(t *testing.T) {
 }
 
 // Findings never weaken task.spec: on the run the review tool writes ONLY its owned
-// review.verdict.<i> / review.findings.<i> facts and holds no writer for task.spec, so a
+// review.verdict / review.findings facts and holds no writer for task.spec, so a
 // finding is structurally incapable of removing or relaxing a task.spec requirement (G5).
 func TestReviewWritesOnlyVerdictAndFindingsNeverTaskSpec(t *testing.T) {
 	w := &fakeWriter{}
@@ -236,7 +238,7 @@ func TestReviewWritesOnlyVerdictAndFindingsNeverTaskSpec(t *testing.T) {
 // you cannot review work that was never projected.
 func TestReviewErrorsWhenTaskNotProjected(t *testing.T) {
 	w := &fakeWriter{}
-	_, res := run(t, measurementFacts(0, 0, true, false, true), w) // measurements but no task.spec
+	_, res := run(t, measurementFacts(0, true, false, true), w) // measurements but no task.spec
 	if res.Error == "" {
 		t.Fatal("expected an error when the reviewed task has no task.spec")
 	}
@@ -263,9 +265,9 @@ func TestReviewRequiresTaskIndex(t *testing.T) {
 // it cannot read.
 func TestReviewFailsClosedOnMalformedMeasurement(t *testing.T) {
 	var f []message.Triple
-	f = append(f, taskSpecFact(0, "test_command", "go test ./..."))
-	f = append(f, measurementFacts(0, 0, true, false, true)...)
-	// Corrupt the exit_code fact.
+	f = append(f, taskSpecFact(devtask.FactTestCommand, "go test ./..."))
+	f = append(f, measurementFacts(0, true, false, true)...)
+	// Corrupt the exit-code fact.
 	for i := range f {
 		if strings.HasSuffix(f[i].Predicate, "."+measurement.FactExitCode) {
 			f[i].Object = "not-an-int"
@@ -317,17 +319,18 @@ func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
 
 // The ROUTE MIRROR: submit_review copies the routing inputs onto ITS OWN review loop so
 // the rule-native review route (approved → verify / changes_requested → retry-or-park) can
-// fire on them. route.verdict = the verdict, route.attempt.<i> = the append-mirror of the
-// run's task.attempt.<i> (the shared budget, R4). Both carry the route-mirror Source (a
-// distinct writer from reviewer-quinn, so no predicate gains two writers, G5). It is
-// stamped for a changes_requested verdict too (the route decides retry-or-park).
+// fire on them. route.review.verdict = the verdict, route.attempt.instance = the
+// append-mirror of the run's task.attempt.instance (the shared budget, R4). Both carry the
+// route-mirror Source (a distinct writer from reviewer-quinn, so no predicate gains two
+// writers, G5). It is stamped for a changes_requested verdict too (the route decides
+// retry-or-park).
 func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	w := &fakeWriter{}
 	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
 	// One passing task + two counted attempts; a finding forces changes_requested.
 	facts := append(oneTaskPassing(),
-		message.Triple{Predicate: "task.attempt.0", Object: "dev-loop-1", Source: "dev-dispatch-rule"},
-		message.Triple{Predicate: "task.attempt.0", Object: "dev-loop-2", Source: "dev-dispatch-rule"},
+		message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-1", Source: "dev-dispatch-rule"},
+		message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-2", Source: "dev-dispatch-rule"},
 	)
 	c := call(0, "regression found") // a finding → changes_requested
 	c.LoopID = "review-loop-abc"
@@ -347,7 +350,7 @@ func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			switch tr.Predicate {
-			case RouteVerdictPredicate, RouteAttemptPrefix + "0":
+			case RouteVerdictPredicate, RouteAttemptPredicate:
 				if tr.Subject != loopEntityID {
 					t.Errorf("route mirror %q stamped on %q, want the review LOOP entity %q", tr.Predicate, tr.Subject, loopEntityID)
 				}
@@ -358,20 +361,20 @@ func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 			switch tr.Predicate {
 			case RouteVerdictPredicate:
 				gotVerdict = tr.Object.(string)
-			case RouteAttemptPrefix + "0":
+			case RouteAttemptPredicate:
 				attemptObjs[tr.Object.(string)] = true
 			}
 		}
 	}
 	if gotVerdict != VerdictChangesRequested {
-		t.Errorf("route.verdict = %q, want %q", gotVerdict, VerdictChangesRequested)
+		t.Errorf("%s = %q, want %q", RouteVerdictPredicate, gotVerdict, VerdictChangesRequested)
 	}
 	if len(attemptObjs) != 2 {
-		t.Errorf("route.attempt.0 must mirror both task.attempt.0 objects, got %v", attemptObjs)
+		t.Errorf("%s must mirror both task.attempt.instance objects, got %v", RouteAttemptPredicate, attemptObjs)
 	}
 }
 
-// review.findings.<i> is stamped on the run (Quinn's prose) so a changes_requested
+// review.findings.value is stamped on the run (Quinn's prose) so a changes_requested
 // re-entry can re-read it; it is always stamped (empty when none) so a re-review clears it.
 func TestReviewStampsFindingsOnRun(t *testing.T) {
 	w := &fakeWriter{}
@@ -386,7 +389,7 @@ func TestReviewStampsFindingsOnRun(t *testing.T) {
 	var sawFindings bool
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
-			if tr.Predicate == FindingsPrefix+"0" {
+			if tr.Predicate == FindingsPredicate {
 				sawFindings = true
 				findings = tr.Object.(string)
 				if tr.Source != Source {
@@ -396,10 +399,10 @@ func TestReviewStampsFindingsOnRun(t *testing.T) {
 		}
 	}
 	if !sawFindings {
-		t.Fatal("submit_review must stamp review.findings.0 on the run")
+		t.Fatalf("submit_review must stamp %s on the run", FindingsPredicate)
 	}
 	if !strings.Contains(findings, "boundary off by one") || !strings.Contains(findings, "add the missing test") {
-		t.Errorf("review.findings.0 must carry Quinn's prose, got %q", findings)
+		t.Errorf("%s must carry Quinn's prose, got %q", FindingsPredicate, findings)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -67,16 +68,20 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) 
 	return nil, nil
 }
 
-// stamped returns the triples create_change would have written for a change: its
-// content facts plus the slug-scoped content revision Validate reads and echoes
-// into openspec.validated.
+// stamped returns the triples create_change would have written for a change
+// (beta.147 D3): the whole change serialized into the ONE document blob
+// changefacts.Hydrate reads, plus the flat content revision (beta.147 D1 — no
+// longer slug-scoped) Validate reads and echoes into openspec.change.validated.
 func stamped(runEntityID string, c *openspec.Change) []message.Triple {
-	var out []message.Triple
-	for _, f := range c.Facts() {
-		out = append(out, message.Triple{Subject: runEntityID, Predicate: f.Predicate, Object: f.Object})
+	doc := changefacts.ChangeDocument{Change: c}
+	raw, err := changefacts.MarshalDocument(doc)
+	if err != nil {
+		panic("marshal fixture document: " + err.Error()) // test fixture construction only
 	}
-	out = append(out, message.Triple{Subject: runEntityID, Predicate: createchange.SlugRevisionPredicate(c.Slug), Object: sampleRevision})
-	return out
+	return []message.Triple{
+		{Subject: runEntityID, Predicate: changefacts.DocumentPredicate, Object: raw},
+		{Subject: runEntityID, Predicate: createchange.RevisionPredicate, Object: sampleRevision},
+	}
 }
 
 func sampleChange() *openspec.Change {
@@ -186,16 +191,15 @@ func TestValidateRunnerErrorRecordsNothing(t *testing.T) {
 
 // D15 #0 red-first: a change present on the run but carrying NO content revision
 // (openspec.change.revision absent) is refused before the CLI runs — Validate will
-// not stamp a content-unbound marker, since a bare-slug marker would reopen the
+// not stamp a content-unbound marker, since a bare marker would reopen the
 // stale-same-slug false-green. create_change always stamps the revision, so an
 // absent one is an authoring/ordering gap.
 func TestValidateFailsWithoutRevision(t *testing.T) {
-	// Seed the change CONTENT facts but strip the slug-scoped revision fact
-	// Validate reads (run-level may remain — validate binds to the slug's own).
-	slugRev := createchange.SlugRevisionPredicate(sampleChange().Slug)
+	// Seed the change document but strip the flat revision fact Validate reads
+	// (beta.147 D1: the revision is run-level, no longer slug-scoped).
 	var content []message.Triple
 	for _, tr := range stamped(runEntity, sampleChange()) {
-		if tr.Predicate != slugRev {
+		if tr.Predicate != createchange.RevisionPredicate {
 			content = append(content, tr)
 		}
 	}
@@ -210,13 +214,18 @@ func TestValidateFailsWithoutRevision(t *testing.T) {
 	}
 }
 
-// An un-authored/misnamed slug hydrates empty and is rejected before the CLI runs.
+// A run with NO authored change document at all hydrates empty and is rejected
+// before the CLI runs. Under beta.147 D3 (single flat document at M0) the document
+// is no longer slug-scoped — Hydrate reads by fixed predicate, ignoring the slug
+// argument for the read itself — so an "empty change" fixture must omit the
+// document fact entirely, not merely address it under a different slug (the
+// pre-D3 "misnamed slug" case has no analogue at single-change M0).
 func TestValidateFailsOnEmptyChange(t *testing.T) {
-	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
+	r := &fakeReader{} // nothing authored — no openspec.change.document fact at all
 	runner := &fakeRunner{}
 	_, err := Validate(context.Background(), r, runner, &fakeWriter{}, runEntity, "never-authored")
 	if err == nil {
-		t.Error("expected an error validating a change with no facts")
+		t.Error("expected an error validating a run with no authored change")
 	}
 	if runner.calls != 0 {
 		t.Error("the CLI must not run for an empty change")

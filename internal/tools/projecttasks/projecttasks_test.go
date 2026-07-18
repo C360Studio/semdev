@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
 	"github.com/c360studio/semstreams/message"
@@ -15,17 +17,18 @@ import (
 // demoRevision is the content revision create_change would stamp for "demo".
 const demoRevision = "sha256:demo-content-v1"
 
-// validatedAt is the run's openspec.validated marker — its value is the content
-// REVISION the validator blessed (D15 #0), not the slug. project_tasks freezes
-// task.spec only when this equals the slug's current content revision.
+// validatedAt is the run's openspec.change.validated marker — its value is the
+// content REVISION the validator blessed (D15 #0), not the slug. project_tasks
+// freezes task.spec only when this equals the change's current content revision.
 func validatedAt(rev string) message.Triple {
 	return message.Triple{Predicate: validatechange.ValidatedPredicate, Object: rev, Source: validatechange.Source}
 }
 
-// slugRevisionAt is the change's current content revision (openspec.change.<slug>.
-// revision) create_change stamps; project_tasks binds openspec.validated to it.
-func slugRevisionAt(slug, rev string) message.Triple {
-	return message.Triple{Predicate: createchange.SlugRevisionPredicate(slug), Object: rev, Source: createchange.Source}
+// revisionAt is the change's current content revision (openspec.change.revision,
+// flat/single-change at M0 — beta.147 D1) create_change stamps; project_tasks
+// binds openspec.change.validated to it.
+func revisionAt(rev string) message.Triple {
+	return message.Triple{Predicate: createchange.RevisionPredicate, Object: rev, Source: createchange.Source}
 }
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -65,51 +68,59 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) 
 	return w.owned, nil
 }
 
-func changeFact(i int, field, obj string) message.Triple {
-	return message.Triple{
-		Predicate: fmt.Sprintf("openspec.change.demo.task.%d.%s", i, field),
-		Object:    obj,
-		Source:    "create-change-author-tool",
+// validRichTask returns index i's fully-authored rich fields (the schema-complete
+// case) — mirrors the pre-D3 validTaskFacts helper's quintet, now as the real Go
+// types the blob DTO carries (not JSON-in-a-string).
+func validRichTask(i int) changefacts.RichTask {
+	budget := 3
+	return changefacts.RichTask{
+		Index:       i,
+		TargetFiles: []string{"h.go", "h_test.go"},
+		TestCommand: "go test ./...",
+		Assumptions: []string{"router wired"},
+		NonGoals:    []string{},
+		Budget:      &budget,
 	}
 }
 
-// validTaskFacts is one fully-authored task's change facts (thin text + the five
-// rich fields), so a test can drop one field and prove the gap in isolation.
-func validTaskFacts(i int) []message.Triple {
-	return []message.Triple{
-		changeFact(i, "text", "add the guard"),
-		changeFact(i, "target_files", `["h.go","h_test.go"]`),
-		changeFact(i, "test_command", "go test ./..."),
-		changeFact(i, "assumptions", `["router wired"]`),
-		changeFact(i, "non_goals", "[]"),
-		changeFact(i, "budget", "3"),
+// changeDocument builds the change document blob (beta.147 D3) for one or more
+// rich tasks, all in a single "1. Fix" section — one thin task per rich task, text
+// "add the guard", aligned by the SAME index (mirrors create_change's toChange
+// walk: thin task i and rich task i are the same task).
+func changeDocument(rich ...changefacts.RichTask) changefacts.ChangeDocument {
+	tasks := &openspec.Tasks{Sections: []openspec.TaskSection{{Name: "1. Fix"}}}
+	for i := range rich {
+		tasks.Sections[0].Tasks = append(tasks.Sections[0].Tasks, openspec.Task{
+			Number: fmt.Sprintf("1.%d", i+1),
+			Text:   "add the guard",
+		})
+	}
+	return changefacts.ChangeDocument{
+		Change:    &openspec.Change{Slug: "demo", Tasks: tasks},
+		RichTasks: rich,
 	}
 }
 
-func withoutField(facts []message.Triple, field string) []message.Triple {
-	suffix := "." + field
-	var out []message.Triple
-	for _, f := range facts {
-		if !strings.HasSuffix(f.Predicate, suffix) {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-func withField(facts []message.Triple, i int, field, obj string) []message.Triple {
-	return append(withoutField(facts, field), changeFact(i, field, obj))
-}
-
-// run calls the Project core directly and returns the stamped task.spec as a
-// predicate→object map (empty when nothing was stamped), plus Project's own
-// return values.
-func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string, int, error) {
+// documentFact wraps a document as the single openspec.change.document triple
+// project_tasks reads via changefacts.HydrateDocument.
+func documentFact(t *testing.T, doc changefacts.ChangeDocument) message.Triple {
 	t.Helper()
-	// Seed the run's validated marker AND demo's current content revision as an
-	// EQUAL pair, so the fixtures reach the projection logic; the mismatch cases
-	// (unvalidated / re-authored / alternate) are pinned separately below.
-	facts = append(facts, validatedAt(demoRevision), slugRevisionAt("demo", demoRevision))
+	raw, err := changefacts.MarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("marshal fixture document: %v", err)
+	}
+	return message.Triple{Predicate: changefacts.DocumentPredicate, Object: raw, Source: createchange.Source}
+}
+
+// run calls the Project core directly against a document holding the given rich
+// tasks, and returns the stamped task.spec as a predicate→object map (empty when
+// nothing was stamped), plus Project's own return values. Seeds the run's
+// validated marker AND demo's current content revision as an EQUAL pair, so the
+// fixtures reach the projection logic; the mismatch cases (unvalidated /
+// re-authored / alternate) are pinned separately below with their own facts.
+func run(t *testing.T, rich []changefacts.RichTask, w *fakeWriter) (map[string]string, int, error) {
+	t.Helper()
+	facts := []message.Triple{documentFact(t, changeDocument(rich...)), validatedAt(demoRevision), revisionAt(demoRevision)}
 	count, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
 	idx := map[string]string{}
 	for _, batch := range w.replaces {
@@ -126,8 +137,9 @@ func run(t *testing.T, facts []message.Triple, w *fakeWriter) (map[string]string
 // author couldn't touch). Projection must PARK toward the human and stamp NOTHING (atomic).
 func TestProjectParksWhenTargetFilesOmitTest(t *testing.T) {
 	w := &fakeWriter{}
-	facts := withField(validTaskFacts(0), 0, "target_files", `["h.go"]`) // source only, no *_test.go
-	_, _, err := run(t, facts, w)
+	rt := validRichTask(0)
+	rt.TargetFiles = []string{"h.go"} // source only, no *_test.go
+	_, _, err := run(t, []changefacts.RichTask{rt}, w)
 	if err == nil {
 		t.Fatal("a go-test task whose target_files omit every *_test.go must park toward the human, not project")
 	}
@@ -139,11 +151,12 @@ func TestProjectParksWhenTargetFilesOmitTest(t *testing.T) {
 	}
 }
 
-// The happy path: an approved change's authored task facts project into
-// task.spec.<i>.<field> on the run entity, stamped with the task-projector Source.
+// The happy path: an approved change's authored task facts project into the FLAT
+// task.spec.<field> on the run entity (beta.147 D1: single-task, index out of the
+// predicate), stamped with the task-projector Source.
 func TestProjectStampsTaskSpec(t *testing.T) {
 	w := &fakeWriter{}
-	idx, count, err := run(t, validTaskFacts(0), w)
+	idx, count, err := run(t, []changefacts.RichTask{validRichTask(0)}, w)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -154,12 +167,12 @@ func TestProjectStampsTaskSpec(t *testing.T) {
 		t.Fatalf("expected one replace, got %d", len(w.replaces))
 	}
 	want := map[string]string{
-		"task.spec.0.goal":         "add the guard",
-		"task.spec.0.target_files": `["h.go","h_test.go"]`,
-		"task.spec.0.test_command": "go test ./...",
-		"task.spec.0.assumptions":  `["router wired"]`,
-		"task.spec.0.non_goals":    "[]",
-		"task.spec.0.budget":       "3",
+		"task.spec.goal":         "add the guard",
+		"task.spec.target-files": `["h.go","h_test.go"]`,
+		"task.spec.test-command": "go test ./...",
+		"task.spec.assumptions":  `["router wired"]`,
+		"task.spec.non-goals":    "[]",
+		"task.spec.budget":       "3",
 	}
 	for pred, obj := range want {
 		if idx[pred] != obj {
@@ -180,21 +193,26 @@ func TestProjectStampsTaskSpec(t *testing.T) {
 
 // The budget is clamped at projection: an authored 9 stamps as 5.
 func TestProjectClampsBudget(t *testing.T) {
-	idx, _, err := run(t, withField(validTaskFacts(0), 0, "budget", "9"), &fakeWriter{})
+	rt := validRichTask(0)
+	nine := 9
+	rt.Budget = &nine
+	idx, _, err := run(t, []changefacts.RichTask{rt}, &fakeWriter{})
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
-	if idx["task.spec.0.budget"] != "5" {
-		t.Errorf("budget = %q, want clamped to 5", idx["task.spec.0.budget"])
+	if idx["task.spec.budget"] != "5" {
+		t.Errorf("budget = %q, want clamped to 5", idx["task.spec.budget"])
 	}
 }
 
-// Presence preserved on READ: an ABSENT assumptions fact reconstructs a nil field
-// (a gap) and projection fails toward the human — Project surfaces the gap and
-// stamps nothing.
+// Presence preserved on READ: an ABSENT assumptions field (nil, never authored)
+// reconstructs a gap and projection fails toward the human — Project surfaces the
+// gap and stamps nothing.
 func TestProjectAbsentFieldFailsTowardHuman(t *testing.T) {
 	w := &fakeWriter{}
-	_, _, err := run(t, withoutField(validTaskFacts(0), "assumptions"), w)
+	rt := validRichTask(0)
+	rt.Assumptions = nil
+	_, _, err := run(t, []changefacts.RichTask{rt}, w)
 	if err == nil || !strings.Contains(err.Error(), "assumptions") {
 		t.Fatalf("absent assumptions must gap (fail toward human), got error %v", err)
 	}
@@ -206,7 +224,9 @@ func TestProjectAbsentFieldFailsTowardHuman(t *testing.T) {
 // A missing test_command likewise fails toward the human (the spec scenario).
 func TestProjectMissingTestCommandFailsTowardHuman(t *testing.T) {
 	w := &fakeWriter{}
-	_, _, err := run(t, withoutField(validTaskFacts(0), "test_command"), w)
+	rt := validRichTask(0)
+	rt.TestCommand = ""
+	_, _, err := run(t, []changefacts.RichTask{rt}, w)
 	if err == nil || !strings.Contains(err.Error(), "test_command") {
 		t.Fatalf("missing test_command must fail toward human, got %v", err)
 	}
@@ -215,11 +235,13 @@ func TestProjectMissingTestCommandFailsTowardHuman(t *testing.T) {
 	}
 }
 
-// A present authored-empty list ("[]") is NOT a gap — projection accepts it (the
-// happy path already carries non_goals "[]"); prove an authored-empty assumptions
-// also passes.
+// A present authored-empty list (non-nil, zero-length) is NOT a gap — projection
+// accepts it (the happy path already carries non_goals empty); prove an
+// authored-empty assumptions also passes.
 func TestProjectAuthoredEmptyListPasses(t *testing.T) {
-	_, _, err := run(t, withField(validTaskFacts(0), 0, "assumptions", "[]"), &fakeWriter{})
+	rt := validRichTask(0)
+	rt.Assumptions = []string{}
+	_, _, err := run(t, []changefacts.RichTask{rt}, &fakeWriter{})
 	if err != nil {
 		t.Fatalf("authored-empty assumptions must pass, got %v", err)
 	}
@@ -228,8 +250,8 @@ func TestProjectAuthoredEmptyListPasses(t *testing.T) {
 // Immutability: re-projecting onto a run that already carries task.spec is refused
 // — the dev loop converges on the facts, it does not redefine them.
 func TestProjectRejectsReProjection(t *testing.T) {
-	w := &fakeWriter{owned: []string{"task.spec.0.goal", "task.spec.0.budget"}}
-	_, _, err := run(t, validTaskFacts(0), w)
+	w := &fakeWriter{owned: []string{"task.spec.goal", "task.spec.budget"}}
+	_, _, err := run(t, []changefacts.RichTask{validRichTask(0)}, w)
 	if err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("re-projection onto existing task.spec must be rejected, got %v", err)
 	}
@@ -238,12 +260,12 @@ func TestProjectRejectsReProjection(t *testing.T) {
 	}
 }
 
-// Codex P1 red-first: a run with NO openspec.validated marker cannot have its
-// task.spec frozen — project_tasks fails closed rather than freeze an unvalidated
-// change (nothing stamped). demo's content revision is present but no validation
-// blessed it.
+// Codex P1 red-first: a run with NO openspec.change.validated marker cannot have
+// its task.spec frozen — project_tasks fails closed rather than freeze an
+// unvalidated change (nothing stamped). demo's content revision is present but no
+// validation blessed it.
 func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
-	facts := append(validTaskFacts(0), slugRevisionAt("demo", demoRevision))
+	facts := []message.Triple{documentFact(t, changeDocument(validRichTask(0))), revisionAt(demoRevision)}
 	w := &fakeWriter{}
 	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
 	if err == nil || !strings.Contains(err.Error(), "validated") {
@@ -259,7 +281,11 @@ func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
 // package). A call for "demo" must be refused — the validated revision does not
 // equal demo's current revision — so a later gate cannot prove the wrong work.
 func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
-	facts := append(validTaskFacts(0), validatedAt("sha256:other-content"), slugRevisionAt("demo", demoRevision))
+	facts := []message.Triple{
+		documentFact(t, changeDocument(validRichTask(0))),
+		validatedAt("sha256:other-content"),
+		revisionAt(demoRevision),
+	}
 	w := &fakeWriter{}
 	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
 	if err == nil || !strings.Contains(err.Error(), "validated") {
@@ -271,15 +297,16 @@ func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
 }
 
 // Codex P1 red-first (D15 #0): demo was validated at revision v1, then RE-AUTHORED
-// with changed content (revision now v2) but NOT re-validated. openspec.validated
+// with changed content (revision now v2) but NOT re-validated. openspec.change.validated
 // still holds v1 while demo's current revision is v2 — project_tasks must refuse to
 // freeze task.spec from the superseded validation, even though the slug "matches".
 // This is the stale-same-slug false-green the content-revision binding closes.
 func TestProjectRejectsReauthoredUnrevalidatedChange(t *testing.T) {
-	facts := append(validTaskFacts(0),
-		validatedAt("sha256:demo-content-v1"),            // validation blessed v1
-		slugRevisionAt("demo", "sha256:demo-content-v2"), // re-author bumped to v2
-	)
+	facts := []message.Triple{
+		documentFact(t, changeDocument(validRichTask(0))),
+		validatedAt("sha256:demo-content-v1"), // validation blessed v1
+		revisionAt("sha256:demo-content-v2"),  // re-author bumped to v2
+	}
 	w := &fakeWriter{}
 	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
 	if err == nil || !strings.Contains(err.Error(), "current content") {
@@ -290,23 +317,36 @@ func TestProjectRejectsReauthoredUnrevalidatedChange(t *testing.T) {
 	}
 }
 
-// No task facts (the change was not authored, or the slug is wrong) is an error,
-// not an empty projection.
+// No change document (the change was not authored, or the slug is wrong) is an
+// error, not an empty projection.
 func TestProjectNoTaskFactsErrors(t *testing.T) {
 	_, _, err := run(t, nil, &fakeWriter{})
 	if err == nil {
-		t.Fatal("expected an error when no task facts exist")
+		t.Fatal("expected an error when no tasks exist in the change document")
 	}
 }
 
-// Multiple tasks project in index order, each frozen into its own task.spec.<i>.
-func TestProjectMultipleTasks(t *testing.T) {
-	facts := append(validTaskFacts(0), validTaskFacts(1)...)
-	idx, _, err := run(t, facts, &fakeWriter{})
-	if err != nil {
-		t.Fatalf("Project: %v", err)
+// beta.147 D1: task.spec is flat-keyed (no per-task index), so a multi-task change
+// would silently clobber all but the last spec and mislabel the survivor as task 0.
+// project_tasks now fails CLOSED on >1 task — parking toward the human (G2) —
+// rather than developing a scrambled, partial task set. This REPLACES the pre-D1
+// "multiple tasks project independently" happy path: at M0 single-task, more than
+// one authored task is a refusal, not a feature.
+func TestProjectRejectsMultipleTasks(t *testing.T) {
+	w := &fakeWriter{}
+	facts := []message.Triple{
+		documentFact(t, changeDocument(validRichTask(0), validRichTask(1))),
+		validatedAt(demoRevision),
+		revisionAt(demoRevision),
 	}
-	if idx["task.spec.0.goal"] == "" || idx["task.spec.1.goal"] == "" {
-		t.Errorf("both tasks must project: %v", idx)
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	if err == nil {
+		t.Fatal("a change authoring more than one task must be refused at M0 (task.spec is single-keyed)")
+	}
+	if !strings.Contains(err.Error(), "2") {
+		t.Errorf("the refusal should name the authored task count, got: %v", err)
+	}
+	if len(w.replaces) != 0 {
+		t.Error("a refused multi-task projection must stamp nothing")
 	}
 }

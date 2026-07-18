@@ -76,9 +76,12 @@ var Predicates = []Predicate{
 	{"openspec.change.authored", "create-change-author-tool", "openspec-io", m0},
 	{"openspec.change.validated", "openspec-validate-harness", "openspec-io", m0},
 	{"openspec.change.archived", "openspec-archive-harness", "openspec-io", m0},
-	// openspec.spec.document is the brownfield living-spec scalar (deferred to group 9,
-	// same D3 blob treatment) — declared so its single writer is fixed now.
-	{"openspec.spec.document", "brownfield-spec-projector", "openspec-io", m0},
+	// openspec.spec.* is the brownfield living-spec tree the brownfield-spec-projector
+	// stamps (openspec.spec.<cap>.*). It stays a NAMESPACE at M0 (WriterOf resolves its
+	// members) because brownfield still writes the tree; the D3 blob treatment
+	// (openspec.spec.document, mirroring the change blob) lands with group 9. No rule
+	// reads it, so Register() skips it (a ".*" wildcard is not a concrete registerable name).
+	{"openspec.spec.*", "brownfield-spec-projector", "openspec-io", m0},
 
 	// task.spec.<field> — the immutable projected task package (flat, single-task M0).
 	{"task.spec.goal", "task-projector", "dev-from-task", m0},
@@ -197,6 +200,12 @@ var frameworkAdjacent = []string{
 func Register() {
 	agenticvocab.Register()
 	for _, p := range Predicates {
+		// A ".*" namespace entry (openspec.spec.*, the deferred brownfield tree) is not a
+		// concrete predicate — vocabulary.Register would panic on it, and no rule reads it,
+		// so it needs no rule-load declaration. WriterOf still resolves its members for G5.
+		if strings.HasSuffix(p.Name, ".*") {
+			continue
+		}
 		vocabulary.Register(p.Name)
 	}
 	for _, name := range frameworkAdjacent {

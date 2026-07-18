@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/floors"
+	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -18,14 +18,18 @@ const loopEntity = "org.plat.agent.chain.execution.floors-loop-1"
 type fakeAttempts struct {
 	attempt floors.Attempt
 	err     error
+	gotIdx  *int // when set, records the taskIndex RunFloors forwarded to Resolve
 }
 
-func (f fakeAttempts) Resolve(_ context.Context, _ string, _ int) (floors.Attempt, error) {
+func (f fakeAttempts) Resolve(_ context.Context, _ string, idx int) (floors.Attempt, error) {
+	if f.gotIdx != nil {
+		*f.gotIdx = idx
+	}
 	return f.attempt, f.err
 }
 
 // fakeReader replays the run's measurement + attempt facts the route mirror reads
-// (measurement.result.<i>.passed, task.attempt.<i>), filtered by the queried prefix.
+// (measurement.result.passed, task.attempt.instance), filtered by the queried prefix.
 type fakeReader struct {
 	facts []message.Triple
 	err   error
@@ -44,26 +48,28 @@ func (r fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.Tr
 	return out, nil
 }
 
-// measuredPassed builds the measurement.result.<i>.passed fact the route mirror copies.
-func measuredPassed(idx int, passed string) message.Triple {
-	return message.Triple{Predicate: "measurement.result." + strconv.Itoa(idx) + ".passed", Object: passed, Source: "measurement-harness"}
+// measuredPassed builds the measurement.result.passed fact the route mirror copies.
+// Single-task at M0 (beta.147 D1): the predicate carries no task index.
+func measuredPassed(passed string) message.Triple {
+	return message.Triple{Predicate: measurement.ResultPrefix + measurement.FactPassed, Object: passed, Source: "measurement-harness"}
 }
 
-// measuredCommit builds the measurement.result.<i>.commit fact that binds a measurement to
+// measuredCommit builds the measurement.result.commit fact that binds a measurement to
 // the snapshot it ran against (the semstreams-reviewer HIGH fix: a green is trusted only
-// when this equals the run's current attempt.commit).
-func measuredCommit(idx int, sha string) message.Triple {
-	return message.Triple{Predicate: "measurement.result." + strconv.Itoa(idx) + ".commit", Object: sha, Source: "measurement-harness"}
+// when this equals the run's current attempt.commit.sha).
+func measuredCommit(sha string) message.Triple {
+	return message.Triple{Predicate: measurement.ResultPrefix + measurement.FactCommit, Object: sha, Source: "measurement-harness"}
 }
 
-// attemptCommitFact builds the run's current attempt.commit (apply_patch's latest SHA).
+// attemptCommitFact builds the run's current attempt.commit.sha (apply_patch's latest SHA).
 func attemptCommitFact(sha string) message.Triple {
-	return message.Triple{Predicate: "attempt.commit", Object: sha, Source: "patch-committer"}
+	return message.Triple{Predicate: "attempt.commit.sha", Object: sha, Source: "patch-committer"}
 }
 
-// attemptFact builds one appended task.attempt.<i> counter triple (object = a loop id).
-func attemptFact(idx int, loopID string) message.Triple {
-	return message.Triple{Predicate: "task.attempt." + strconv.Itoa(idx), Object: loopID, Source: "dev-dispatch-rule"}
+// attemptFact builds one appended task.attempt.instance counter triple (object = a loop id).
+// Single-task at M0: the predicate carries no task index.
+func attemptFact(loopID string) message.Triple {
+	return message.Triple{Predicate: "task.attempt.instance", Object: loopID, Source: "dev-dispatch-rule"}
 }
 
 type fakeWriter struct {
@@ -82,7 +88,7 @@ func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]stri
 }
 
 // passingAttempt authors production source plus a real test that asserts on computed
-// behavior of the target — it clears all five floors.
+// behavior of the target — it clears all floors.
 func passingAttempt() floors.Attempt {
 	return floors.Attempt{
 		TargetFiles: []string{"h.go"},
@@ -119,23 +125,29 @@ func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[stri
 	return facts, res, err
 }
 
-// Happy path: every floor passes → each floor stamps a passed=true finding on the
-// run entity under floor.finding.<i>.<floor>, with the floor-tools Source.
+// Happy path: every floor passes → the run gets the flat floor.finding.rejected=false
+// plus a detail scalar naming every floor as passed (D4: findings flatten to three
+// predicates, no per-floor sub-keys at M0 single-task).
 func TestCheckFloorsAllPassStampsFindings(t *testing.T) {
 	w := &fakeWriter{}
-	facts, _, err := run(t, passingAttempt(), w, 0)
+	facts, res, err := run(t, passingAttempt(), w, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
-	for _, floor := range []string{floors.FloorPresence, floors.FloorTestsMustExist, floors.FloorVacuousTest, floors.FloorStub, floors.FloorSourceBuild, floors.FloorAntiMock} {
-		key := floors.FindingPrefix + "0." + floor + "." + floors.FactPassed
-		if facts[key] != "true" {
-			t.Errorf("%s = %q, want true", key, facts[key])
+	for _, f := range res.Findings {
+		if !f.Passed {
+			t.Errorf("floor %s: want passed, got rejected (%s)", f.Floor, f.Detail)
 		}
 	}
 	// The aggregate verdict the dev-loop gate reads: no floor rejected → rejected=false.
-	if got := facts[floors.FindingPrefix+"0."+floors.FactRejected]; got != "false" {
-		t.Errorf("%s0.%s = %q, want false (no floor rejected)", floors.FindingPrefix, floors.FactRejected, got)
+	if got := facts[floors.RejectedPredicate]; got != "false" {
+		t.Errorf("%s = %q, want false (no floor rejected)", floors.RejectedPredicate, got)
+	}
+	// The concatenated detail scalar names every floor as passed (G7 legibility).
+	for _, floor := range []string{floors.FloorPresence, floors.FloorTestsMustExist, floors.FloorVacuousTest, floors.FloorStub, floors.FloorSourceBuild, floors.FloorAntiMock, floors.FloorCleanTree} {
+		if !strings.Contains(facts[floors.DetailPredicate], floor+": passed") {
+			t.Errorf("%s missing %q: passed, got %q", floors.DetailPredicate, floor, facts[floors.DetailPredicate])
+		}
 	}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -149,38 +161,58 @@ func TestCheckFloorsAllPassStampsFindings(t *testing.T) {
 	}
 }
 
-// A vacuous test authored by the attempt is rejected by the vacuous-test floor: its
-// finding stamps passed=false with a detail, and the result flags rejected.
+// A vacuous test authored by the attempt is rejected by the vacuous-test floor: the
+// returned Finding is passed=false with a detail, the stamped aggregate flags true, and
+// the concatenated detail scalar names the rejecting floor (D4).
 func TestCheckFloorsVacuousTestRejected(t *testing.T) {
 	w := &fakeWriter{}
 	facts, res, err := run(t, vacuousAttempt(), w, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
-	if facts[floors.FindingPrefix+"0."+floors.FloorVacuousTest+"."+floors.FactPassed] != "false" {
+	var vacuous floors.Finding
+	found := false
+	for _, f := range res.Findings {
+		if f.Floor == floors.FloorVacuousTest {
+			vacuous, found = f, true
+		}
+	}
+	if !found {
+		t.Fatal("expected a vacuous-test finding in the returned result")
+	}
+	if vacuous.Passed {
 		t.Errorf("vacuous-test finding must be passed=false")
 	}
-	if facts[floors.FindingPrefix+"0."+floors.FloorVacuousTest+"."+floors.FactDetail] == "" {
+	if vacuous.Detail == "" {
 		t.Errorf("a rejecting finding must carry a detail (legible park)")
 	}
 	if !res.Rejected {
 		t.Errorf("result must flag Rejected=true")
 	}
 	// The STAMPED aggregate fact (what the gate reads, not the returned struct) must be true.
-	if got := facts[floors.FindingPrefix+"0."+floors.FactRejected]; got != "true" {
-		t.Errorf("%s0.%s = %q, want true (a rejecting floor sets the aggregate)", floors.FindingPrefix, floors.FactRejected, got)
+	if got := facts[floors.RejectedPredicate]; got != "true" {
+		t.Errorf("%s = %q, want true (a rejecting floor sets the aggregate)", floors.RejectedPredicate, got)
+	}
+	if !strings.Contains(facts[floors.DetailPredicate], floors.FloorVacuousTest+": REJECTED") {
+		t.Errorf("%s must name the rejecting floor, got %q", floors.DetailPredicate, facts[floors.DetailPredicate])
 	}
 }
 
-// Findings are keyed per task: task 2's findings land under floor.finding.2.*, never
-// clobbering another task's.
-func TestCheckFloorsPerTaskKeying(t *testing.T) {
-	facts, _, err := run(t, passingAttempt(), &fakeWriter{}, 2)
+// The task index is still threaded through to Attempts.Resolve (which task's checkout
+// to read) even though beta.147 D1 dropped it from the stamped predicate — single-task
+// at M0, the findings live in one flat package on the run rather than being keyed per
+// task, so there is no longer a fact-shaped way to prove per-task keying; this proves
+// the index still reaches the resolver.
+func TestCheckFloorsForwardsTaskIndexToResolve(t *testing.T) {
+	var gotIdx int
+	fa := fakeAttempts{attempt: passingAttempt(), gotIdx: &gotIdx}
+	w := &fakeWriter{}
+	_, err := RunFloors(context.Background(), fa, fakeReader{}, w, slog.Default(), runEntity, "", 2)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
-	if _, ok := facts[floors.FindingPrefix+"2."+floors.FloorSourceBuild+"."+floors.FactPassed]; !ok {
-		t.Errorf("expected findings keyed under floor.finding.2.*, got %v", facts)
+	if gotIdx != 2 {
+		t.Errorf("RunFloors must forward taskIndex to Attempts.Resolve, got %d want 2", gotIdx)
 	}
 }
 
@@ -207,9 +239,9 @@ func TestCheckFloorsReEvalUpserts(t *testing.T) {
 func TestCheckFloorsBindsAttemptIdentity(t *testing.T) {
 	w1 := &fakeWriter{}
 	facts1, _, _ := run(t, passingAttempt(), w1, 0)
-	id1 := facts1[floors.FindingPrefix+"0."+floors.FactAttempt]
+	id1 := facts1[floors.AttemptPredicate]
 	if id1 == "" {
-		t.Fatal("finding set must stamp floor.finding.0.attempt (the evaluated-source identity)")
+		t.Fatal("finding set must stamp floor.finding.attempt (the evaluated-source identity)")
 	}
 	if id1 != floors.AttemptID(passingAttempt()) {
 		t.Errorf("stamped attempt id %q != AttemptID(attempt) — the gate cannot recompute it", id1)
@@ -220,7 +252,7 @@ func TestCheckFloorsBindsAttemptIdentity(t *testing.T) {
 	changed.Files[0].Content += "\nfunc Sub(a, b int) int { return a - b }\n"
 	w2 := &fakeWriter{}
 	facts2, _, _ := run(t, changed, w2, 0)
-	if id2 := facts2[floors.FindingPrefix+"0."+floors.FactAttempt]; id2 == id1 {
+	if id2 := facts2[floors.AttemptPredicate]; id2 == id1 {
 		t.Errorf("a changed attempt must produce a different attempt id (got %q for both)", id2)
 	}
 }
@@ -230,9 +262,9 @@ func TestCheckFloorsBindsAttemptIdentity(t *testing.T) {
 // so semantic-review eligibility cannot read the stale pass as current.
 func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 	stale := []string{
-		floors.FindingPrefix + "0." + floors.FactAttempt,
-		floors.FindingPrefix + "0." + floors.FloorSourceBuild + "." + floors.FactPassed,
-		floors.FindingPrefix + "0." + floors.FloorVacuousTest + "." + floors.FactPassed,
+		floors.AttemptPredicate,
+		floors.RejectedPredicate,
+		floors.DetailPredicate,
 	}
 	w := &fakeWriter{owned: stale}
 	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, slog.Default(), runEntity, "", 0)
@@ -270,23 +302,23 @@ func TestCheckFloorsResolveErrorFails(t *testing.T) {
 
 // The ROUTE MIRROR: RunFloors copies the routing inputs onto the caller-supplied
 // routeLoopEntityID so the rule-native floors route (advance / not_clean → retry /
-// escalate) can fire on them. route.passed = the run's measurement, route.rejected =
-// its own aggregate, and route.attempt.<i> = the append-mirror of task.attempt.<i>.
-// All carry the route-mirror Source (a distinct writer from floor-tools, so no
-// predicate gains two writers, G5). It is stamped for a REJECTING run too (the route
-// decides retry).
+// escalate) can fire on them. route.attempt.passed = the run's measurement,
+// route.attempt.rejected = its own aggregate, and route.attempt.instance = the
+// append-mirror of task.attempt.instance. All carry the route-mirror Source (a distinct
+// writer from floor-tools, so no predicate gains two writers, G5). It is stamped for a
+// REJECTING run too (the route decides retry).
 func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 	w := &fakeWriter{}
-	// The run measured GREEN but the floors REJECT (vacuous test) — route.passed=true,
-	// route.rejected=true (the "cache-masked fabrication that passes warm" shape). Two
-	// attempts already counted (task.attempt.0 has two objects). The measurement is bound to
-	// the run's CURRENT attempt.commit (sha-b), so the green is trusted (not stale).
+	// The run measured GREEN but the floors REJECT (vacuous test) — route.attempt.passed=true,
+	// route.attempt.rejected=true (the "cache-masked fabrication that passes warm" shape). Two
+	// attempts already counted (task.attempt.instance has two objects). The measurement is bound
+	// to the run's CURRENT attempt.commit.sha (sha-b), so the green is trusted (not stale).
 	reader := fakeReader{facts: []message.Triple{
-		measuredPassed(0, "true"),
-		measuredCommit(0, "sha-b"),
+		measuredPassed("true"),
+		measuredCommit("sha-b"),
 		attemptCommitFact("sha-b"),
-		attemptFact(0, "dev-loop-1"),
-		attemptFact(0, "dev-loop-2"),
+		attemptFact("dev-loop-1"),
+		attemptFact("dev-loop-2"),
 	}}
 	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
@@ -300,7 +332,7 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			switch tr.Predicate {
-			case RoutePassedPredicate, RouteRejectedPredicate, RouteAttemptPrefix + "0":
+			case RoutePassedPredicate, RouteRejectedPredicate, RouteAttemptPredicate:
 				if tr.Subject != loopEntity {
 					t.Errorf("route mirror %q stamped on %q, want the floors LOOP entity %q", tr.Predicate, tr.Subject, loopEntity)
 				}
@@ -313,27 +345,27 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 				passed = tr.Object.(string)
 			case RouteRejectedPredicate:
 				rejected = tr.Object.(string)
-			case RouteAttemptPrefix + "0":
+			case RouteAttemptPredicate:
 				attemptObjs[tr.Object.(string)] = true
 			}
 		}
 	}
 	if passed != "true" {
-		t.Errorf("route.passed = %q, want the measurement copy \"true\"", passed)
+		t.Errorf("%s = %q, want the measurement copy \"true\"", RoutePassedPredicate, passed)
 	}
 	if rejected != "true" {
-		t.Errorf("route.rejected = %q, want the vacuous-test rejection \"true\"", rejected)
+		t.Errorf("%s = %q, want the vacuous-test rejection \"true\"", RouteRejectedPredicate, rejected)
 	}
 	if len(attemptObjs) != 2 || !attemptObjs["dev-loop-1"] || !attemptObjs["dev-loop-2"] {
-		t.Errorf("route.attempt.0 must mirror both task.attempt.0 objects, got %v", attemptObjs)
+		t.Errorf("%s must mirror both task.attempt.instance objects, got %v", RouteAttemptPredicate, attemptObjs)
 	}
 }
 
 // Fail-closed: when the run has NO measurement (Amelia stopped without measuring),
-// route.passed is copied as "false" — the route treats it as a red attempt, not green.
+// route.attempt.passed is copied as "false" — the route treats it as a red attempt, not green.
 func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 	w := &fakeWriter{}
-	// No measurement fact seeded → route.passed must fail closed to "false".
+	// No measurement fact seeded → route.attempt.passed must fail closed to "false".
 	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
@@ -344,26 +376,27 @@ func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 			if tr.Predicate == RoutePassedPredicate {
 				sawPassed = true
 				if tr.Object.(string) != "false" {
-					t.Errorf("route.passed with no measurement must fail closed to \"false\", got %q", tr.Object)
+					t.Errorf("%s with no measurement must fail closed to \"false\", got %q", RoutePassedPredicate, tr.Object)
 				}
 			}
 		}
 	}
 	if !sawPassed {
-		t.Error("RunFloors must always stamp route.passed (fail-closed) so the route can fire")
+		t.Errorf("RunFloors must always stamp %s (fail-closed) so the route can fire", RoutePassedPredicate)
 	}
 }
 
 // Fail-closed on a STALE green (the semstreams-reviewer HIGH): a green measurement bound to
-// a PRIOR snapshot (measurement.result.0.commit=sha-a) must NOT advance a later attempt that
-// was re-applied to a new snapshot (attempt.commit=sha-b) but never re-measured. route.passed
-// mirrors "false" so the route treats it as red (not-clean → retry), never a stale advance.
+// a PRIOR snapshot (measurement.result.commit=sha-a) must NOT advance a later attempt that
+// was re-applied to a new snapshot (attempt.commit.sha=sha-b) but never re-measured.
+// route.attempt.passed mirrors "false" so the route treats it as red (not-clean → retry),
+// never a stale advance.
 func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 	w := &fakeWriter{}
 	// Green measurement bound to sha-a, but the run has since been re-applied to sha-b.
 	reader := fakeReader{facts: []message.Triple{
-		measuredPassed(0, "true"),
-		measuredCommit(0, "sha-a"),
+		measuredPassed("true"),
+		measuredCommit("sha-a"),
 		attemptCommitFact("sha-b"),
 	}}
 	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
@@ -373,7 +406,7 @@ func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			if tr.Predicate == RoutePassedPredicate && tr.Object.(string) != "false" {
-				t.Errorf("route.passed on a STALE green (measured sha-a, current sha-b) must be \"false\", got %q — a stale measurement must not advance a re-applied-but-unmeasured attempt", tr.Object)
+				t.Errorf("%s on a STALE green (measured sha-a, current sha-b) must be \"false\", got %q — a stale measurement must not advance a re-applied-but-unmeasured attempt", RoutePassedPredicate, tr.Object)
 			}
 		}
 	}
@@ -391,22 +424,33 @@ func TestCheckFloorsWithoutLoopIDSkipsMirrorButRecords(t *testing.T) {
 	if _, ok := facts[RoutePassedPredicate]; ok {
 		t.Errorf("no routeLoopEntityID → the route mirror must be skipped, but %s was stamped", RoutePassedPredicate)
 	}
-	if facts[floors.FindingPrefix+"0."+floors.FactRejected] != "false" {
+	if facts[floors.RejectedPredicate] != "false" {
 		t.Error("the findings must still be recorded when the mirror is skipped")
 	}
 }
 
-// Sanity: the pure floors agree with what RunFloors stamps (the wrapper does not
-// re-derive or alter the verdict).
+// Sanity: the pure floors agree with what RunFloors returns and stamps (the wrapper
+// does not re-derive or alter the verdict, and the stamped detail scalar is exactly
+// FormatDetail's concatenation of the pure findings).
 func TestCheckFloorsMatchesPureVerdict(t *testing.T) {
 	att := vacuousAttempt()
 	want := floors.CheckAll(att)
 	w := &fakeWriter{}
-	facts, _, _ := run(t, att, w, 0)
-	for _, f := range want {
-		key := floors.FindingPrefix + "0." + f.Floor + "." + floors.FactPassed
-		if facts[key] != strconv.FormatBool(f.Passed) {
-			t.Errorf("floor %s: stamped %q, pure verdict %v", f.Floor, facts[key], f.Passed)
+	facts, res, err := run(t, att, w, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
+	}
+	if len(res.Findings) != len(want) {
+		t.Fatalf("RunFloors returned %d findings, pure floors.CheckAll returned %d", len(res.Findings), len(want))
+	}
+	for i, f := range want {
+		got := res.Findings[i]
+		if got.Floor != f.Floor || got.Passed != f.Passed || got.Detail != f.Detail {
+			t.Errorf("finding %d: RunFloors returned %+v, pure verdict %+v", i, got, f)
 		}
+	}
+	wantDetail := floors.FormatDetail(want)
+	if facts[floors.DetailPredicate] != wantDetail {
+		t.Errorf("stamped detail = %q, want %q (FormatDetail of the pure findings)", facts[floors.DetailPredicate], wantDetail)
 	}
 }

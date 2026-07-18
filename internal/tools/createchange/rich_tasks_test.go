@@ -1,13 +1,13 @@
 package createchange
 
 import (
-	"context"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semstreams/agentic"
-	"github.com/c360studio/semstreams/message"
 )
 
 // richTaskCall returns a create_change call whose single task carries the given
@@ -18,28 +18,10 @@ func richTaskCall(item map[string]any) agentic.ToolCall {
 	return call
 }
 
-// stampedFacts runs the tool and returns the stamped triples as a predicate→object
-// map (plus the raw slice for Source/subject checks).
-func stampedFacts(t *testing.T, call agentic.ToolCall) (map[string]string, []message.Triple) {
-	t.Helper()
-	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
-	if err != nil || res.Error != "" {
-		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
-	}
-	if len(w.replaces) != 1 {
-		t.Fatalf("expected one replace, got %d", len(w.replaces))
-	}
-	idx := map[string]string{}
-	for _, tr := range w.replaces[0].add {
-		idx[tr.Predicate] = tr.Object.(string)
-	}
-	return idx, w.replaces[0].add
-}
-
-// The execution-rich per-task fields are stamped under openspec.change.<slug>.
-// task.<i>.<field> with the vocab writer Source — the graph-only facts the projector
-// reads (arrays as JSON, budget as an int string).
+// The execution-rich per-task fields are stamped inside the document blob's
+// RichTasks array (beta.147 D3 — no longer standalone
+// openspec.change.<slug>.task.<i>.<field> facts): the graph-only fields the
+// projector reads (arrays/budget as their real Go types, not JSON-in-a-string).
 func TestCreateChangeStampsRichTaskFacts(t *testing.T) {
 	call := richTaskCall(map[string]any{
 		"number":       "1.1",
@@ -50,52 +32,73 @@ func TestCreateChangeStampsRichTaskFacts(t *testing.T) {
 		"non_goals":    []any{},
 		"budget":       3,
 	})
-	idx, triples := stampedFacts(t, call)
-	base := "openspec.change.fix-null-deref.task.0."
-	want := map[string]string{
-		base + "target_files": `["handler.go"]`,
-		base + "test_command": "go test ./...",
-		base + "assumptions":  `["router is wired"]`,
-		base + "non_goals":    "[]",
-		base + "budget":       "3",
+	doc, triples := stampedDocument(t, call)
+	if len(doc.RichTasks) != 1 {
+		t.Fatalf("expected 1 rich task, got %d", len(doc.RichTasks))
 	}
-	for pred, obj := range want {
-		if idx[pred] != obj {
-			t.Errorf("%s = %q, want %q", pred, idx[pred], obj)
-		}
+	rt := doc.RichTasks[0]
+	if rt.Index != 0 {
+		t.Errorf("rich task index = %d, want 0", rt.Index)
 	}
-	// Source + subject discipline on a rich fact (G5/D15).
+	if !reflect.DeepEqual(rt.TargetFiles, []string{"handler.go"}) {
+		t.Errorf("target_files = %v, want [handler.go]", rt.TargetFiles)
+	}
+	if rt.TestCommand != "go test ./..." {
+		t.Errorf("test_command = %q, want %q", rt.TestCommand, "go test ./...")
+	}
+	if !reflect.DeepEqual(rt.Assumptions, []string{"router is wired"}) {
+		t.Errorf("assumptions = %v, want [router is wired]", rt.Assumptions)
+	}
+	if rt.NonGoals == nil || len(rt.NonGoals) != 0 {
+		t.Errorf("authored-empty non_goals must decode to a non-nil empty slice, got %v", rt.NonGoals)
+	}
+	if rt.Budget == nil || *rt.Budget != 3 {
+		t.Errorf("budget = %v, want 3", rt.Budget)
+	}
+	// Source + subject discipline on the document blob itself (G5/D15).
 	for _, tr := range triples {
-		if tr.Predicate == base+"target_files" {
+		if tr.Predicate == changefacts.DocumentPredicate {
 			if tr.Source != Source {
-				t.Errorf("rich fact Source = %q, want vocab writer %q", tr.Source, Source)
+				t.Errorf("document Source = %q, want vocab writer %q", tr.Source, Source)
 			}
 			if tr.Subject != runEntity {
-				t.Errorf("rich fact subject = %q, want run entity %q", tr.Subject, runEntity)
+				t.Errorf("document subject = %q, want run entity %q", tr.Subject, runEntity)
 			}
 		}
 	}
 }
 
-// Presence is load-bearing (the projector seam guard): an ABSENT field stamps NO
-// fact (the projector reads nil = a gap), while an authored-empty list stamps "[]"
-// (a real value the projector accepts). create_change must not normalize nil → [].
+// Presence is load-bearing (the projector seam guard): an ABSENT field decodes to
+// nil (the projector reads nil = a gap), while an authored-empty list decodes to a
+// non-nil empty slice (a real value the projector accepts). The DTO round-trips
+// this through JSON with no omitempty (beta.147 D3) — create_change must not
+// normalize nil to [].
 func TestCreateChangeRichTaskPresencePreserved(t *testing.T) {
 	call := richTaskCall(map[string]any{
 		"number":      "1.1",
 		"text":        "t",
-		"assumptions": []any{}, // authored-empty → "[]"
-		// target_files, test_command, non_goals, budget ABSENT → no fact
+		"assumptions": []any{}, // authored-empty → non-nil empty
+		// target_files, test_command, non_goals, budget ABSENT → nil (a projector gap)
 	})
-	idx, _ := stampedFacts(t, call)
-	base := "openspec.change.fix-null-deref.task.0."
-	if idx[base+"assumptions"] != "[]" {
-		t.Errorf("authored-empty assumptions must stamp \"[]\", got %q", idx[base+"assumptions"])
+	doc, _ := stampedDocument(t, call)
+	if len(doc.RichTasks) != 1 {
+		t.Fatalf("expected 1 rich task, got %d", len(doc.RichTasks))
 	}
-	for _, absent := range []string{"target_files", "test_command", "non_goals", "budget"} {
-		if _, ok := idx[base+absent]; ok {
-			t.Errorf("absent %q must stamp NO fact (nil = projector gap), but %q was stamped", absent, base+absent)
-		}
+	rt := doc.RichTasks[0]
+	if rt.Assumptions == nil || len(rt.Assumptions) != 0 {
+		t.Errorf("authored-empty assumptions must decode to a non-nil empty slice, got %#v", rt.Assumptions)
+	}
+	if rt.TargetFiles != nil {
+		t.Errorf("absent target_files must decode to nil (a projector gap), got %#v", rt.TargetFiles)
+	}
+	if rt.TestCommand != "" {
+		t.Errorf("absent test_command must decode to \"\", got %q", rt.TestCommand)
+	}
+	if rt.NonGoals != nil {
+		t.Errorf("absent non_goals must decode to nil (a projector gap), got %#v", rt.NonGoals)
+	}
+	if rt.Budget != nil {
+		t.Errorf("absent budget must decode to nil (a projector gap), got %v", *rt.Budget)
 	}
 }
 
@@ -112,13 +115,20 @@ func TestCreateChangeRichTaskIndexAlignsAcrossSections(t *testing.T) {
 			map[string]any{"number": "2.1", "text": "second", "target_files": []any{"b.go"}},
 		}},
 	}
-	idx, _ := stampedFacts(t, call)
-	base := "openspec.change.fix-null-deref.task."
-	if idx[base+"0.text"] != "first" || idx[base+"0.target_files"] != `["a.go"]` {
-		t.Errorf("task.0 thin+rich misaligned: text=%q target=%q", idx[base+"0.text"], idx[base+"0.target_files"])
+	doc, _ := stampedDocument(t, call)
+	if doc.Change.Tasks == nil || len(doc.Change.Tasks.Sections) != 2 {
+		t.Fatalf("expected 2 sections, got %+v", doc.Change.Tasks)
 	}
-	if idx[base+"1.text"] != "second" || idx[base+"1.target_files"] != `["b.go"]` {
-		t.Errorf("task.1 thin+rich misaligned: text=%q target=%q", idx[base+"1.text"], idx[base+"1.target_files"])
+	if len(doc.RichTasks) != 2 {
+		t.Fatalf("expected 2 rich tasks, got %d", len(doc.RichTasks))
+	}
+	firstText := doc.Change.Tasks.Sections[0].Tasks[0].Text
+	secondText := doc.Change.Tasks.Sections[1].Tasks[0].Text
+	if firstText != "first" || !reflect.DeepEqual(doc.RichTasks[0].TargetFiles, []string{"a.go"}) {
+		t.Errorf("task 0 thin+rich misaligned: text=%q target=%v", firstText, doc.RichTasks[0].TargetFiles)
+	}
+	if secondText != "second" || !reflect.DeepEqual(doc.RichTasks[1].TargetFiles, []string{"b.go"}) {
+		t.Errorf("task 1 thin+rich misaligned: text=%q target=%v", secondText, doc.RichTasks[1].TargetFiles)
 	}
 }
 
@@ -139,25 +149,29 @@ func TestCreateChangeRichTaskIndexSurvivesPartial(t *testing.T) {
 			map[string]any{"number": "2.1", "text": "b-first", "test_command": "go test ./..."}, // task 2 — rich
 		}},
 	}
-	idx, _ := stampedFacts(t, call)
-	base := "openspec.change.fix-null-deref.task."
-	// task 0 authored no rich fields → none stamped.
-	if _, ok := idx[base+"0.target_files"]; ok {
-		t.Error("task.0 authored no rich fields but a target_files fact was stamped — index drift")
+	doc, _ := stampedDocument(t, call)
+	if len(doc.RichTasks) != 3 {
+		t.Fatalf("expected one rich-task DTO per thin task (even when it authored no rich fields), got %d", len(doc.RichTasks))
+	}
+	// task 0 authored no rich fields → its rich entry decodes all-absent.
+	if doc.RichTasks[0].TargetFiles != nil {
+		t.Errorf("task 0 authored no rich fields but target_files decoded non-nil — index drift: %#v", doc.RichTasks[0].TargetFiles)
 	}
 	// task 1's target_files must land on task 1 (a-second), not task 0 or 2.
-	if idx[base+"1.text"] != "a-second" || idx[base+"1.target_files"] != `["s.go"]` {
-		t.Errorf("rich target_files drifted off its task: task.1.text=%q target=%q", idx[base+"1.text"], idx[base+"1.target_files"])
+	if got := doc.Change.Tasks.Sections[0].Tasks[1].Text; got != "a-second" || !reflect.DeepEqual(doc.RichTasks[1].TargetFiles, []string{"s.go"}) {
+		t.Errorf("rich target_files drifted off its task: task.1.text=%q target=%v", got, doc.RichTasks[1].TargetFiles)
 	}
 	// task 2's test_command must land on task 2 (b-first, second section).
-	if idx[base+"2.text"] != "b-first" || idx[base+"2.test_command"] != "go test ./..." {
-		t.Errorf("rich test_command drifted: task.2.text=%q cmd=%q", idx[base+"2.text"], idx[base+"2.test_command"])
+	if got := doc.Change.Tasks.Sections[1].Tasks[0].Text; got != "b-first" || doc.RichTasks[2].TestCommand != "go test ./..." {
+		t.Errorf("rich test_command drifted: task.2.text=%q cmd=%q", got, doc.RichTasks[2].TestCommand)
 	}
 }
 
 // Q1 guard (graph-only is permanent): the rich fields must NOT round-trip into
-// tasks.md — reconstruction reads only the thin task keys, so a rendered tasks.md
-// from the stamped facts carries checkboxes only, never target_files/test_command.
+// tasks.md. Under beta.147 D3 this is now enforced by the TYPE the render side
+// consumes — openspec.Task carries only Number/Text/Done, so RichTasks (a sibling
+// field on the document DTO, never merged into Change.Tasks) has no path into
+// RenderTasks at all.
 func TestCreateChangeRichFactsDoNotRoundTripToTasksMd(t *testing.T) {
 	call := richTaskCall(map[string]any{
 		"number":       "1.1",
@@ -166,12 +180,8 @@ func TestCreateChangeRichFactsDoNotRoundTripToTasksMd(t *testing.T) {
 		"test_command": "go test ./...",
 		"budget":       3,
 	})
-	_, triples := stampedFacts(t, call)
-	facts := make([]openspec.Fact, 0, len(triples))
-	for _, tr := range triples {
-		facts = append(facts, openspec.Fact{Predicate: tr.Predicate, Object: tr.Object.(string)})
-	}
-	md := openspec.RenderTasks(openspec.ChangeFromFacts("fix-null-deref", facts).Tasks)
+	doc, _ := stampedDocument(t, call)
+	md := openspec.RenderTasks(doc.Change.Tasks)
 	for _, leak := range []string{"target_files", "test_command", "handler.go", "go test", "budget"} {
 		if strings.Contains(md, leak) {
 			t.Errorf("rich field %q leaked into rendered tasks.md (Q1 violated):\n%s", leak, md)
@@ -183,7 +193,8 @@ func TestCreateChangeRichFactsDoNotRoundTripToTasksMd(t *testing.T) {
 }
 
 // G3: an outcome-shaped field smuggled onto a task (passed/verified) is ignored —
-// no such fact is stamped. Extends the done-ignored discipline to the rich schema.
+// it never reaches the stamped document. Extends the done-ignored discipline to
+// the rich schema.
 func TestCreateChangeIgnoresTaskOutcomeField(t *testing.T) {
 	call := richTaskCall(map[string]any{
 		"number":       "1.1",
@@ -192,10 +203,9 @@ func TestCreateChangeIgnoresTaskOutcomeField(t *testing.T) {
 		"passed":       true,
 		"verified":     "yes",
 	})
-	_, triples := stampedFacts(t, call)
-	for _, tr := range triples {
-		if strings.Contains(tr.Predicate, "passed") || strings.Contains(tr.Predicate, "verified") {
-			t.Errorf("outcome-shaped field leaked into a fact: %q (G3)", tr.Predicate)
-		}
+	_, triples := stampedDocument(t, call)
+	raw := objectOf(triples, changefacts.DocumentPredicate)
+	if strings.Contains(raw, "passed") || strings.Contains(raw, "verified") {
+		t.Errorf("outcome-shaped field leaked into the stamped document (G3): %s", raw)
 	}
 }

@@ -46,22 +46,22 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		source    string
 		predicate string // any predicate under the tool's namespace
 	}{
-		{"create_change", createchange.Source, "openspec.change.example.proposal.intent"},
+		{"create_change", createchange.Source, "openspec.change.document"},
 		{"validate_change", validatechange.Source, validatechange.ValidatedPredicate},
-		{"project_tasks", projecttasks.Source, "task.spec.0.goal"},
-		{"measure_task", measuretask.Source, "measurement.result.0.passed"},
-		{"submit_review", submitreview.Source, "review.verdict.0"},
-		{"submit_review", submitreview.Source, "review.findings.0"},
+		{"project_tasks", projecttasks.Source, "task.spec.goal"},
+		{"measure_task", measuretask.Source, "measurement.result.passed"},
+		{"submit_review", submitreview.Source, "review.verdict.value"},
+		{"submit_review", submitreview.Source, "review.findings.value"},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
-		{"check_floors", checkfloors.Source, "floor.finding.0.stub.passed"},
+		{"check_floors", checkfloors.Source, "floor.finding.rejected"},
 		// The route mirror (design R1): check_floors + submit_review both stamp the route.*
 		// facts onto their firing loop under ONE logical writer route-mirror (a distinct
 		// Source from floor-tools / reviewer-quinn, so no predicate gains two writers, G5).
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RoutePassedPredicate},
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteRejectedPredicate},
-		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteAttemptPrefix + "0"},
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteAttemptPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteVerdictPredicate},
-		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteAttemptPrefix + "0"},
+		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteAttemptPredicate},
 		{"open_pr", openpr.Source, openpr.RefPredicate},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 		{"apply_patch", applypatch.Source, applypatch.CommitPredicate},

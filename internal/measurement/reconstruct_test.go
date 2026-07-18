@@ -7,29 +7,31 @@ import (
 	"github.com/c360studio/semstreams/message"
 )
 
-// mfact builds one measurement.result.<i>.<field> triple as measure_task stamps it.
-func mfact(i int, field, obj string) message.Triple {
+// mfact builds one measurement.result.<field> triple as measure_task stamps it
+// (beta.147 D1: single-task at M0 — the per-task index is out of the predicate).
+func mfact(field, obj string) message.Triple {
 	return message.Triple{
-		Predicate: ResultPrefix + strconv.Itoa(i) + "." + field,
+		Predicate: ResultPrefix + field,
 		Object:    obj,
 		Source:    "measurement-harness",
 	}
 }
 
-// fullMeasurement is one task's complete measurement fact set.
-func fullMeasurement(i int, exit int, ran, timedOut, passed bool) []message.Triple {
+// fullMeasurement is the run's complete measurement fact set (single task at M0,
+// TaskID always "0").
+func fullMeasurement(exit int, ran, timedOut, passed bool) []message.Triple {
 	return []message.Triple{
-		mfact(i, FactCommand, "go test ./..."),
-		mfact(i, FactRan, strconv.FormatBool(ran)),
-		mfact(i, FactExitCode, strconv.Itoa(exit)),
-		mfact(i, FactTimedOut, strconv.FormatBool(timedOut)),
-		mfact(i, FactPassed, strconv.FormatBool(passed)),
+		mfact(FactCommand, "go test ./..."),
+		mfact(FactRan, strconv.FormatBool(ran)),
+		mfact(FactExitCode, strconv.Itoa(exit)),
+		mfact(FactTimedOut, strconv.FormatBool(timedOut)),
+		mfact(FactPassed, strconv.FormatBool(passed)),
 	}
 }
 
 // A complete measurement fact set reconstructs to the typed Result.
 func TestResultsFromFactsHappy(t *testing.T) {
-	rs, err := ResultsFromFacts(fullMeasurement(0, 0, true, false, true))
+	rs, err := ResultsFromFacts(fullMeasurement(0, true, false, true))
 	if err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
@@ -42,33 +44,33 @@ func TestResultsFromFactsHappy(t *testing.T) {
 	}
 }
 
-// Multiple tasks reconstruct sorted by index, and non-measurement predicates on the
-// same entity (task.spec facts) are ignored, not errors.
-func TestResultsFromFactsMultipleSortedIgnoresForeign(t *testing.T) {
+// Single task at M0 (beta.147 D1): the measurement family reconstructs to exactly
+// ONE Result (id "0" — there is no other task to key). Non-measurement predicates
+// on the same entity (task.spec, review.verdict) are ignored, not errors.
+func TestResultsFromFactsIgnoresForeignPredicates(t *testing.T) {
 	var triples []message.Triple
-	triples = append(triples, fullMeasurement(2, 1, true, false, false)...)
-	triples = append(triples, fullMeasurement(0, 0, true, false, true)...)
+	triples = append(triples, fullMeasurement(0, true, false, true)...)
 	triples = append(triples,
-		message.Triple{Predicate: "task.spec.0.goal", Object: "add the guard", Source: "task-projector"},
-		message.Triple{Predicate: "review.verdict", Object: "approved", Source: "reviewer-quinn"},
+		message.Triple{Predicate: "task.spec.goal", Object: "add the guard", Source: "task-projector"},
+		message.Triple{Predicate: "review.verdict.value", Object: "approved", Source: "reviewer-quinn"},
 	)
 	rs, err := ResultsFromFacts(triples)
 	if err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
-	if len(rs) != 2 || rs[0].TaskID != "0" || rs[1].TaskID != "2" {
-		t.Fatalf("want tasks [0 2] sorted, got %+v", rs)
+	if len(rs) != 1 || rs[0].TaskID != "0" {
+		t.Fatalf("want the one task [0], got %+v", rs)
 	}
 }
 
 // Fail closed: a missing sub-key is an error, never a defaulted (false-green)
 // Result — an incomplete measurement is untrustworthy evidence.
 func TestResultsFromFactsMissingSubKeyFailsClosed(t *testing.T) {
-	full := fullMeasurement(0, 0, true, false, true)
+	full := fullMeasurement(0, true, false, true)
 	for _, drop := range []string{FactRan, FactExitCode, FactTimedOut, FactPassed, FactCommand} {
 		var kept []message.Triple
 		for _, tr := range full {
-			if tr.Predicate != ResultPrefix+"0."+drop {
+			if tr.Predicate != ResultPrefix+drop {
 				kept = append(kept, tr)
 			}
 		}
@@ -78,17 +80,17 @@ func TestResultsFromFactsMissingSubKeyFailsClosed(t *testing.T) {
 	}
 }
 
-// Fail closed: a malformed exit_code (non-int) or ran (non-bool) is an error, not a
+// Fail closed: a malformed exit-code (non-int) or ran (non-bool) is an error, not a
 // default.
 func TestResultsFromFactsMalformedFailsClosed(t *testing.T) {
-	bad := fullMeasurement(0, 0, true, false, true)
-	bad[2] = mfact(0, FactExitCode, "not-an-int")
+	bad := fullMeasurement(0, true, false, true)
+	bad[2] = mfact(FactExitCode, "not-an-int")
 	if _, err := ResultsFromFacts(bad); err == nil {
-		t.Error("a non-int exit_code must error (fail closed)")
+		t.Error("a non-int exit-code must error (fail closed)")
 	}
 
-	bad2 := fullMeasurement(0, 0, true, false, true)
-	bad2[1] = mfact(0, FactRan, "maybe")
+	bad2 := fullMeasurement(0, true, false, true)
+	bad2[1] = mfact(FactRan, "maybe")
 	if _, err := ResultsFromFacts(bad2); err == nil {
 		t.Error("a non-bool ran must error (fail closed)")
 	}
@@ -110,8 +112,8 @@ func TestResultsFromFactsEmpty(t *testing.T) {
 // re-derives — so a measurement whose stored passed was flipped to true but whose
 // exit code is non-zero still cannot approve.
 func TestResultsFromFactsCanApproveReDerivesPastTamperedPassed(t *testing.T) {
-	// Stored passed=true but exit_code=1: a tampered/stale headline.
-	tampered := fullMeasurement(0, 1, true, false, true)
+	// Stored passed=true but exit code=1: a tampered/stale headline.
+	tampered := fullMeasurement(1, true, false, true)
 	rs, err := ResultsFromFacts(tampered)
 	if err != nil {
 		t.Fatalf("reconstruct: %v", err)
@@ -120,6 +122,6 @@ func TestResultsFromFactsCanApproveReDerivesPastTamperedPassed(t *testing.T) {
 		t.Fatal("reconstruction should report the stored passed verbatim")
 	}
 	if CanApprove([]string{"0"}, rs) {
-		t.Error("CanApprove must re-derive from exit_code=1 and block, ignoring the stored passed=true")
+		t.Error("CanApprove must re-derive from exit-code=1 and block, ignoring the stored passed=true")
 	}
 }

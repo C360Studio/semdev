@@ -30,11 +30,11 @@
 // content the CLI blessed. A re-author bumps that revision, so the stale
 // openspec.validated no longer equals it — the gate rule (openspec.validated eq the
 // run's current revision) and project_tasks both refuse until Validate runs
-// again against the new content. Reading the SLUG-scoped revision (not the run-level
-// one) binds the marker to precisely what was validated, so a future multi-slug run
-// fails the gate closed rather than blessing whatever was last authored.
-// create_change is the SOLE computer of the revision; this harness only echoes it,
-// so the two cannot drift.
+// again against the new content. Reading the run-level content revision
+// (openspec.change.revision, flat/single-change at M0 — beta.147 D1/D3) binds the
+// marker to precisely what was validated, so a re-authored-but-unvalidated change fails
+// the gate closed rather than blessing whatever was last authored. create_change is the
+// SOLE computer of the revision; this harness only echoes it, so the two cannot drift.
 package validatechange
 
 import (
@@ -176,9 +176,8 @@ func stampValidated(ctx context.Context, writer agentictools.OwnedFactWriter, ru
 }
 
 // readRevision returns the object of the exact revision predicate on the run
-// entity (the slug-scoped openspec.change.<slug>.revision create_change stamped),
-// or "" if absent. It is named via createchange's own helper so the read/write
-// sides cannot drift.
+// entity (the run-level openspec.change.revision create_change stamped), or "" if
+// absent. It is named via createchange's own const so the read/write sides cannot drift.
 func readRevision(ctx context.Context, reader changefacts.Reader, runEntityID, predicate string) (string, error) {
 	triples, err := reader.ReadFacts(ctx, runEntityID, predicate)
 	if err != nil {
