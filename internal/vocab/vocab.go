@@ -9,19 +9,16 @@
 // entries; the census tests in test/conformance enforce the invariants.
 //
 // beta.147: every name is CANONICAL (three lower-kebab segments domain.category.property,
-// no digit-start, no underscore). The census is CONCRETE except for the single deferred
-// namespace openspec.spec.* (the brownfield living-spec tree, its blob treatment is group
-// 9) — Register() declares each concrete name with the framework vocabulary registry
-// (skipping the ".*" entry) so the engine's UNCONDITIONAL rule-load predicate-declaration
-// check passes; no rule reads openspec.spec.*, so skipping it drops nothing. Single-task at M0
-// (beta.147 D1): the per-task/-change index left the predicate (it keys the entity ID
-// at M1), so the old task.spec.<i>/measurement.result.<i>/openspec.change.<slug> shapes
-// collapsed to flat names.
+// no digit-start, no underscore). beta.150: the census is now FULLY CONCRETE — the last
+// deferred namespace, the brownfield living-spec tree, was flattened from openspec.spec.*
+// to the single concrete blob predicate openspec.spec.document (specfacts, mirroring the
+// D3 change blob), so Register() declares every entry and the ".*"-namespace machinery is
+// retired. Single-task at M0 (beta.147 D1): the per-task/-change index left the predicate
+// (it keys the entity ID at M1), so the old task.spec.<i>/measurement.result.<i>/
+// openspec.change.<slug> shapes collapsed to flat names.
 package vocab
 
 import (
-	"strings"
-
 	_ "github.com/c360studio/semstreams/agentic/agentrun" // init() declares agent.run.phase (+ transition-audit predicates) semdev reads
 	"github.com/c360studio/semstreams/vocabulary"
 	agenticvocab "github.com/c360studio/semstreams/vocabulary/agentic"
@@ -78,12 +75,11 @@ var Predicates = []Predicate{
 	{"openspec.change.authored", "create-change-author-tool", "openspec-io", m0},
 	{"openspec.change.validated", "openspec-validate-harness", "openspec-io", m0},
 	{"openspec.change.archived", "openspec-archive-harness", "openspec-io", m0},
-	// openspec.spec.* is the brownfield living-spec tree the brownfield-spec-projector
-	// stamps (openspec.spec.<cap>.*). It stays a NAMESPACE at M0 (WriterOf resolves its
-	// members) because brownfield still writes the tree; the D3 blob treatment
-	// (openspec.spec.document, mirroring the change blob) lands with group 9. No rule
-	// reads it, so Register() skips it (a ".*" wildcard is not a concrete registerable name).
-	{"openspec.spec.*", "brownfield-spec-projector", "openspec-io", m0},
+	// openspec.spec.document is the brownfield living-spec blob: the brownfield-spec-projector
+	// serializes each capability spec to one JSON scalar here (specfacts.SpecDocument), on that
+	// capability's spec entity — the canonical (3-part) twin of the openspec.change.document
+	// change blob. Concrete, so Register() declares it like any other name.
+	{"openspec.spec.document", "brownfield-spec-projector", "openspec-io", m0},
 
 	// task.spec.<field> — the immutable projected task package (flat, single-task M0).
 	{"task.spec.goal", "task-projector", "dev-from-task", m0},
@@ -202,12 +198,8 @@ var frameworkAdjacent = []string{
 func Register() {
 	agenticvocab.Register()
 	for _, p := range Predicates {
-		// A ".*" namespace entry (openspec.spec.*, the deferred brownfield tree) is not a
-		// concrete predicate — vocabulary.Register would panic on it, and no rule reads it,
-		// so it needs no rule-load declaration. WriterOf still resolves its members for G5.
-		if strings.HasSuffix(p.Name, ".*") {
-			continue
-		}
+		// The census is fully concrete (beta.150 — the last ".*" namespace, openspec.spec.*,
+		// was flattened to the concrete openspec.spec.document blob), so every entry declares.
 		vocabulary.Register(p.Name)
 	}
 	for _, name := range frameworkAdjacent {
@@ -224,21 +216,13 @@ func Names() []string {
 	return names
 }
 
-// WriterOf returns the single writer declared for a predicate name. It matches
-// exactly first, then falls back to a declared namespace (a name under a ".*" entry
-// resolves to that entry's writer). ok is false when the name is in neither. The
-// namespace fallback is ACTIVE at M0: openspec.spec.* is the one ".*" entry (the deferred
-// brownfield living-spec tree), so a lookup of openspec.spec.<cap>.* resolves via this
-// fallback — the G5 brownfield pin (TestWriterOfNamespaceMember, brownfield_test.go)
-// depends on it, so the second loop is NOT dead code. Every other name is concrete.
+// WriterOf returns the single writer declared for a predicate name. ok is false when the
+// name is not in the census. The census is fully CONCRETE (beta.150 retired the last ".*"
+// namespace, openspec.spec.*, for the concrete openspec.spec.document blob), so this is an
+// exact match — no namespace fallback.
 func WriterOf(name string) (writer string, ok bool) {
 	for _, p := range Predicates {
 		if p.Name == name {
-			return p.Writer, true
-		}
-	}
-	for _, p := range Predicates {
-		if prefix, isNS := strings.CutSuffix(p.Name, ".*"); isNS && strings.HasPrefix(name, prefix+".") {
 			return p.Writer, true
 		}
 	}

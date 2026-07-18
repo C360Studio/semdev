@@ -284,6 +284,14 @@ func requirementFromIndex(idx factIndex, prefix string) Requirement {
 }
 
 // --- living spec: Spec <-> openspec.spec.<cap>.* ---
+//
+// RETAINED, currently caller-less (beta.150): brownfield now stores a living spec as the
+// single openspec.spec.document blob (internal/specfacts), not this per-field fact tree, so
+// Facts()/SpecFromFacts()/SpecEntityPrefix have no production caller — same dormant state as
+// the change-side Change.Facts()/ChangeFromFacts() (blob-only since beta.147 D3). Kept as the
+// format seam's bidirectional Facts∘FromFacts round-trip contract (exercised by facts_test.go);
+// a prune, if taken, removes BOTH the change and spec adapters together (shared helpers), not
+// this half alone.
 
 // Facts maps a living capability Spec to its openspec.spec.<cap>.* facts.
 // The capability is taken from s.Capability; an empty Capability yields facts

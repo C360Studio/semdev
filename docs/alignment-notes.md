@@ -358,12 +358,15 @@ Template:
 - **Why it cannot express this:** ingest MUST be deterministic and model-free
   (G3) — a model interpreting the artifacts is exactly the LLM-supplied-fact class
   the constitution forbids on the measurement/ingest path. Parsing OpenSpec
-  markdown into the nested spec model and projecting it to `openspec.spec.*` facts
-  is the format engine's `ParseSpec`/`Facts()` (ported, dep-free); the projector
-  is the thin deterministic Go that walks the specs tree, applies the single
-  owner, and retains each source file's raw bytes by content-hash reference for
-  provenance. No rule can walk a directory, hash bytes, or re-group a spec's
-  requirements. It is the single G5 writer of `openspec.spec.*`.
+  markdown into the nested spec model is the format engine's `ParseSpec` (ported,
+  dep-free); the projector is the thin deterministic Go that walks the specs tree,
+  serializes each capability spec to ONE canonical `openspec.spec.document` blob
+  (`internal/specfacts`, the beta.150 canonical twin of the `openspec.change.document`
+  change blob — the old `openspec.spec.<cap>.<field>` tree is 4+ segments the
+  fail-closed graph-write gate rejects), applies the single owner, and retains each
+  source file's raw bytes by content-hash reference (carried as `source_ref` inside the
+  blob) for provenance. No rule can walk a directory, hash bytes, or re-group a spec's
+  requirements. It is the single G5 writer of `openspec.spec.document`.
 - **Registry entry:** none yet — at M0 this is the library projector core with its
   red-first pins; its registered ingest component (which wires it onto the raw
   lane and stamps the facts on their spec entities) and the matching

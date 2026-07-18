@@ -61,7 +61,7 @@
 
 ## 9. Brownfield ingest runtime component
 
-- [ ] 9.1 Registered ingest component wiring `internal/brownfield` onto the raw lane (raw-lane → projector → graph-ingest), stamping `openspec.spec.*` on spec entities under the single owner (G5); framework-alignment note + registry entry
+- [ ] 9.1 Registered ingest component wiring `internal/brownfield` onto the raw lane (raw-lane → projector → graph-ingest), stamping the canonical `openspec.spec.document` blob (one per capability, `brownfield.CapabilityDoc`) on each capability's spec entity under the single owner (G5); framework-alignment note + registry entry. MUST write via `ReplaceTriples(entity, triples, owned=[specfacts.DocumentPredicate])` per capability entity (upsert — mirror `createchange.go` for `openspec.change.document`), NOT append, or a re-ingest stacks duplicate documents
 - [ ] 9.2 Boot-path test: runtime against a target repo with living specs ingests without manual invocation; in-flight `openspec/changes/` stay un-ingested
 
 ## 10. Bridge-proof journey + docs honesty

@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c360studio/semdev/internal/openspec"
+	"github.com/c360studio/semdev/internal/specfacts"
 	"github.com/c360studio/semdev/internal/vocab"
+	"github.com/c360studio/semstreams/vocabulary"
 )
 
 // writeSpec lays out specsDir/<cap>/spec.md with the given content.
@@ -38,10 +39,10 @@ The system SHALL reject an expired token.
 - THEN it is rejected
 `
 
-// ProjectSpecs reads a repo's living specs into openspec.spec.<cap>.* facts
-// deterministically, under one owner, with the raw bytes retained by reference —
-// and no model in the loop.
-func TestProjectSpecsSeedsFactsWithProvenance(t *testing.T) {
+// ProjectSpecs reads a repo's living specs into ONE canonical openspec.spec.document blob
+// per capability, deterministically, under one owner, with the raw bytes retained by
+// reference (source_ref inside the blob) — and no model in the loop.
+func TestProjectSpecsSeedsDocumentWithProvenance(t *testing.T) {
 	specsDir := t.TempDir()
 	writeSpec(t, specsDir, "auth", cleanSpec)
 
@@ -49,48 +50,54 @@ func TestProjectSpecsSeedsFactsWithProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
-
-	// Content facts are projected under the capability's openspec.spec.* subtree.
-	facts := factMap(p.Facts)
-	if got := facts["openspec.spec.auth.title"]; got != "Auth Specification" {
-		t.Errorf("title fact = %q, want %q", got, "Auth Specification")
+	if len(p.Docs) != 1 {
+		t.Fatalf("want one capability document, got %d", len(p.Docs))
 	}
-	if _, ok := facts["openspec.spec.auth.purpose"]; !ok {
-		t.Error("no purpose fact projected")
-	}
-	var sawRequirement bool
-	for pred := range facts {
-		if strings.HasPrefix(pred, "openspec.spec.auth.requirement.") && strings.HasSuffix(pred, ".statement") {
-			sawRequirement = true
-		}
-	}
-	if !sawRequirement {
-		t.Error("no requirement statement fact projected")
+	d := p.Docs[0]
+	if d.Capability != "auth" {
+		t.Errorf("capability = %q, want auth", d.Capability)
 	}
 
-	// Provenance: a source_ref fact points at the retained raw bytes.
-	ref, ok := facts["openspec.spec.auth.source_ref"]
-	if !ok || ref == "" {
-		t.Fatal("no source_ref provenance fact projected")
+	// The document unmarshals to the parsed spec — the whole capability in one scalar.
+	doc, err := specfacts.UnmarshalDocument(d.Document)
+	if err != nil {
+		t.Fatalf("unmarshal document: %v", err)
 	}
-	if len(p.Sources) != 1 {
-		t.Fatalf("want one retained source artifact, got %d", len(p.Sources))
+	if doc.Spec == nil {
+		t.Fatal("document carries no spec")
 	}
-	src := p.Sources[0]
-	if src.Ref != ref {
-		t.Errorf("source_ref fact %q does not match retained artifact ref %q", ref, src.Ref)
+	if doc.Spec.Title != "Auth Specification" {
+		t.Errorf("spec title = %q, want %q", doc.Spec.Title, "Auth Specification")
 	}
-	if string(src.Bytes) != cleanSpec {
+	if doc.Spec.Purpose == "" {
+		t.Error("no purpose in the projected spec")
+	}
+	if len(doc.Spec.Requirements) == 0 || doc.Spec.Requirements[0].Statement == "" {
+		t.Error("no requirement statement in the projected spec")
+	}
+	// Diagnostics do not travel in the content blob (the projector clears them).
+	if doc.Spec.Warnings != nil {
+		t.Errorf("spec Warnings leaked into the content blob: %v", doc.Spec.Warnings)
+	}
+
+	// Provenance: source_ref inside the blob points at the retained raw bytes.
+	if doc.SourceRef == "" {
+		t.Fatal("no source_ref provenance in the document")
+	}
+	if d.Source.Ref != doc.SourceRef {
+		t.Errorf("retained artifact ref %q != document source_ref %q", d.Source.Ref, doc.SourceRef)
+	}
+	if string(d.Source.Bytes) != cleanSpec {
 		t.Error("retained artifact bytes are not the source file's raw bytes")
 	}
 }
 
-// The projection is deterministic: same input → identical facts (byte-for-byte),
-// so the ingest path is reproducible and model-free.
+// The projection is deterministic: same input → identical document objects (byte-for-byte),
+// in sorted-capability order, so the ingest path is reproducible and model-free.
 func TestProjectSpecsIsDeterministic(t *testing.T) {
 	specsDir := t.TempDir()
-	writeSpec(t, specsDir, "auth", cleanSpec)
 	writeSpec(t, specsDir, "billing", cleanSpec)
+	writeSpec(t, specsDir, "auth", cleanSpec)
 
 	a, err := ProjectSpecs(specsDir)
 	if err != nil {
@@ -100,19 +107,23 @@ func TestProjectSpecsIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project b: %v", err)
 	}
-	if len(a.Facts) != len(b.Facts) {
-		t.Fatalf("fact count differs across runs: %d vs %d", len(a.Facts), len(b.Facts))
+	if len(a.Docs) != len(b.Docs) {
+		t.Fatalf("doc count differs across runs: %d vs %d", len(a.Docs), len(b.Docs))
 	}
-	for i := range a.Facts {
-		if a.Facts[i] != b.Facts[i] {
-			t.Errorf("fact %d differs across runs: %+v vs %+v", i, a.Facts[i], b.Facts[i])
+	for i := range a.Docs {
+		if a.Docs[i].Capability != b.Docs[i].Capability || a.Docs[i].Document != b.Docs[i].Document {
+			t.Errorf("doc %d differs across runs (non-deterministic projection)", i)
 		}
+	}
+	// Sorted-capability order regardless of write order (auth before billing).
+	if len(a.Docs) != 2 || a.Docs[0].Capability != "auth" || a.Docs[1].Capability != "billing" {
+		t.Errorf("capabilities not in sorted order: %+v", a.Docs)
 	}
 }
 
-// A spec using bullet/heading-case variance and a malformed block parses
-// leniently: it still yields facts, and the lossy case is surfaced as a warning
-// (never a hard failure), with provenance intact.
+// A spec using bullet/heading-case variance and a malformed block parses leniently: it
+// still yields a document, and the lossy case is surfaced as a warning (never a hard
+// failure), with provenance intact.
 func TestProjectSpecsLenientVarianceKeepsProvenance(t *testing.T) {
 	const variant = `# Payments
 
@@ -139,16 +150,20 @@ The system SHALL charge at most once.
 	if err != nil {
 		t.Fatalf("lenient parse must not hard-fail: %v", err)
 	}
-
-	facts := factMap(p.Facts)
-	// Heading-case variance ("## purpose", "## REQUIREMENTS") is tolerated: the
-	// content still projects.
-	if _, ok := facts["openspec.spec.payments.purpose"]; !ok {
+	if len(p.Docs) != 1 {
+		t.Fatalf("want one document, got %d", len(p.Docs))
+	}
+	doc, err := specfacts.UnmarshalDocument(p.Docs[0].Document)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Heading-case variance ("## purpose", "## REQUIREMENTS") is tolerated: content projects.
+	if doc.Spec == nil || doc.Spec.Purpose == "" {
 		t.Error("lower-case '## purpose' heading was not tolerated")
 	}
 	var sawReq bool
-	for pred, obj := range facts {
-		if strings.Contains(pred, ".requirement.") && strings.HasSuffix(pred, ".statement") && strings.Contains(obj, "at most once") {
+	for _, r := range doc.Spec.Requirements {
+		if strings.Contains(r.Statement, "at most once") {
 			sawReq = true
 		}
 	}
@@ -165,25 +180,26 @@ The system SHALL charge at most once.
 		}
 	}
 	// Provenance survives a lenient parse.
-	if _, ok := facts["openspec.spec.payments.source_ref"]; !ok {
+	if doc.SourceRef == "" {
 		t.Error("provenance dropped on a lenient parse")
 	}
 }
 
-// A repo with no openspec/specs/ dir is not an error — onboarding a repo that has
-// none yields an empty projection.
+// A repo with no openspec/specs/ dir is not an error — onboarding a repo that has none
+// yields an empty projection.
 func TestProjectSpecsAbsentDirIsEmptyNotError(t *testing.T) {
 	p, err := ProjectSpecs(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err != nil {
 		t.Fatalf("absent specs dir must not error: %v", err)
 	}
-	if len(p.Facts) != 0 || len(p.Sources) != 0 {
+	if len(p.Docs) != 0 {
 		t.Errorf("expected an empty projection, got %+v", p)
 	}
 }
 
-// Triples stamps the single owner (== the vocab writer for openspec.spec.*) on
-// every fact, so the whole ingest is attributable and G5-verifiable.
+// Triples stamps ONE canonical openspec.spec.document triple per capability under the
+// single owner (== the vocab writer), on that capability's spec entity — G5-verifiable —
+// and the predicate is CANONICAL, so the beta.150 fail-closed graph-write gate accepts it.
 func TestTriplesStampSingleOwnerMatchingVocab(t *testing.T) {
 	specsDir := t.TempDir()
 	writeSpec(t, specsDir, "auth", cleanSpec)
@@ -191,41 +207,36 @@ func TestTriplesStampSingleOwnerMatchingVocab(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
+	if len(p.Docs) != 1 {
+		t.Fatalf("want one document, got %d", len(p.Docs))
+	}
 
 	const subject = "org.plat.openspec.spec.capability.auth"
-	triples := Triples(subject, p, time.Unix(0, 0).UTC())
-	if len(triples) != len(p.Facts) {
-		t.Fatalf("Triples produced %d, want %d (one per fact)", len(triples), len(p.Facts))
+	triples := Triples(subject, p.Docs[0], time.Unix(0, 0).UTC())
+	if len(triples) != 1 {
+		t.Fatalf("Triples produced %d, want 1 (one document per capability entity)", len(triples))
 	}
+	tr := triples[0]
 
-	writer, ok := vocab.WriterOf("openspec.spec.auth.title")
+	writer, ok := vocab.WriterOf(specfacts.DocumentPredicate)
 	if !ok {
-		t.Fatal("openspec.spec.* has no vocab writer")
+		t.Fatalf("%s has no vocab writer", specfacts.DocumentPredicate)
 	}
 	if Source != writer {
-		t.Errorf("projector Source %q != vocab writer %q for openspec.spec.* — G5 unverifiable drift", Source, writer)
+		t.Errorf("projector Source %q != vocab writer %q for %s — G5 unverifiable drift", Source, writer, specfacts.DocumentPredicate)
 	}
-	for _, tr := range triples {
-		if tr.Subject != subject {
-			t.Errorf("triple subject = %q, want %q", tr.Subject, subject)
-		}
-		if tr.Source != Source {
-			t.Errorf("triple Source = %q, want the single owner %q", tr.Source, Source)
-		}
-		if !strings.HasPrefix(tr.Predicate, "openspec.spec.") {
-			t.Errorf("projected predicate %q is not under openspec.spec.*", tr.Predicate)
-		}
+	if tr.Subject != subject {
+		t.Errorf("triple subject = %q, want %q", tr.Subject, subject)
 	}
-}
-
-// factMap flattens a fact list to predicate→object for lookup. First write wins,
-// matching the engine's index semantics.
-func factMap(facts []openspec.Fact) map[string]string {
-	m := make(map[string]string, len(facts))
-	for _, f := range facts {
-		if _, ok := m[f.Predicate]; !ok {
-			m[f.Predicate] = f.Object
-		}
+	if tr.Source != Source {
+		t.Errorf("triple Source = %q, want the single owner %q", tr.Source, Source)
 	}
-	return m
+	if tr.Predicate != specfacts.DocumentPredicate {
+		t.Errorf("triple predicate = %q, want %q", tr.Predicate, specfacts.DocumentPredicate)
+	}
+	// The whole point of the flatten (semstreams beta.150): the predicate is CANONICAL, so
+	// the fail-closed graph-ingest gate would accept the write instead of rejecting it.
+	if !vocabulary.IsValidPredicate(tr.Predicate) {
+		t.Errorf("projected predicate %q is NOT canonical — beta.150 graph-ingest would reject it", tr.Predicate)
+	}
 }

@@ -29,7 +29,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `openspec.change.authored` | create-change-author-tool | openspec-io |
 | `openspec.change.validated` | openspec-validate-harness | openspec-io |
 | `openspec.change.archived` | openspec-archive-harness | openspec-io |
-| `openspec.spec.*` | brownfield-spec-projector | openspec-io |
+| `openspec.spec.document` | brownfield-spec-projector | openspec-io |
 | `task.spec.goal` | task-projector | dev-from-task |
 | `task.spec.budget` | task-projector | dev-from-task |
 | `task.spec.assumptions` | task-projector | dev-from-task |
