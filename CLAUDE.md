@@ -39,17 +39,20 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.25+; semstreams pinned at `v1.0.0-beta.149` (started at beta.134; beta.147
+- Go 1.25+; semstreams pinned at `v1.0.0-beta.150` (started at beta.134; beta.147
   is the canonical-predicate + entity-ID breaking wave; beta.149 landed the #551
-  per-loop executor tool-enforcement fix); NATS via docker compose (never embedded).
+  per-loop executor tool-enforcement fix; beta.150 enforces the canonical predicate/entity
+  contract FAIL-CLOSED at the graph-write boundary — semdev's vocab already conforms);
+  NATS via docker compose (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
 
 ## Status
 
 M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers), now on
-**semstreams beta.149** (on the beta.147 breaking canonical-predicate + entity-ID wave;
-beta.149 landed the #551 per-loop executor tool-enforcement fix).
+**semstreams beta.150** (on the beta.147 breaking canonical-predicate + entity-ID wave;
+beta.149 landed the #551 per-loop executor tool-enforcement fix; beta.150 hardens the
+canonical contract fail-closed at graph-write — semdev's vocab already conforms, verified).
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
 (the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
@@ -60,8 +63,12 @@ sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → struc
 floors → route (advance/retry/escalate) → review (Quinn) → **cold clean-room
 verify** of the committed artifact → coherence route → open_pr → `delivery.pr.ref`.
 Proven by `test/e2e/journey_test.go` — all four bridge-proof journeys (happy +
-retry + rejection + exhaustion) green on beta.149 (atop the beta.147 sweep) with zero paid tokens and zero
-predicate/entity-contract rejections, plus docker-gated cold-proof pins.
+retry + rejection + exhaustion) green on beta.150 (atop the beta.147 sweep) with zero paid tokens and zero
+predicate/entity-contract rejections (beta.150's fail-closed graph-write gate stamps none), plus
+docker-gated cold-proof pins. NOTE the journeys are run WITHOUT `-race` for functional evidence: a
+PRE-EXISTING framework data race (`rule.Processor.Health()`/`DataFlow()` write under a read lock,
+byte-identical across beta.148→150 so NOT a bump regression) makes the `-race` suite ~50% flaky —
+filed as semstreams #566, tracked by the gap-open tripwire `TestTripwireProcessorHealthRaceUnfixed`.
 beta.147 facts are CANONICAL (3-seg lower-kebab, declared via `internal/vocab.Register`);
 every rule carries an `entity.pattern` (required to fire on the entity-state lane).
 The beta.148 tripwires (#519 scalar `.value`, #528 per-spawn max_iterations, #529 typed

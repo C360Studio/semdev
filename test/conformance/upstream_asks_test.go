@@ -35,10 +35,11 @@ import (
 //   GAP-OPEN TRIPWIRES — when an upstream fix is STILL OPEN, the tripwire is the
 //   INVERSE: it asserts the GAP is still present (green while open) and is meant to FIRE
 //   (red) when the framework CLOSES it — the signal to adopt the real fix and FLIP the
-//   tripwire to a regression guard. NONE are currently open (#551 was the last, until
-//   beta.149). LESSON from #551: the gap-open form did NOT auto-trip when the fix landed
-//   (the fix's key name + admission seam were outside the anchors' watch), so this polarity
-//   is a re-check HINT on a bump, not a guarantee the close is caught.
+//   tripwire to a regression guard. Currently open: #566 (rule.Processor.Health/DataFlow
+//   mutate under a READ lock → data race; TestTripwireProcessorHealthRaceUnfixed). LESSON
+//   from #551: the gap-open form did NOT auto-trip when the fix landed (the fix's key name +
+//   admission seam were outside the anchors' watch), so this polarity is a re-check HINT on
+//   a bump, not a guarantee the close is caught.
 
 // TestTripwire519ScalarValueSubstitution — semstreams #519 (scalar .value
 // field-to-field). Now a REGRESSION GUARD: the #519 fix LANDED in beta.148.
@@ -303,6 +304,59 @@ func TestTripwireExecutorHonorsPerLoopToolAllowlist(t *testing.T) {
 				"stamps the loop's advertised tool set onto tool calls, so the executor has nothing to enforce "+
 				"and per-loop scoping is inert. Restore upstream or re-open #551.", anchor)
 		}
+	}
+}
+
+// TestTripwireProcessorHealthRaceUnfixed — semstreams #566 (rule.Processor.Health()
+// and DataFlow() mutate shared struct fields while holding only a sync.RWMutex READ
+// lock, so concurrent callers — the ComponentManager health-publish loop and any
+// GetHealthyComponents() query — race on the write). A GAP-OPEN TRIPWIRE.
+//
+// Impact on semdev: the -race e2e journeys are ~50% flaky (the race trips
+// requireAgenticHealthy's GetHealthyComponents poll during startup). It is PRE-EXISTING
+// (processor.go + component_manager.go are byte-identical across beta.148→150) and
+// benign to journey BEHAVIOR (a torn write of a health/flow cache) — the journeys are
+// reliably green WITHOUT -race. So the interim posture is: functional evidence runs the
+// journeys without -race; the -race suite is known-flaky until #566 lands.
+//
+// It asserts the bug shape is STILL present in BOTH getters (RLock + a write to the cached
+// struct — rp.health.* in Health(), rp.flowMetrics.* in DataFlow()) and TRIPS when either
+// shape changes — the signal that the fix (RLock→Lock, or move the mutation out of the
+// getter) may have landed, so re-enable -race confidence and FLIP this to a regression
+// guard. Source-anchored on the compiled framework; fails loud if an anchor moves.
+//
+// RESIDUAL while #566 is open: because the framework race aborts the -race journey suite,
+// the journeys cannot cover races in semdev's OWN journey-path product code. That gap is
+// bounded to the docker path — unit-level `go test -race ./internal/... ./test/conformance/...`
+// stays green — and closes when #566 lands and -race is re-enabled on the journeys.
+func TestTripwireProcessorHealthRaceUnfixed(t *testing.T) {
+	src := readSemstreamsSource(t, "processor", "rule", "processor.go")
+
+	// Both getters race the same way: RLock held while the body writes the cached struct.
+	// Gap open ⇔ BOTH still show that shape; if EITHER changes, the fix may have landed.
+	for _, g := range []struct{ anchor, write string }{
+		{"func (rp *Processor) Health()", "rp.health.LastCheck"},
+		{"func (rp *Processor) DataFlow()", "rp.flowMetrics"},
+	} {
+		start := strings.Index(src, g.anchor)
+		if start < 0 {
+			t.Fatalf("rule.Processor getter %q not found in processor.go — the framework refactored it; "+
+				"re-verify BY HAND whether the RLock-with-write race (#566) is fixed (if so, flip this to a "+
+				"regression guard and re-enable -race) and re-anchor.", g.anchor)
+		}
+		body := src[start:]
+		if end := strings.Index(body, "\n}"); end >= 0 {
+			body = body[:end]
+		}
+		hasRLock := strings.Contains(body, "RLock()")
+		mutatesUnderLock := strings.Contains(body, g.write)
+		if hasRLock && mutatesUnderLock {
+			continue // this getter's gap is still open — expected on beta.150.
+		}
+		t.Fatalf("REACHED (#566): rule.Processor getter %q no longer shows the RLock+write race shape "+
+			"(RLock present=%v, writes %s=%v) — the data-race fix may have LANDED. Verify Health()/DataFlow() "+
+			"no longer mutate under a read lock, re-enable -race on the e2e journeys (task e2e), and FLIP this "+
+			"tripwire to a regression guard. Body:\n%s", g.anchor, hasRLock, g.write, mutatesUnderLock, body)
 	}
 }
 
