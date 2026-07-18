@@ -39,6 +39,7 @@ import (
 
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/runspace"
+	"github.com/c360studio/semdev/internal/vocab"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/config"
 	"github.com/c360studio/semstreams/metric"
@@ -514,6 +515,14 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+
+	// Declare semdev's canonical predicate vocabulary with the framework registry BEFORE
+	// any component (the rule processor, at Start) validates rules against it. beta.147's
+	// rule-load predicate-declaration check is UNCONDITIONAL and hard-fails an undeclared
+	// predicate; a non-canonical name PANICS in Register, so this is also the boot-time
+	// canonical-shape guard over the whole vocabulary. Idempotent across NewRuntime calls
+	// (vocabulary.Register amends), so repeated e2e boots in one process are safe.
+	vocab.Register()
 
 	cfg, err := loadRuntimeConfig(opts.ConfigPath)
 	if err != nil {
