@@ -39,25 +39,32 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.25+; semstreams current release (started at `v1.0.0-beta.134`); NATS
-  via docker compose (never embedded).
+- Go 1.25+; semstreams pinned at `v1.0.0-beta.147` (started at beta.134; beta.147
+  is the canonical-predicate + entity-ID breaking wave); NATS via docker compose
+  (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
 
 ## Status
 
-M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers). Two
-sibling OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
-`m0-walking-skeleton-spine` (the arc + evidence spine) and
-`containerized-sandbox-dev-loop` (the real sandbox + cold clean-room verify).
+M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers), now on
+**semstreams beta.147** (the breaking canonical-predicate + entity-ID wave).
+OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
+`m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
+(the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
+rule-native execution rail), and `migrate-semstreams-beta147` (the beta.147 sweep).
 The full arc runs against real docker: front door → issue_intake → create_change
 → validate → **human approval** → project task.spec → provision + prove-cold
 sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → structural
-floors → gate (advance/retry/escalate) → review (Quinn) → **cold clean-room
-verify** of the committed artifact → coherence gate → open_pr → `pr.ref`. Proven
-by `test/e2e/journey_test.go` (16 stations, zero paid tokens) plus docker-gated
-cold-proof pins. Remaining before a first real-LLM token: the pre-real-LLM
-carry-forwards (bootstrap `allowed_tools` scoping; the retry/escalate + blocked-
-park e2e stations; the `target_files`-includes-test contract) tracked in
-`containerized-sandbox-dev-loop`'s design.md. Donor checkouts for reference:
+floors → route (advance/retry/escalate) → review (Quinn) → **cold clean-room
+verify** of the committed artifact → coherence route → open_pr → `delivery.pr.ref`.
+Proven by `test/e2e/journey_test.go` — all four bridge-proof journeys (happy +
+retry + rejection + exhaustion) green on beta.147 with zero paid tokens and zero
+predicate/entity-contract rejections, plus docker-gated cold-proof pins.
+beta.147 facts are CANONICAL (3-seg lower-kebab, declared via `internal/vocab.Register`);
+every rule carries an `entity.pattern` (required to fire on the entity-state lane).
+Remaining before a first real-LLM token: the pre-real-LLM carry-forwards (bootstrap
+`allowed_tools` scoping; the `target_files`-includes-test contract; a few
+developer-prompt field descriptions) and the **beta.148 follow-up** (tripwire flips
+for #519/#528/#529 + the `.value` revision-match). Donor checkouts for reference:
 `~/Code/c360/semteams` (shape), `~/Code/c360/semspec` (floors + audits).
