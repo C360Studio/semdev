@@ -1,5 +1,5 @@
 // Package hydratechange is the render_openspec tool (openspec-io): it renders a
-// run's OpenSpec change back to markdown FROM the run's openspec.change.* facts,
+// run's OpenSpec change back to markdown FROM the run's authored change document,
 // so the artifact is a projection of the graph and never a second hand-authored
 // source of truth (G10). It is the read mirror of the create_change author tool —
 // that tool stamps the facts, this renders them.
@@ -79,16 +79,16 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, changefacts.ReadErrorKind(err), "render_openspec: %v", err)
 	}
 	if isEmpty(change) {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "render_openspec: no openspec.change.%s.* facts on %s — nothing to render (was the change authored?)", p.Slug, runEntityID)
+		return errResult(call, agentic.ToolErrorInvalidArgs, "render_openspec: no change document for %q on %s — nothing to render (was the change authored?)", p.Slug, runEntityID)
 	}
 
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: openspec.RenderChangeFolder(change), StopLoop: true}, nil
 }
 
-// isEmpty reports whether a hydrated Change carries no artifact facts — the shape
-// a never-authored or misnamed slug produces (ChangeFromFacts's absent-is-nil
-// contract). Rendering it would emit only a bare header, which reads as a
-// successful render of nothing; hydrate rejects it instead.
+// isEmpty reports whether a hydrated Change carries no artifacts — the shape a
+// never-authored or misnamed slug produces (Hydrate/HydrateDocument's absent-is-nil
+// path returns a bare &Change{Slug}). Rendering it would emit only a bare header, which
+// reads as a successful render of nothing; hydrate rejects it instead.
 func isEmpty(c *openspec.Change) bool {
 	return c.Proposal == nil && c.Design == nil && c.Tasks == nil && len(c.Deltas) == 0
 }

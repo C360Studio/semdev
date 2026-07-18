@@ -105,7 +105,7 @@ func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Run
 		return Result{}, fmt.Errorf("validate_change: %w", err)
 	}
 	if isEmpty(change) {
-		return Result{}, fmt.Errorf("validate_change: no openspec.change.%s.* facts on %s — nothing to validate (was the change authored?)", slug, runEntityID)
+		return Result{}, fmt.Errorf("validate_change: no change document for %q on %s — nothing to validate (was the change authored?)", slug, runEntityID)
 	}
 
 	// Read the content revision create_change stamped over THIS slug's authored
@@ -114,7 +114,7 @@ func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Run
 	// cannot stamp a content-bound marker, and a bare-slug marker would reopen the
 	// stale-pass hole. A missing revision means the change was not authored by
 	// create_change (or a partial write) — an ordering/authoring gap, not transport.
-	revPredicate := createchange.SlugRevisionPredicate(slug)
+	revPredicate := createchange.RevisionPredicate
 	rev, err := readRevision(ctx, reader, runEntityID, revPredicate)
 	if err != nil {
 		return Result{}, fmt.Errorf("validate_change: read %s on %s: %w", revPredicate, runEntityID, err)

@@ -24,12 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
-	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
@@ -71,43 +68,22 @@ const AuthoredPredicate = "openspec.change.authored"
 // explicitly (below) to stay a clean upsert across a re-author.
 const SlugPredicate = "openspec.change.slug"
 
-// revisionSubkey is the slug-scoped content-revision sub-key
-// (openspec.change.<slug>.revision) — the same revision value, keyed under the
-// change's own package so project_tasks can bind BOTH the slug and the content:
-// it freezes task.spec only when openspec.validated equals THIS slug's current
-// revision, so a re-authored-but-not-revalidated or alternate change is refused.
-const revisionSubkey = "revision"
+// RevisionPredicate is the run-level content revision (openspec.change.revision) —
+// create_change stamps it and project_tasks reads it to bind task.spec to the VALIDATED
+// content: the projector freezes task.spec only when openspec.change.validated equals this
+// revision, so a re-authored-but-not-revalidated change is refused (D15 #0). Single-change
+// at M0 (beta.147 D1): the slug is out of the key (was openspec.change.<slug>.revision).
+const RevisionPredicate = "openspec.change.revision"
 
-// SlugRevisionPredicate returns the slug-scoped content-revision predicate
-// (openspec.change.<slug>.revision) create_change stamps and project_tasks reads.
-func SlugRevisionPredicate(slug string) string {
-	return openspec.ChangeEntityPrefix(slug) + revisionSubkey
-}
-
-// Revision returns a deterministic content revision over a change's authored
-// facts: the sorted (predicate, object) pairs hashed with SHA-256, prefixed
-// "sha256:" so the value is never mistaken for a number by the rule engine's
-// numeric-first comparison. It is stable across re-authors of identical content
-// and changes iff the content changes, so a validated revision can detect a
-// superseded change (D15 #0). The revision facts themselves are NOT part of the
-// input (Execute computes this over the content triples before appending them),
-// so it is not self-referential.
-func Revision(contentTriples []message.Triple) string {
-	pairs := make([]string, 0, len(contentTriples))
-	for _, t := range contentTriples {
-		obj, _ := t.Object.(string)
-		// Length-prefix both fields so the encoding is injective for ANY bytes in
-		// predicate/object — no delimiter can be forged inside a value to make
-		// differing content collide (robust even if a future object carries a
-		// binary/base64 blob).
-		pairs = append(pairs, fmt.Sprintf("%d:%s%d:%s", len(t.Predicate), t.Predicate, len(obj), obj))
-	}
-	sort.Strings(pairs)
+// Revision returns a deterministic content revision over the authored change document:
+// its JSON hashed with SHA-256, prefixed "sha256:" so the value is never mistaken for a
+// number by the rule engine's numeric-first comparison. Go's json.Marshal is deterministic
+// for structs, so it is stable across re-authors of identical content and changes iff the
+// content changes, letting a validated revision detect a superseded change (D15 #0). The
+// revision/slug facts are NOT part of the hashed document, so it is not self-referential.
+func Revision(document string) string {
 	h := sha256.New()
-	for _, p := range pairs {
-		_, _ = h.Write([]byte(p))
-		_, _ = h.Write([]byte{'\n'})
-	}
+	_, _ = h.Write([]byte(document))
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
@@ -161,53 +137,42 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 
 	change, richTasks := p.toChange()
+	if change.Proposal == nil && change.Design == nil && change.Tasks == nil && len(change.Deltas) == 0 {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: authored change %q has no content", p.Slug)
+	}
 	now := time.Now().UTC()
-	// Thin facts (via the format engine) and the execution-rich, graph-only per-task
-	// facts are stamped TOGETHER in one atomic replace, so create_change's ownership
-	// of the whole openspec.change.<slug>.* package stays whole (design D14 / the
-	// architect's ruling — mock the intelligence, not the plumbing). richTasks are
-	// indexed by toChange as they enter change.Tasks, so their <i> equals the thin
-	// facts' <i> by construction.
-	triples := changeTriples(runEntityID, change, now)
-	triples = append(triples, richTaskTriples(runEntityID, p.Slug, richTasks, now)...)
-	if len(triples) == 0 {
-		return errResult(call, agentic.ToolErrorInvalidArgs, "create_change: authored change %q produced no facts", p.Slug)
-	}
 
-	// Stamp the slug-scoped content revision (D15 #0) so a re-author
-	// self-invalidates a stale openspec.validated: validate_change echoes this into
-	// openspec.validated on PASS, and project_tasks freezes task.spec only when the
-	// two match, so a re-authored-but-not-revalidated change is refused. Computed
-	// over the content facts above (NOT the revision fact) so it is deterministic
-	// and not self-referential, and rides the SAME atomic replace as the content so
-	// it cannot skew from it. (The change-approval GATE also needs to require this
-	// freshness, but the gate is slug-blind and the engine has no warn-free
-	// slug-independent field-to-field compare — see design D15 #0 / semstreams
-	// #519; deferred to a forward-contract, and project_tasks carries the reachable
-	// guard meanwhile.)
-	rev := Revision(triples)
-	triples = append(triples, runFactTriple(runEntityID, SlugRevisionPredicate(p.Slug), rev, now))
-
-	// Stamp the run-level slug pointer (openspec.change.slug = slug) so the
-	// approval-triggered projection rule can thread this run's slug into project_tasks
-	// (the run's other change facts are slug-scoped, so a rule cannot wildcard the slug
-	// out of the key). Computed AFTER the revision so it does not skew it (the revision
-	// hashes the content facts only, not this pointer).
-	triples = append(triples, runFactTriple(runEntityID, SlugPredicate, p.Slug, now))
-
-	// Read the prior owned package so a re-author REPLACES it (clears stale
-	// index/rid-keyed facts) rather than appending a second copy.
-	prefix := openspec.ChangeEntityPrefix(p.Slug)
-	prior, err := e.writer.ReadOwnedPredicates(ctx, runEntityID, prefix)
+	// Serialize the WHOLE authored change — the openspec.Change model AND the
+	// execution-rich, graph-only per-task fields — into ONE scalar document (beta.147 D3).
+	// The old openspec.change.<slug>.delta.<cap>.<rid>.<field> tree is not canonicalizable;
+	// a change is one artifact, not hundreds of independent facts. richTasks are indexed by
+	// toChange as they enter change.Tasks, so their <i> aligns with the thin task at that <i>.
+	doc := changefacts.ChangeDocument{Change: change, RichTasks: toRichTasks(richTasks)}
+	docJSON, err := changefacts.MarshalDocument(doc)
 	if err != nil {
-		return errResult(call, writeErrKind(err), "create_change: read owned change facts under %q on %s: %v", prefix, runEntityID, err)
+		return errResult(call, agentic.ToolErrorInternal, "create_change: marshal change document for %q: %v", p.Slug, err)
 	}
-	// The slug pointer sits OUTSIDE the slug-scoped prefix, so ReadOwnedPredicates
-	// never returns it — add it to the replace's removePredicates explicitly so a
-	// re-author overwrites the prior pointer instead of leaving a stale one.
-	prior = append(prior, SlugPredicate)
-	if err := e.writer.ReplaceTriples(ctx, runEntityID, triples, prior); err != nil {
-		return errResult(call, writeErrKind(err), "create_change: replace %d change facts on %s: %v", len(triples), runEntityID, err)
+
+	// The content revision (D15 #0) is a stable hash of the authored document, so a
+	// re-author self-invalidates a stale openspec.change.validated: validate_change echoes
+	// this on PASS, and project_tasks freezes task.spec only when the two match, so a
+	// re-authored-but-not-revalidated change is refused. Hashed over the document JSON (not
+	// the revision/slug facts) so it is deterministic and not self-referential.
+	rev := Revision(docJSON)
+
+	// create_change OWNS exactly three flat predicates on the run (D3): the document blob,
+	// the slug pointer, and the content revision. Replace them as ONE atomic upsert so a
+	// re-author overwrites cleanly (no stale tree, no phantom rid-keyed facts). They are
+	// distinct predicates from the other openspec.change.* writers (validate/archive), so
+	// the explicit remove-list clears only what this tool owns (G5).
+	owned := []string{changefacts.DocumentPredicate, SlugPredicate, RevisionPredicate}
+	triples := []message.Triple{
+		runFactTriple(runEntityID, changefacts.DocumentPredicate, docJSON, now),
+		runFactTriple(runEntityID, SlugPredicate, p.Slug, now),
+		runFactTriple(runEntityID, RevisionPredicate, rev, now),
+	}
+	if err := e.writer.ReplaceTriples(ctx, runEntityID, triples, owned); err != nil {
+		return errResult(call, writeErrKind(err), "create_change: replace the change document on %s: %v", runEntityID, err)
 	}
 
 	// Stamp the authored marker on THIS loop entity (value = slug) so the validate
@@ -245,82 +210,29 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		}
 	}
 
-	summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "facts": len(triples), "run_entity": runEntityID})
+	summary, _ := json.Marshal(map[string]any{"slug": p.Slug, "run_entity": runEntityID})
 	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
 }
 
-// changeTriples projects a change to openspec.change.* facts, each stamped on the
-// run entity. Object is the engine's string form (prose, scalars, JSON arrays).
-func changeTriples(runEntityID string, change *openspec.Change, now time.Time) []message.Triple {
-	facts := change.Facts()
-	out := make([]message.Triple, 0, len(facts))
-	for _, f := range facts {
-		out = append(out, message.Triple{
-			Subject:    runEntityID,
-			Predicate:  f.Predicate,
-			Object:     f.Object,
-			Source:     Source,
-			Timestamp:  now,
-			Confidence: 1.0,
-		})
-	}
-	return out
-}
-
-// richTaskTriples emits the execution-rich, graph-only per-task facts create_change
-// authors ALONGSIDE the format engine's thin task facts — the fields dev-from-task
-// needs (target_files, test_command, assumptions, non_goals, budget) that OpenSpec's
-// thin tasks.md does not carry.
-//
-// Each rich task carries the flat index toChange assigned it as it entered
-// change.Tasks, so its <i> equals the thin facts' <i> BY CONSTRUCTION — one walk
-// assigns the index, no second flatten to drift (design D14). That <i> is the
-// projector's contiguous RawTask.Index.
-//
-// Presence is preserved and load-bearing: an ABSENT field emits NO fact, so the
-// projector reads nil (a gap) and fails toward the human; an authored-empty
-// assumptions/non_goals emits "[]" (a real value the projector accepts). This tool
-// does NOT validate the Karpathy schema — it records what was authored; the
-// projector owns gap detection (division of labor).
-func richTaskTriples(runEntityID, slug string, tasks []richTask, now time.Time) []message.Triple {
-	base := openspec.ChangeEntityPrefix(slug) + "task."
-	var out []message.Triple
-	mk := func(pred, obj string) {
-		out = append(out, message.Triple{
-			Subject:    runEntityID,
-			Predicate:  pred,
-			Object:     obj,
-			Source:     Source,
-			Timestamp:  now,
-			Confidence: 1.0,
-		})
-	}
-	for _, rt := range tasks {
-		p := base + strconv.Itoa(rt.Index) + "."
-		if rt.TargetFiles != nil {
-			mk(p+devtask.FactTargetFiles, jsonArray(rt.TargetFiles))
-		}
-		if strings.TrimSpace(rt.TestCommand) != "" {
-			mk(p+devtask.FactTestCommand, rt.TestCommand)
-		}
-		if rt.Assumptions != nil {
-			mk(p+devtask.FactAssumptions, jsonArray(rt.Assumptions))
-		}
-		if rt.NonGoals != nil {
-			mk(p+devtask.FactNonGoals, jsonArray(rt.NonGoals))
-		}
-		if rt.Budget != nil {
-			mk(p+devtask.FactBudget, strconv.Itoa(*rt.Budget))
+// toRichTasks maps the authored rich per-task fields into the document DTO the
+// projector reads (beta.147 D3). Presence is preserved by construction: nil stays nil
+// (a projector gap → park) and an authored-empty slice stays non-nil (a real value),
+// and the DTO marshals both faithfully (no omitempty). Each rich task carries the flat
+// index toChange assigned it as it entered change.Tasks, so it aligns with the thin task
+// at that <i> — one walk assigns the index, no second flatten to drift (design D14).
+func toRichTasks(tasks []richTask) []changefacts.RichTask {
+	out := make([]changefacts.RichTask, len(tasks))
+	for i, rt := range tasks {
+		out[i] = changefacts.RichTask{
+			Index:       rt.Index,
+			TargetFiles: rt.TargetFiles,
+			TestCommand: rt.TestCommand,
+			Assumptions: rt.Assumptions,
+			NonGoals:    rt.NonGoals,
+			Budget:      rt.Budget,
 		}
 	}
 	return out
-}
-
-// jsonArray encodes a string slice as its JSON array form — the graph's string
-// form for a list, the same shape the projector reads back.
-func jsonArray(xs []string) string {
-	b, _ := json.Marshal(xs)
-	return string(b)
 }
 
 // runFactTriple builds one content-revision fact on the run entity (Source ==

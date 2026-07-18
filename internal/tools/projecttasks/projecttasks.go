@@ -46,11 +46,6 @@ import (
 // declared for task.spec.* in internal/vocab (G5) — a conformance pin cross-checks.
 const Source = "task-projector"
 
-// thinTextKey is the format engine's thin task-text sub-key (openspec.change.<slug>.
-// task.<i>.text) — the projector's goal comes from it (create_change writes it; the
-// round-trip test pins it).
-const thinTextKey = "text"
-
 // Project is the shared projection core: it reads the run's approved change task
 // facts for slug, enforces immutability + the D15#0 validated-content binding + the
 // target_files-includes-tests contract, projects via devtask.Project, and stamps the
@@ -92,27 +87,25 @@ func Project(ctx context.Context, reader changefacts.Reader, writer agentictools
 	if err != nil {
 		return 0, fmt.Errorf("project_tasks: read %s on %s: %w", validatechange.ValidatedPredicate, runEntityID, err)
 	}
-	slugRevPredicate := createchange.SlugRevisionPredicate(slug)
-	slugRev, err := readPredicate(ctx, reader, runEntityID, slugRevPredicate)
+	slugRev, err := readPredicate(ctx, reader, runEntityID, createchange.RevisionPredicate)
 	if err != nil {
-		return 0, fmt.Errorf("project_tasks: read %s on %s: %w", slugRevPredicate, runEntityID, err)
+		return 0, fmt.Errorf("project_tasks: read %s on %s: %w", createchange.RevisionPredicate, runEntityID, err)
 	}
 	if validatedRev == "" || slugRev == "" || validatedRev != slugRev {
 		return 0, fmt.Errorf("project_tasks: change %q is not validated at its current content (%s=%q, %s=%q) — refusing to freeze task.spec from an unvalidated, re-authored-since-validation, or alternate change",
-			slug, validatechange.ValidatedPredicate, validatedRev, slugRevPredicate, slugRev)
+			slug, validatechange.ValidatedPredicate, validatedRev, createchange.RevisionPredicate, slugRev)
 	}
 
-	prefix := openspec.ChangeEntityPrefix(slug) + "task."
-	triples, err := reader.ReadFacts(ctx, runEntityID, prefix)
+	// Read the authored change DOCUMENT (beta.147 D3) and reconstruct the execution-rich
+	// tasks from it — the rich per-task fields (target_files/test_command/…) plus the thin
+	// task text (a task's goal) both live in the one blob now, not a task-fact tree.
+	doc, err := changefacts.HydrateDocument(ctx, reader, runEntityID, slug)
 	if err != nil {
-		return 0, fmt.Errorf("project_tasks: read change task facts under %q on %s: %w", prefix, runEntityID, err)
+		return 0, fmt.Errorf("project_tasks: read change document on %s: %w", runEntityID, err)
 	}
-	rawTasks, err := rawTasksFromFacts(prefix, triples)
-	if err != nil {
-		return 0, fmt.Errorf("project_tasks: %w", err)
-	}
+	rawTasks := rawTasksFromDocument(doc)
 	if len(rawTasks) == 0 {
-		return 0, fmt.Errorf("project_tasks: no task facts for change %q on %s — was it authored?", slug, runEntityID)
+		return 0, fmt.Errorf("project_tasks: no tasks in change %q on %s — was it authored?", slug, runEntityID)
 	}
 
 	specs, err := devtask.Project(rawTasks)
@@ -173,90 +166,46 @@ func readPredicate(ctx context.Context, reader changefacts.Reader, runEntityID, 
 	return "", nil
 }
 
-// rawTasksFromFacts reconstructs the authored tasks from the change's task facts,
-// keyed by the flat index in each predicate (openspec.change.<slug>.task.<i>.<field>,
-// stripped of prefix). Presence is honored on the READ side exactly as the writer
-// preserved it: an ABSENT list/budget fact leaves the RawTask field nil (a gap the
-// projector rejects), while a present "[]" reconstructs a non-nil empty slice (an
-// authored-empty value the projector accepts). Tasks come back sorted by index.
-func rawTasksFromFacts(prefix string, triples []message.Triple) ([]devtask.RawTask, error) {
-	byIndex := map[int]map[string]string{}
-	for _, tr := range triples {
-		rest := strings.TrimPrefix(tr.Predicate, prefix)
-		idxStr, field, ok := strings.Cut(rest, ".")
-		if !ok {
-			continue
-		}
-		i, err := strconv.Atoi(idxStr)
-		if err != nil {
-			continue
-		}
-		obj, ok := tr.Object.(string)
-		if !ok {
-			return nil, fmt.Errorf("task fact %q has non-string object %T", tr.Predicate, tr.Object)
-		}
-		if byIndex[i] == nil {
-			byIndex[i] = map[string]string{}
-		}
-		byIndex[i][field] = obj
+// rawTasksFromDocument reconstructs the authored tasks from the change document (beta.147
+// D3): the execution-rich per-task fields carry their own flat index, and the thin task
+// text at that index is the task's goal. Presence is preserved by the DTO's JSON round-trip
+// (an ABSENT list/budget stays nil — a projector gap it rejects; an authored-empty list
+// stays non-nil — a value it accepts). Tasks come back sorted by index (the projector
+// requires a contiguous 0..n-1 set).
+func rawTasksFromDocument(doc changefacts.ChangeDocument) []devtask.RawTask {
+	texts := flattenTaskTexts(doc.Change)
+	out := make([]devtask.RawTask, 0, len(doc.RichTasks))
+	for _, rt := range doc.RichTasks {
+		out = append(out, devtask.RawTask{
+			Index:       rt.Index,
+			Goal:        texts[rt.Index],
+			TestCommand: rt.TestCommand,
+			TargetFiles: rt.TargetFiles,
+			Assumptions: rt.Assumptions,
+			NonGoals:    rt.NonGoals,
+			Budget:      rt.Budget,
+		})
 	}
-
-	indices := make([]int, 0, len(byIndex))
-	for i := range byIndex {
-		indices = append(indices, i)
-	}
-	sort.Ints(indices)
-
-	out := make([]devtask.RawTask, 0, len(indices))
-	for _, i := range indices {
-		f := byIndex[i]
-		rt := devtask.RawTask{Index: i, Goal: f[thinTextKey], TestCommand: f[devtask.FactTestCommand]}
-		var err error
-		if rt.TargetFiles, err = optArray(f, devtask.FactTargetFiles); err != nil {
-			return nil, fmt.Errorf("task %d %s: %w", i, devtask.FactTargetFiles, err)
-		}
-		if rt.Assumptions, err = optArray(f, devtask.FactAssumptions); err != nil {
-			return nil, fmt.Errorf("task %d %s: %w", i, devtask.FactAssumptions, err)
-		}
-		if rt.NonGoals, err = optArray(f, devtask.FactNonGoals); err != nil {
-			return nil, fmt.Errorf("task %d %s: %w", i, devtask.FactNonGoals, err)
-		}
-		if rt.Budget, err = optInt(f, devtask.FactBudget); err != nil {
-			return nil, fmt.Errorf("task %d %s: %w", i, devtask.FactBudget, err)
-		}
-		out = append(out, rt)
-	}
-	return out, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	return out
 }
 
-// optArray returns nil when field is ABSENT (a projector gap), else the parsed
-// slice forced non-nil (a present fact — even "[]" — is an authored value).
-func optArray(f map[string]string, field string) ([]string, error) {
-	v, ok := f[field]
-	if !ok {
-		return nil, nil
+// flattenTaskTexts maps each task's flat index (sections in order, tasks in order — the
+// SAME walk create_change's toChange used to assign the rich-task index) to its thin text,
+// which the projector reads as the task's goal.
+func flattenTaskTexts(change *openspec.Change) map[int]string {
+	texts := map[int]string{}
+	if change == nil || change.Tasks == nil {
+		return texts
 	}
-	var out []string
-	if err := json.Unmarshal([]byte(v), &out); err != nil {
-		return nil, fmt.Errorf("not a JSON string array (%q): %w", v, err)
+	i := 0
+	for _, sec := range change.Tasks.Sections {
+		for _, t := range sec.Tasks {
+			texts[i] = t.Text
+			i++
+		}
 	}
-	if out == nil {
-		out = []string{} // a present fact is authored-empty, never a gap
-	}
-	return out, nil
-}
-
-// optInt returns nil when field is ABSENT (a projector gap), else the parsed int.
-func optInt(f map[string]string, field string) (*int, error) {
-	v, ok := f[field]
-	if !ok {
-		return nil, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return nil, fmt.Errorf("not an integer (%q): %w", v, err)
-	}
-	return &n, nil
+	return texts
 }
 
 // testFileContractViolations returns the indices of tasks whose test_command mentions the
