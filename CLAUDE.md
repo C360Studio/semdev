@@ -39,12 +39,15 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.153` (started at beta.134; beta.147
+- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.154` (started at beta.134; beta.147
   is the canonical-predicate + entity-ID breaking wave; beta.149 landed the #551
   per-loop executor tool-enforcement fix; beta.150 enforces the canonical predicate/entity
   contract FAIL-CLOSED at the graph-write boundary — semdev's vocab already conforms; beta.153 landed
   all three filed asks — #568 `OpLengthGte`/`OpLengthLte`, #569 `LoopTerminalReason` stamped from
-  `event.Reason`, #566 the `rule.Processor` health/flow-getter data-race fix — a clean compile+vet bump);
+  `event.Reason`, #566 the `rule.Processor` health/flow-getter data-race fix; beta.154 is additive —
+  the ADR-080 lesson substrate (`emit_lesson` builtin + `agent.lesson.*` vocab + brief-assembly
+  injection of ACTIVE lessons, semdev mints none so briefs are unchanged) and the graph-ingest #583
+  entity-cache read-after-write race fix);
   NATS via docker compose (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
@@ -52,13 +55,27 @@ shape. **Read these three documents before changing anything:**
 ## Status
 
 M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers), now on
-**semstreams beta.153** (on the beta.147 breaking canonical-predicate + entity-ID wave;
+**semstreams beta.154** (on the beta.147 breaking canonical-predicate + entity-ID wave;
 beta.149 landed the #551 per-loop executor tool-enforcement fix; beta.150 hardens the
 canonical contract fail-closed at graph-write — semdev's vocab already conforms, verified;
 beta.153 landed all three filed asks: #568 `OpLengthGte`/`OpLengthLte` (routing-budgets unblocked),
 #569 `LoopTerminalReason` from `event.Reason` (reason-aware escalate adoptable), and #566 the
 health/flow-getter data-race fix — bumped as a clean compile+vet with the offline ladder, the flipped
-#566 tripwire, and 3× green `-race` docker journeys as evidence).
+#566 tripwire, and 3× green `-race` docker journeys as evidence; beta.154 is ADDITIVE — the ADR-080
+push-based lesson substrate (new `agent.lesson.*` canonical predicates, `emit_lesson` builtin executor
+[invisible to semdev's loops: every spawn's advertised-tools list is scoped and beta.149 enforcement
+rejects unadvertised calls], deterministic brief-assembly injection of ACTIVE lessons scoped by role
+tag / entity-ID prefix [wired by default; semdev spawns carry roles so each dispatch issues one benign
+`graph.ingest.query.prefix` lesson listing — zero lesson records exist, briefs unchanged, read fails
+silent-degrade], the orphan `processor/agentic-memory` retired [semdev never referenced it], and
+`MetadataKeyAgentRole` stamped on every dispatched ToolCall [harness-derived role attribution,
+additive metadata]) plus the graph-ingest #583 entity-query-cache stale-repopulation race fix — a
+direct read-after-write-coherence win for semdev's rules/tools that read entities right after
+concurrent writes (the 30s stale-cache window class). The lesson substrate is a NAMED M2+ adoption
+opportunity, not a current dependency: a debrief seam distilling parked/failed runs into evidence-cited
+`agent.lesson.*` records (born `proposed`, operator-gated to `active`) that future developer-role
+dispatches receive at brief assembly — exactly the durable-lesson class M1 run 1 exposed. If semdev
+ever runs the lesson lifecycle rulepack, its bootstrap must mirror `lessonRecordProjectionContract`.
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
 (the real sandbox + cold clean-room verify), and `simplify-m0-execution-rail` (the
