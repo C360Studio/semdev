@@ -94,7 +94,10 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)
 and archive oracle are library/design surfaces whose registered components land at
-group 11 / M1 and join this table then.
+group 11 / M1 and join this table then. The `evidence-ledger` writer is likewise
+reserved: its schema and G7 pins live in `internal/ledger`, and recorded entries
+live in [docs/evidence-ledger.md](evidence-ledger.md) until the graph writer
+lands at M1.
 
 ## Action taxonomy
 

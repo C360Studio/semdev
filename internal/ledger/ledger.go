@@ -7,8 +7,10 @@
 // as real-LLM product evidence.
 //
 // The single writer of ledger entries is the evidence-ledger (vocab predicate
-// evidence.run, G5). This package defines the schema; the writer and the
-// journey-honesty rule land with the evidence-ledger capability.
+// evidence.ledger.run, G5). This package defines the schema; the writer and the
+// journey-honesty rule land with the evidence-ledger capability at M1. Until
+// that writer exists, the recorded ledger is docs/evidence-ledger.md — the
+// rung claims live there, validated against this schema's vocabulary.
 package ledger
 
 import (
