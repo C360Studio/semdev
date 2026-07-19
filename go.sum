@@ -8,8 +8,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
-github.com/c360studio/semstreams v1.0.0-beta.150 h1:4mgj+tWn9ynVQ+p/OSv4daENRMQ2TNVAwMo50n4kgPA=
-github.com/c360studio/semstreams v1.0.0-beta.150/go.mod h1:Cww6rrZCnjrzv/0ZbzGhiRPPY8L79bFUaJjvhtO9xgU=
+github.com/c360studio/semstreams v1.0.0-beta.153 h1:ayx01/sD5laypu8haf9+RWfy6TaLYPPvhX2JhrEysXQ=
+github.com/c360studio/semstreams v1.0.0-beta.153/go.mod h1:Cww6rrZCnjrzv/0ZbzGhiRPPY8L79bFUaJjvhtO9xgU=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

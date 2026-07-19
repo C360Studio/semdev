@@ -20,26 +20,29 @@ import (
 //   REGRESSION GUARDS — an upstream fix LANDED, so the tripwire asserts the landed
 //   capability is still present and FIRES (red) if a future beta drops it. #519
 //   (scalar .value), #528 (per-spawn max_iterations), #529 (typed exhaustion
-//   sentinel), #530 (on_recovery routing gate), and #551 (executor per-loop
-//   advertised-tool enforcement, beta.149) are all regression guards as of beta.149.
-//   The MECHANICAL UPGRADES #519/#528/#529 enable — per-task iteration budgets
+//   sentinel), #530 (on_recovery routing gate), #551 (executor per-loop
+//   advertised-tool enforcement, beta.149), and #566 (rule.Processor.Health/DataFlow
+//   no longer mutate a shared cache under a read lock, beta.153) are all regression
+//   guards. The MECHANICAL UPGRADES #519/#528/#529 enable — per-task iteration budgets
 //   (loop_max_iterations, #528), per-task attempt budgets via
 //   $entity.triple.task.spec.budget.value (#519), and a reason-aware escalate route
 //   (errors.Is ErrMaxIterationsReached, #529) — are routing-behavior changes NOT yet
 //   adopted; each guard's doc names its follow-up. The current M0 behavior (uniform
 //   iteration cap, literal-3 budget, outcome=failed routing) is proven by the e2e and
-//   remains correct until those upgrades are deliberately taken. #551, by contrast, was
-//   adopted on the bump alone — the already-scoped per-spawn `tools` lists became
-//   load-bearing at execution with no rule/config change.
+//   remains correct until those upgrades are deliberately taken. #551 and #566, by
+//   contrast, were adopted on the bump alone — #551's already-scoped per-spawn `tools`
+//   lists became load-bearing at execution, and #566's local-copy getters made the
+//   -race e2e journeys reliably green — both with no rule/config change.
 //
 //   GAP-OPEN TRIPWIRES — when an upstream fix is STILL OPEN, the tripwire is the
 //   INVERSE: it asserts the GAP is still present (green while open) and is meant to FIRE
 //   (red) when the framework CLOSES it — the signal to adopt the real fix and FLIP the
-//   tripwire to a regression guard. Currently open: #566 (rule.Processor.Health/DataFlow
-//   mutate under a READ lock → data race; TestTripwireProcessorHealthRaceUnfixed). LESSON
-//   from #551: the gap-open form did NOT auto-trip when the fix landed (the fix's key name +
-//   admission seam were outside the anchors' watch), so this polarity is a re-check HINT on
-//   a bump, not a guarantee the close is caught.
+//   tripwire to a regression guard. Currently open: none — #566 closed in beta.153 (the
+//   getters now derive into a local copy under RLock; TestTripwireProcessorHealthRaceUnfixed
+//   flipped to a regression guard, -race journeys re-enabled). LESSON from #551: the gap-open
+//   form did NOT auto-trip when the fix landed (the fix's key name + admission seam were
+//   outside the anchors' watch), so this polarity is a re-check HINT on a bump, not a
+//   guarantee the close is caught.
 
 // TestTripwire519ScalarValueSubstitution — semstreams #519 (scalar .value
 // field-to-field). Now a REGRESSION GUARD: the #519 fix LANDED in beta.148.
@@ -307,56 +310,58 @@ func TestTripwireExecutorHonorsPerLoopToolAllowlist(t *testing.T) {
 	}
 }
 
-// TestTripwireProcessorHealthRaceUnfixed — semstreams #566 (rule.Processor.Health()
-// and DataFlow() mutate shared struct fields while holding only a sync.RWMutex READ
+// TestTripwireProcessorHealthRaceFixed — semstreams #566 (rule.Processor.Health()
+// and DataFlow() mutated shared struct fields while holding only a sync.RWMutex READ
 // lock, so concurrent callers — the ComponentManager health-publish loop and any
-// GetHealthyComponents() query — race on the write). A GAP-OPEN TRIPWIRE.
+// GetHealthyComponents() query — raced on the write). Now a REGRESSION GUARD: the fix
+// LANDED in beta.153. It was a GAP-OPEN tripwire until this bump.
 //
-// Impact on semdev: the -race e2e journeys are ~50% flaky (the race trips
-// requireAgenticHealthy's GetHealthyComponents poll during startup). It is PRE-EXISTING
-// (processor.go + component_manager.go are byte-identical across beta.148→150) and
-// benign to journey BEHAVIOR (a torn write of a health/flow cache) — the journeys are
-// reliably green WITHOUT -race. So the interim posture is: functional evidence runs the
-// journeys without -race; the -race suite is known-flaky until #566 lands.
+// The landed fix keeps the read lock but derives into a LOCAL copy: `health := rp.health`
+// / `metrics := rp.flowMetrics`, then mutates the copy and returns it — so nothing writes
+// the shared cache under RLock. Verified behaviorally: the -race e2e journeys, ~50% flaky
+// while #566 was open (the race tripped requireAgenticHealthy's GetHealthyComponents poll
+// during startup), ran green three times in a row on beta.153. `task e2e` runs -race again.
 //
-// It asserts the bug shape is STILL present in BOTH getters (RLock + a write to the cached
-// struct — rp.health.* in Health(), rp.flowMetrics.* in DataFlow()) and TRIPS when either
-// shape changes — the signal that the fix (RLock→Lock, or move the mutation out of the
-// getter) may have landed, so re-enable -race confidence and FLIP this to a regression
-// guard. Source-anchored on the compiled framework; fails loud if an anchor moves.
-//
-// RESIDUAL while #566 is open: because the framework race aborts the -race journey suite,
-// the journeys cannot cover races in semdev's OWN journey-path product code. That gap is
-// bounded to the docker path — unit-level `go test -race ./internal/... ./test/conformance/...`
-// stays green — and closes when #566 lands and -race is re-enabled on the journeys.
-func TestTripwireProcessorHealthRaceUnfixed(t *testing.T) {
+// As a REGRESSION GUARD this asserts, for BOTH getters, that (a) the local-copy idiom is
+// present and (b) the racy shared-field WRITE is absent — and FIRES (red) if a future beta
+// reintroduces the RLock+shared-write shape. Source-anchored on the compiled framework;
+// fails loud if an anchor moves. CAVEAT: an alternative valid fix (RLock→Lock, keeping the
+// shared write) would trip anchor (b) as a false positive — that is a deliberate lock-model
+// change worth a hand re-verify + re-anchor, which the failure message calls out.
+func TestTripwireProcessorHealthRaceFixed(t *testing.T) {
 	src := readSemstreamsSource(t, "processor", "rule", "processor.go")
 
-	// Both getters race the same way: RLock held while the body writes the cached struct.
-	// Gap open ⇔ BOTH still show that shape; if EITHER changes, the fix may have landed.
-	for _, g := range []struct{ anchor, write string }{
-		{"func (rp *Processor) Health()", "rp.health.LastCheck"},
-		{"func (rp *Processor) DataFlow()", "rp.flowMetrics"},
+	// The beta.150 race shape was: RLock held while the body wrote the cached struct
+	// (rp.health.LastCheck = …, rp.flowMetrics.<field> = …). The beta.153 fix copies the
+	// cache into a local first, then mutates the local. Guard: local-copy present, racy
+	// shared-write absent.
+	for _, g := range []struct{ anchor, localCopy, racyWrite string }{
+		{"func (rp *Processor) Health()", "health := rp.health", "rp.health.LastCheck"},
+		{"func (rp *Processor) DataFlow()", "metrics := rp.flowMetrics", "rp.flowMetrics."},
 	} {
 		start := strings.Index(src, g.anchor)
 		if start < 0 {
 			t.Fatalf("rule.Processor getter %q not found in processor.go — the framework refactored it; "+
-				"re-verify BY HAND whether the RLock-with-write race (#566) is fixed (if so, flip this to a "+
-				"regression guard and re-enable -race) and re-anchor.", g.anchor)
+				"re-verify BY HAND whether the #566 race stays fixed (getters must not write the shared "+
+				"health/flow cache under a read lock) and re-anchor.", g.anchor)
 		}
 		body := src[start:]
 		if end := strings.Index(body, "\n}"); end >= 0 {
 			body = body[:end]
 		}
-		hasRLock := strings.Contains(body, "RLock()")
-		mutatesUnderLock := strings.Contains(body, g.write)
-		if hasRLock && mutatesUnderLock {
-			continue // this getter's gap is still open — expected on beta.150.
+		if !strings.Contains(body, g.localCopy) {
+			t.Fatalf("REGRESSION (#566): rule.Processor getter %q no longer derives into a local copy "+
+				"(%q absent) — the fix that returns a copied struct instead of the shared cache may have "+
+				"been reverted or refactored. Re-verify the getter cannot write the shared cache under "+
+				"RLock, then re-anchor. Body:\n%s", g.anchor, g.localCopy, body)
 		}
-		t.Fatalf("REACHED (#566): rule.Processor getter %q no longer shows the RLock+write race shape "+
-			"(RLock present=%v, writes %s=%v) — the data-race fix may have LANDED. Verify Health()/DataFlow() "+
-			"no longer mutate under a read lock, re-enable -race on the e2e journeys (task e2e), and FLIP this "+
-			"tripwire to a regression guard. Body:\n%s", g.anchor, hasRLock, g.write, mutatesUnderLock, body)
+		if strings.Contains(body, g.racyWrite) {
+			t.Fatalf("REGRESSION (#566): rule.Processor getter %q writes the shared cache (%q) again while "+
+				"holding a read lock — the beta.150 data race is back and the -race e2e journeys will flake. "+
+				"Restore the local-copy fix upstream or re-open #566. (If the lock was intentionally promoted "+
+				"RLock→Lock, this write is safe — re-verify by hand and re-anchor.) Body:\n%s",
+				g.anchor, g.racyWrite, body)
+		}
 	}
 }
 
