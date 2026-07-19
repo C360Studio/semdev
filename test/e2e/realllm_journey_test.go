@@ -199,7 +199,20 @@ func TestRealLLMJourneyIssueToPR(t *testing.T) {
 	// The human gate, stood in exactly as the mock journeys do.
 	approveChange(ctx, t, runEntityID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
-	requireTaskSpecProjected(ctx, t, runEntityID)
+
+	// Station: the projection freezes task.spec off the MODEL-AUTHORED tasks.
+	// This is a real content gate: project_tasks REFUSES a task whose
+	// target_files carry no *_test.go (the includes-test contract — run 1
+	// died exactly here when the schema had not told the model). A refusal
+	// logs loud at the station but does NOT auto-park at M0, so the window
+	// expiring with the dump IS the verdict shape for it.
+	realEventually(ctx, t, client, 3*time.Minute, func(entities map[string]entityStateMap) bool {
+		e, ok := entities[runEntityID]
+		return ok && tripleString(e, "task.spec.test-command") != ""
+	}, func() { dumpRunEvidence(t, client, runEntityID) },
+		"run "+runEntityID+" never gained task.spec.test-command — the projection station refused the model-authored tasks "+
+			"(check the run log for 'project_tasks:' — the includes-test contract rejects a task whose target_files carry no *_test.go) "+
+			"or the projection rule did not fire")
 	requireSandboxReady(ctx, t, runEntityID)
 	t.Log("real-llm station: approved → task.spec projected → sandbox provisioned + proved cold")
 

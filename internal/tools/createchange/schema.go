@@ -67,7 +67,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	task := obj(map[string]any{
 		"number":       map[string]any{"type": "string", "description": "OpenSpec dotted number, e.g. '1.1'."},
 		"text":         map[string]any{"type": "string", "description": "The task description (the projector's goal)."},
-		"target_files": stringArray("Files this task will create or change (at least one)."),
+		"target_files": stringArray("Files this task will create or change (at least one). MUST include the *_test.go file its test_command measures — the test that proves the work is part of the work, so list it even when it already exists and only the source file changes. A task whose target_files carry no test file is REJECTED at projection and the run stalls toward the human."),
 		"test_command": map[string]any{"type": "string", "description": "The command that verifies this task, e.g. 'go test ./...'."},
 		"assumptions":  stringArray("Assumptions the task relies on (state them even if empty)."),
 		"non_goals":    stringArray("What this task explicitly does NOT do (state them even if empty)."),

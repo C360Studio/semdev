@@ -65,12 +65,44 @@ park is the posture), no parallel execution.
 
 ## Rung: M1 — real-LLM easy tier
 
-**Status: NOT CLAIMED.** No real-LLM entry exists. The first `real-llm` entry
-lands here with its watch-sidecar and cost record when the rung is attempted.
-The attempt procedure and the entry template are `docs/real-llm-runbook.md`
-(first-real-llm-journey): mock ladder green first, the smoke probe, the armed
-sidecar with pre-written abort criteria, then the entry — converged, parked,
-and aborted runs all get one (honest failures are evidence).
+**Status: NOT CLAIMED.** The rung has been ATTEMPTED (entry below) but no
+converging run exists yet. The attempt procedure and the entry template are
+`docs/real-llm-runbook.md` (first-real-llm-journey): mock ladder green first,
+the smoke probe, the armed sidecar with pre-written abort criteria, then the
+entry — converged, parked, and aborted runs all get one (honest failures are
+evidence).
+
+### 2026-07-19 — first real-LLM journey, run 1   [kind: real-llm]
+
+- Status: **failed at projection** (station refusal, 77s — no park: M0 has no
+  auto-park on station failure; the journey's own window failed loud with the
+  station log as evidence)
+- Command: `task realllm:launch` (`TestRealLLMJourneyIssueToPR`, gate + key
+  via the dotenv lane; `task realllm:probe` green first — auth, model, forced
+  tool call, thought_signature all confirmed on the wire)
+- Model: `gemini-3.1-pro-preview` via generativelanguage.googleapis.com
+  (provider `gemini` + `wire_backend: wire`), all roles
+- Stations reached with REAL model turns: decide→issue_intake → run minted →
+  executing → change authored (slug `inclusive-warning-threshold` — the
+  content lane WORKED: wake body → decision reason → author) → **CLI-oracle
+  VALIDATED first try** → awaiting_approval → stood-in approval → **REFUSED
+  at projection**: task 0's `target_files` carried no `*_test.go`
+  (`project_tasks` includes-test contract — enforced but never communicated
+  to the model; the schema description said only "Files this task will create
+  or change")
+- Cost record (harness-stamped + token-reconciled): 3 coordinator loops;
+  tokens-in 6554/1940/2424 (Σ 10,918), tokens-out 94/83/385 (Σ 562); stamped
+  `agent.loop.cost-usd` 0.014236 on the front-door loop, the two spawned
+  loops carried tokens but NO cost fact (framework stamping gap — noted for
+  an upstream ask); token-reconciled total ≈ **$0.029** at 2.00/12.00 per 1M
+- Sidecar record: narration monitor + 60s wallclock stall sidecar armed; no
+  wedge (failure at 77s on the journey's own window); probe cost ~130 tokens
+- Fix landed WITH this entry (G6): red-first pin
+  `TestSchemaTargetFilesNamesTheIncludesTestContract` + the `create_change`
+  schema's `target_files` description now names the includes-test contract
+  and its consequence; the journey's projection station poll now dumps
+  evidence and names the refusal class
+- M1 remains NOT CLAIMED.
 
 ## Experiment conditions (semsource A/B — integrate-semsource-ab-harness)
 

@@ -2,6 +2,7 @@ package createchange
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -431,4 +432,55 @@ func schemaHasProperty(schema map[string]any, name string) bool {
 		}
 	}
 	return false
+}
+
+// TestSchemaTargetFilesNamesTheIncludesTestContract pins the contract-
+// communication lane the FIRST REAL-LLM RUN failed on (first-real-llm-journey,
+// run 1, 2026-07-19): the projector REJECTS a task whose target_files carry no
+// *_test.go (projecttasks — "the developer could not author the test that
+// measures its own work"), but the schema's target_files description never
+// TOLD the model. An enforced-but-uncommunicated contract is a paid-run
+// failure by construction: the model authored an otherwise-valid change whose
+// only task listed just the source file, and the run died at projection. The
+// model-facing description must name the contract.
+func TestSchemaTargetFilesNamesTheIncludesTestContract(t *testing.T) {
+	defs := (&Executor{}).ListTools()
+	if len(defs) == 0 {
+		t.Fatal("ListTools returned no definitions")
+	}
+	raw, err := json.Marshal(defs[0].Parameters)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	// Walk to the tasks item properties' target_files description.
+	desc := ""
+	var walk func(v any)
+	walk = func(v any) {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return
+		}
+		if tf, ok := m["target_files"].(map[string]any); ok {
+			if d, ok := tf["description"].(string); ok {
+				desc = d
+			}
+		}
+		for _, child := range m {
+			walk(child)
+		}
+	}
+	walk(schema)
+	if desc == "" {
+		t.Fatal("schema carries no target_files description at all")
+	}
+	if !strings.Contains(desc, "_test.go") {
+		t.Errorf("target_files description does not name the *_test.go requirement — the projector enforces it, so the model must be told; got: %q", desc)
+	}
+	if !strings.Contains(desc, "reject") && !strings.Contains(desc, "REJECT") {
+		t.Errorf("target_files description does not say the projector REJECTS a task without its test — the consequence is part of the contract; got: %q", desc)
+	}
 }
