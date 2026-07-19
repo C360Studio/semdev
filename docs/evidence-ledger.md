@@ -97,7 +97,7 @@ evidence).
   reviewer 10,107/87, developer 53,347/409, coordinators 2,496/433 +
   9,855/142 + 1,940/93 + 6,619/95 (tokens-in/out); Σ in 84,364, Σ out 1,259;
   stamped `agent.loop.cost-usd` only on the front-door loop (0.014378 — the
-  spawned-loop cost-stamping gap recurs, upstream ask pending);
+  spawned-loop cost-stamping gap recurs — filed as semstreams #584);
   token-reconciled total ≈ **$0.184** at 2.00/12.00 per 1M
 - Sidecar record: narration monitor + 60s wallclock stall sidecar armed for
   the whole run; no wedge, no anomaly; run wall-clock 84s
