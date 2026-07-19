@@ -65,12 +65,44 @@ park is the posture), no parallel execution.
 
 ## Rung: M1 — real-LLM easy tier
 
-**Status: NOT CLAIMED.** The rung has been ATTEMPTED (entry below) but no
-converging run exists yet. The attempt procedure and the entry template are
+**Status: CLAIMED — on run 2 below (2026-07-19).** The brief's M1 bar — same
+arc on a real model, fixture repo, bounded cost, watch/liveness in place —
+is met on every clause by a converging, fully-recorded run. Delivery is the
+M0 local-delivery stub (`delivery.pr.ref` recorded; the real forge-io PR is
+a later group), exactly as the arc defines it today — no claim beyond that. The attempt procedure and the entry template are
 `docs/real-llm-runbook.md` (first-real-llm-journey): mock ladder green first,
 the smoke probe, the armed sidecar with pre-written abort criteria, then the
 entry — converged, parked, and aborted runs all get one (honest failures are
 evidence).
+
+### 2026-07-19 — first real-LLM journey, run 2 — THE M1 RUN   [kind: real-llm]
+
+- Status: **converged** — `--- PASS: TestRealLLMJourneyIssueToPR (84.24s)`,
+  `delivery.pr.ref` recorded, slug `fix-classify-warning-boundary`,
+  **attempts=1** of the authored budget (clamp [1,5] load-bearing), zero
+  retries, zero transient grace consumed
+- Command: `task realllm:launch` (immediately after run 1's includes-test
+  fix `78426e7`; mock ladder green same session; probe green)
+- Model: `gemini-3.1-pro-preview` via generativelanguage.googleapis.com
+  (provider `gemini` + `wire_backend: wire`), all three roles
+- Stations, ALL with real model turns where the arc demands one:
+  decide→issue_intake → run minted → executing → change authored →
+  CLI-oracle validated (first try, again) → awaiting_approval → stood-in
+  approval → task.spec projected (the run-1 fix PROVED: target_files carried
+  the measuring test) → sandbox provisioned + cold-proven → dev_from_task →
+  Amelia authored a REAL diff → **in-container `go test` GREEN** → floors
+  passed → Quinn approved → **clean-room cold verify PASSED** →
+  `delivery.pr.ref`
+- Cost record (harness-stamped + token-reconciled): 6 run-bound loops —
+  reviewer 10,107/87, developer 53,347/409, coordinators 2,496/433 +
+  9,855/142 + 1,940/93 + 6,619/95 (tokens-in/out); Σ in 84,364, Σ out 1,259;
+  stamped `agent.loop.cost-usd` only on the front-door loop (0.014378 — the
+  spawned-loop cost-stamping gap recurs, upstream ask pending);
+  token-reconciled total ≈ **$0.184** at 2.00/12.00 per 1M
+- Sidecar record: narration monitor + 60s wallclock stall sidecar armed for
+  the whole run; no wedge, no anomaly; run wall-clock 84s
+- Evidence ref: `test/e2e/realllm_journey_test.go` (`TestRealLLMJourneyIssueToPR`),
+  run log narration + LEDGER lines 2026-07-19
 
 ### 2026-07-19 — first real-LLM journey, run 1   [kind: real-llm]
 

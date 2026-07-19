@@ -75,7 +75,15 @@ against a live semsource — both reviewers approve; the M1 real driver must min
 implemented deltas merged, oldest→newest, INCLUDING routing-budgets + reason-aware +
 semsource-ab — now 9 caps); the recorded evidence ledger is `docs/evidence-ledger.md`
 (G7 — M0 claimed on named bridge proof, M1 not claimed).
-The **first-real-llm-journey** change (OPEN, groups 1–4 done) landed the real-LLM
+**M1 IS CLAIMED (2026-07-19)**: `TestRealLLMJourneyIssueToPR` CONVERGED on run 2 —
+the full issue→PR arc with REAL Gemini turns (gemini-3.1-pro-preview, all roles):
+model-authored change CLI-validated first try, real diff measured GREEN
+in-container, floors passed, Quinn approved, clean-room verify PASSED,
+`delivery.pr.ref` (M0 local stub), attempts=1, 84s, ≈$0.18 token-reconciled
+(ledger entry + run 1's honest projection failure recorded in
+`docs/evidence-ledger.md`). Run 1 taught the includes-test contract gap
+(enforced-but-uncommunicated) — fixed with a red-first schema-description pin.
+The **first-real-llm-journey** change (groups 1–6 + the paid runs done) landed the real-LLM
 launch surface: the issue-content lane (wake carries the admitted issue's authored
 text; persona contract makes create_change reasons preserve the ask — the mock had
 papered over the model never seeing the issue), the env-gated real-LLM journey
@@ -87,8 +95,7 @@ declarations fail loud) against the framework's FIRST-CLASS Gemini route
 adapter — an Anthropic run would need its OpenAI-compat endpoint, never
 `provider:"anthropic"`), `docs/real-llm-runbook.md` (sidecar commands
 dry-run-proven), and the Taskfile operator lane `realllm:probe`/`launch`/
-`status`. Group 5 — the paid run + ledger entry — waits on the operator's
-`GEMINI_API_KEY`; M1 stays NOT CLAIMED.
+`status`, plus the gitignored `.env` dotenv lane for the key (semspec pattern).
 The full arc runs against real docker: front door → issue_intake → create_change
 → validate → **human approval** → project task.spec → provision + prove-cold
 sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → structural

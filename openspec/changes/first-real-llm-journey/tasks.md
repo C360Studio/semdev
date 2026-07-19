@@ -31,9 +31,9 @@
 
 ## 5. The paid run itself (operator-gated — blocked on GEMINI_API_KEY in the launch shell)
 
-- [ ] 5.1 Operator puts `GEMINI_API_KEY` in the gitignored `.env` (`cp .env.example .env`; the Taskfile dotenv-loads it — plumbing proven with a dummy key reaching curl); `task realllm:probe` passes (one forced ping tool call against the real endpoint)
-- [ ] 5.2 First paid run: `task realllm:launch` (wraps the LOAD-BEARING `-count=1 -timeout 80m` — go test's default 10m would panic-kill the paid run mid-arc — plus the NATS reset and the log tee) with `task realllm:status` armed in a second shell and abort criteria in hand
-- [ ] 5.3 Ledger entry (kind `real-llm`) with cost + sidecar records; M1 rung claimed ONLY on that named evidence (G7)
+- [x] 5.1 Operator puts `GEMINI_API_KEY` in the gitignored `.env` (`cp .env.example .env`; the Taskfile dotenv-loads it — plumbing proven with a dummy key reaching curl); `task realllm:probe` passes (one forced ping tool call against the real endpoint)
+- [x] 5.2 First paid run: `task realllm:launch` (wraps the LOAD-BEARING `-count=1 -timeout 80m` — go test's default 10m would panic-kill the paid run mid-arc — plus the NATS reset and the log tee) with `task realllm:status` armed in a second shell and abort criteria in hand
+- [x] 5.3 Ledger entry (kind `real-llm`) with cost + sidecar records; M1 rung claimed ONLY on that named evidence (G7)
 
 ## 6. Provider re-target: Gemini (operator constraint, post-review)
 
