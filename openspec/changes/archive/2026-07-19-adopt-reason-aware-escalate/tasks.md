@@ -60,5 +60,5 @@
 
 ## 8. Ship
 
-- [ ] 8.1 Adversarial review (`semstreams-reviewer` + `go-reviewer`) — the first cut passed structurally, then the docker journey falsified the pass-timing assumption; the revised (atomic-mirror) mechanism must be re-reviewed
-- [ ] 8.2 `openspec validate --strict` green; conventional commit; push
+- [x] 8.1 Adversarial review (`semstreams-reviewer` + `go-reviewer`) — the first cut passed structurally, then the docker journey falsified the pass-timing assumption; the revised (atomic-mirror) mechanism was RE-REVIEWED by both agents: one BLOCKING find (the stranded passed∧rejected∧transient cell → the unclean gate + 8-cell census) and all M/L hardening findings applied
+- [x] 8.2 `openspec validate --strict` green; conventional commits `56b30a4` (the change) + `382d840` (the 7.4a port pin); pushed

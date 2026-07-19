@@ -3,9 +3,14 @@ package conformance
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"testing"
 )
+
+// archiveDatePrefix matches the YYYY-MM-DD- prefix `openspec archive` prepends
+// to an archived change directory's slug.
+var archiveDatePrefix = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-`)
 
 // repoRoot returns the semdev repository root, anchored off this test file's own
 // location (runtime.Caller) and walked up to the directory holding go.mod. Pins
@@ -81,14 +86,24 @@ func validChangeSlugs(t *testing.T) map[string]bool {
 		filepath.Join(root, "openspec", "changes"),
 		filepath.Join(root, "openspec", "changes", "archive"),
 	} {
+		archived := filepath.Base(base) == "archive"
 		entries, err := os.ReadDir(base)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			if e.IsDir() && e.Name() != "archive" {
-				out[e.Name()] = true
+			if !e.IsDir() || e.Name() == "archive" {
+				continue
 			}
+			name := e.Name()
+			// Archived changes are renamed YYYY-MM-DD-<slug> by `openspec archive`;
+			// provenance cites the slug, so strip the date prefix (first exercised
+			// when adopt-per-task-routing-budgets — cited by route.task.budget —
+			// was archived; an unstripped name orphans every archived provenance).
+			if archived {
+				name = archiveDatePrefix.ReplaceAllString(name, "")
+			}
+			out[name] = true
 		}
 	}
 	if len(out) == 0 {
