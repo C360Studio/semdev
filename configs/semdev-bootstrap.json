@@ -76,7 +76,10 @@
     "service-manager": {
       "name": "service-manager",
       "enabled": true,
-      "config": {}
+      "config": {
+        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven — if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
+        "http_port": 18080
+      }
     },
     "component-manager": {
       "name": "component-manager",

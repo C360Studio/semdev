@@ -55,7 +55,8 @@
 - [ ] 7.1 A per-task transient-cap field (author + project + clamp + mirror, the #519 treatment) — a separate future change; the CAP stays a constant here (D4)
 - [ ] 7.2 Review-loop (07-series) transient grace — 07d's fail-closed no-verdict park covers a dead review loop today (D6)
 - [ ] 7.3 An upstream semstreams ask, if same-pass rule-action atomicity is ever wanted engine-side (batch a pass's add_triples into one revision) — not needed by this change (the mirror owns the atomic snapshot), recorded as an engine fact instead
-- [ ] 7.4 e2e infra hardening (observed during this change's verification, NOT caused by it): the journey runtime inherits the framework's default service-manager HTTP port 8080, which collides with any co-resident stack publishing 8080 (an unrelated `semsource` container triggered one run where the bind failed and a JetStream `consumer not active` storm wedged the FRONT-of-arc — before any dev-loop surface). Configure an explicit ephemeral `http_port` for the e2e runtime; investigate whether the consumer storm is downstream of the failed bind
+- [x] 7.4a e2e infra hardening, port half (observed during this change's verification, NOT caused by it): the runtime inherited the framework's default service-manager HTTP port 8080, colliding with any co-resident stack publishing 8080 (an unrelated `semsource` container; 2/10 runs hit a failed bind + a JetStream `consumer not active` storm wedging the FRONT-of-arc). `http_port` now pinned to 18080 in `configs/semdev-bootstrap.json` (the machine's 1xxxx remap convention; ephemeral is not expressible — the framework coerces 0 → 8080, a possible small upstream ask)
+- [ ] 7.4b the causality half: whether the consumer-not-active storm was DOWNSTREAM of the failed bind is unproven (they co-occurred in failing runs only). If the front-of-arc wedge ever recurs WITHOUT the 8080 bind error, the storm was independent — reopen the investigation then
 
 ## 8. Ship
 
