@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/boot"
+	"github.com/c360studio/semdev/internal/experiment"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
 )
@@ -18,10 +19,13 @@ func semdevToolRegistry(t *testing.T) *agentictools.ExecutorRegistry {
 	t.Helper()
 	reg := agentictools.NewExecutorRegistry()
 	// Empty githubToken → each host tool deterministically takes its schema-only
-	// nil path regardless of the ambient GITHUB_TOKEN, so the census is hermetic. Nil
+	// nil path regardless of the ambient GITHUB_TOKEN, so the census is hermetic. The
+	// zero experiment.Config keeps the semsource proxies on their schema-only nil-client
+	// path too (registration is UNCONDITIONAL by design so this census sees their
+	// schemas — only advertisement is condition-gated). Nil
 	// checkouts/sandboxes keep every tool's runspace seam literal-nil, so the schema scan
 	// takes the schema-only path (no live NATS client either).
-	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", nil, nil); err != nil {
+	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", experiment.Config{}, nil, nil); err != nil {
 		t.Fatalf("boot.RegisterTools: %v", err)
 	}
 	return reg

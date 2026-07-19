@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/vocab"
 	"github.com/c360studio/semstreams/component"
@@ -189,18 +190,121 @@ const ruleProcessorFactory = "rule-processor"
 // rule pack's file paths to absolute (resolveRulePackPaths) so the runtime is
 // CWD-independent. Validation happens before any NATS connection so a malformed
 // config fails fast instead of surfacing as a confusing downstream error.
-func loadRuntimeConfig(path string) (*config.Config, error) {
+func loadRuntimeConfig(path string, logger *slog.Logger) (*config.Config, experiment.Config, error) {
 	cfg, err := config.NewLoader().LoadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("load config %s: %w", path, err)
+		return nil, experiment.Config{}, fmt.Errorf("load config %s: %w", path, err)
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config %s: %w", path, err)
+		return nil, experiment.Config{}, fmt.Errorf("invalid config %s: %w", path, err)
+	}
+	// semdev's own `experiment` section rides the SAME config file (the
+	// framework loader ignores unknown top-level keys); an invalid section
+	// fails the boot loudly here, never at first tool call.
+	expCfg, err := experiment.LoadConfig(path)
+	if err != nil {
+		return nil, experiment.Config{}, err
+	}
+	// The loaded condition is logged UNCONDITIONALLY so a typo'd section that
+	// silently decoded to the baseline default is diagnosable from boot output
+	// (an unknown condition VALUE already fails loudly above).
+	logger.Info("experiment condition loaded", "condition", expCfg.Condition, "semsource_endpoint", expCfg.SemsourceEndpoint)
+	// The semsource condition selects the variant dispatch pack (D2) by
+	// FILE substitution — before path resolution, so the swap operates on the
+	// authored relative names and the loaded rules are exactly the files on
+	// disk (never a load-time transformation, D2b).
+	if err := applyExperimentVariantPack(cfg, expCfg, filepath.Dir(path), logger); err != nil {
+		return nil, experiment.Config{}, err
 	}
 	if err := resolveRulePackPaths(cfg, filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("resolve rule pack paths in %s: %w", path, err)
+		return nil, experiment.Config{}, fmt.Errorf("resolve rule pack paths in %s: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, expCfg, nil
+}
+
+// variantSuffix is the semsource-condition variant pack's filename convention:
+// a baseline rule `X.json` with a sibling `X-semsource.json` on disk is
+// SUBSTITUTED (never appended — appending would load both siblings and
+// double-fire the developer spawn; the mutual-exclusion pin guards the same
+// invariant offline) when boot declares the semsource condition. The variant
+// files carry `_semsource`-suffixed rule ids and are byte-identical to their
+// baselines except the appended semsource tools (the parity pin).
+const variantSuffix = "-semsource.json"
+
+// applyExperimentVariantPack substitutes variant rule files into the rule
+// component's rules_files when the semsource condition is declared. Fails
+// LOUDLY if the condition is declared but no variant file exists (a missing
+// pack must not silently run the baseline under a semsource label — the
+// half-labeled-evidence class D4 exists to kill).
+func applyExperimentVariantPack(cfg *config.Config, exp experiment.Config, configDir string, logger *slog.Logger) error {
+	swapped := 0
+	for key, comp := range cfg.Components {
+		if comp.Name != ruleProcessorFactory || len(comp.Config) == 0 {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(comp.Config, &raw); err != nil {
+			return fmt.Errorf("decode %q config for the variant pack: %w", key, err)
+		}
+		files, ok := raw["rules_files"].([]any)
+		if !ok || len(files) == 0 {
+			continue
+		}
+		// A HAND-LISTED variant entry is a misconfiguration in EVERY condition:
+		// substitution is the only sanctioned load path. Listed alongside its
+		// baseline it double-loads two distinct rule ids that both spawn the
+		// developer on the same decide event (the framework loader collapses
+		// exact-id duplicates only) — the double-dispatch class the offline
+		// mutual-exclusion pin guards on the SHIPPED config; this guards the
+		// config actually handed to boot.
+		for _, f := range files {
+			if s, _ := f.(string); strings.HasSuffix(s, variantSuffix) {
+				return fmt.Errorf("rules_files lists variant rule %q directly — variants load ONLY by boot substitution under the semsource condition; list the baseline instead", s)
+			}
+		}
+		if !exp.Semsource() {
+			continue
+		}
+		for i, f := range files {
+			s, _ := f.(string)
+			if s == "" {
+				continue
+			}
+			candidate := strings.TrimSuffix(s, ".json") + variantSuffix
+			// Entries may be authored relative to the config dir (the shipped
+			// bootstrap) or already absolute (a test harness that pre-resolved
+			// them); stat the candidate the same way the loader will read it.
+			probe := candidate
+			if !filepath.IsAbs(probe) {
+				probe = filepath.Join(configDir, candidate)
+			}
+			if _, err := os.Stat(probe); err != nil {
+				continue
+			}
+			files[i] = candidate
+			swapped++
+			// Each swap is logged so a PARTIAL variant pack (a variant file
+			// missing from a deployed tree — the offline pins only see the
+			// repo) is diagnosable from boot output: a mixed arm would show
+			// fewer swaps than the pack ships.
+			logger.Info("experiment variant rule substituted", "rule", candidate)
+		}
+		raw["rules_files"] = files
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return fmt.Errorf("re-encode %q config after the variant swap: %w", key, err)
+		}
+		comp.Config = data
+		cfg.Components[key] = comp
+	}
+	if !exp.Semsource() {
+		return nil
+	}
+	logger.Info("experiment variant pack applied", "condition", exp.Condition, "swapped", swapped)
+	if swapped == 0 {
+		return fmt.Errorf("experiment: condition %q declared but no %s variant rule file was found next to any bootstrapped rule — the variant pack is missing (a silent baseline run under a semsource label is the exact half-labeled-evidence class the condition gate exists to kill)", experiment.ConditionSemsource, variantSuffix)
+	}
+	return nil
 }
 
 // resolveRulePackPaths rewrites the rule component's rules_files to ABSOLUTE
@@ -373,7 +477,7 @@ type runtimeRegistries struct {
 //   - lifecycleMgr: the run-entity workflow DECLARATION (RegisterLifecycle →
 //     agentrun.Register). No transition fires from here — rules own every
 //     transition (G2); this only registers what the workflow's edges are.
-func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, platform types.PlatformMeta, opts RunOptions, logger *slog.Logger) (*runtimeRegistries, error) {
+func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, platform types.PlatformMeta, expCfg experiment.Config, opts RunOptions, logger *slog.Logger) (*runtimeRegistries, error) {
 	// The SHARED, run-scoped, PROCESS-LOCAL runspace instances are created HERE (the live
 	// path always has a real client) — BEFORE RegisterAll — and handed to BOTH the R6
 	// station components (RegisterAll) and the dev-loop tools (RegisterTools). They must be
@@ -403,7 +507,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		Platform:   platform,
 		Logger:     logger,
 	}
-	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, checkouts, sandboxes); err != nil {
+	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, expCfg, checkouts, sandboxes); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 
@@ -454,11 +558,11 @@ func createConfiguredServices(svcMgr *service.Manager, services types.ServiceCon
 // built registries bundle — the latter so NewRuntime can expose the tool
 // registry (the integration smoke test asserts on the advertised tool set) and
 // hold the warm-sandbox registry for Stop to reap.
-func wireServices(ctx context.Context, cfg *config.Config, natsClient *natsclient.Client, configMgr *config.Manager, opts RunOptions, logger *slog.Logger) (*service.Manager, *runtimeRegistries, error) {
+func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Config, natsClient *natsclient.Client, configMgr *config.Manager, opts RunOptions, logger *slog.Logger) (*service.Manager, *runtimeRegistries, error) {
 	metricsRegistry := metric.NewMetricsRegistry()
 	platform := platformMeta(cfg)
 
-	regs, err := buildRuntimeRegistries(ctx, natsClient, platform, opts, logger)
+	regs, err := buildRuntimeRegistries(ctx, natsClient, platform, expCfg, opts, logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -524,7 +628,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	// (vocabulary.Register amends), so repeated e2e boots in one process are safe.
 	vocab.Register()
 
-	cfg, err := loadRuntimeConfig(opts.ConfigPath)
+	cfg, expCfg, err := loadRuntimeConfig(opts.ConfigPath, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +653,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 		return nil, fmt.Errorf("start config manager: %w", err)
 	}
 
-	svcMgr, regs, err := wireServices(ctx, cfg, natsClient, configMgr, opts, logger)
+	svcMgr, regs, err := wireServices(ctx, cfg, expCfg, natsClient, configMgr, opts, logger)
 	if err != nil {
 		_ = configMgr.Stop(5 * time.Second)
 		_ = natsClient.Close(ctx)

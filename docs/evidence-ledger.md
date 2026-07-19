@@ -67,3 +67,32 @@ park is the posture), no parallel execution.
 
 **Status: NOT CLAIMED.** No real-LLM entry exists. The first `real-llm` entry
 lands here with its watch-sidecar and cost record when the rung is attempted.
+
+## Experiment conditions (semsource A/B — integrate-semsource-ab-harness)
+
+Runs minted under a declared experiment condition carry
+`experiment.run.condition` (`baseline` | `semsource`), stamped once at mint by
+the launch path (writer `experiment-intake`) after — for the `semsource`
+condition — a PER-SIGNAL readiness proof (`index.ready` AND `embedding.ready`,
+never the aggregate phase alone). Ledger rules for condition-labeled entries:
+
+- **Every entry for a condition-minted run records the condition** — the label
+  comes from the run's fact, never re-derived.
+- **A degraded `semsource` run is NOT condition evidence.** If the trajectory
+  records semsource proxy faults material to the attempt (a mid-run outage is
+  LOUD by design — errResults in the trajectory, never a silent fallback), the
+  entry states the degradation and the run is ineligible as condition
+  evidence. Defense-in-depth: the SANCTIONED launch path
+  (`experiment.Launch`) fails closed — a failed probe publishes nothing, so no
+  run and no half-labeled evidence exist from it; the M1 real driver MUST mint
+  condition runs through it (a run minted any other way is unlabeled or
+  unproven and ineligible as condition evidence).
+- **No aggregate verdict, ever.** Cross-condition comparison is a HUMAN
+  reading condition-labeled entries and trajectories (tokens/iterations from
+  the framework's `agent.loop.*` facts, attempts, floors, measurements, review
+  verdicts — all pre-existing single-writer facts; the A/B added zero
+  measurement code). semdev computes and records no winner (G3/G7).
+
+Unconditioned runs (every entry above this section) predate the instrument and
+carry no condition label — they are baseline-shaped but NOT retroactively
+labeled.

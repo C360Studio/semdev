@@ -531,3 +531,33 @@ Template:
   to `open-pr`, the tool that actually stamps it (G5/G10).
 - **Registry entry:** `open_pr` (`tool`)
 - **Change:** containerized-sandbox-dev-loop
+
+## semsource-read-proxy-tools
+
+**Tools: `code_context` · `code_impact` · `code_search` · `doc_context` (capability semsource-ab)**
+
+Why a tool and not a rule/persona/fact (G1): the semsource A/B condition
+(integrate-semsource-ab-harness) gives the developer loop OPTIONAL read access
+to semsource's semantic knowledge graph. The framework has NO MCP client seam
+(verified against the module cache: every "MCP" hit is gateway-side and the
+module carries no modelcontextprotocol dependency) and no generic HTTP-proxy
+tool; the sanctioned extension point is the executor registry. Each proxy is a
+thin read over semsource's documented public HTTP surface
+(`POST /code-context/<verb>`, `POST /doc-context/context`) with the exact
+product-surface tool names, so semsource's own docs and prompts transfer.
+
+Alignment posture:
+
+- **Read-only** — no facts stamped (no G5 writer), schemas take a single
+  `query` parameter (no outcome fields, G3), results return as tool content.
+  NO semsource fact ever enters semdev's graph (G9 untouched).
+- **Always registered, conditionally advertised** (the D1/D2 asymmetry):
+  registration is unconditional — schema-only with a LITERAL-nil client absent
+  a configured endpoint, failing loudly if executed (the github_list_comments
+  precedent) — so the G3 schema census sees every schema. ADVERTISEMENT is the
+  condition lever: only the semsource-condition variant dispatch pack appends
+  the four names to the developer allowlist, and post-#551 an unadvertised
+  tool cannot be called.
+- **Fail-loud** — a nil-client execution and any upstream fault return an
+  explicit tool errResult (trajectory-visible, D4); never an empty success,
+  never a silent fallback.

@@ -86,6 +86,14 @@ var wantAdvertisedTools = []string{
 	"apply_patch",
 	"read_workspace",
 	"read_diff",
+	// The four semsource read proxies (integrate-semsource-ab-harness):
+	// ALWAYS registered (schema-only nil client on a baseline boot) so the
+	// censuses see them; advertised to a loop only by the semsource-condition
+	// variant pack.
+	"code_context",
+	"code_impact",
+	"code_search",
+	"doc_context",
 }
 
 // wantHealthyComponents are the processors the runtime must bring to healthy: the

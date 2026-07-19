@@ -1,0 +1,90 @@
+{
+  "id": "dev_from_task_dispatch_developer_semsource",
+  "type": "expression",
+  "name": "Coordinator decide(dev_from_task) → dispatch Amelia's bounded multi-turn dev loop [semsource condition]",
+  "description": "The dispatch station (design R2, group 4). When a coordinator loop terminates with decide(action=dev_from_task) — the taxonomy token for 'develop the run's current task' — spawn the DEVELOPER loop (Amelia). The reshape makes this a BOUNDED MULTI-TURN loop, not a single forced author turn: Amelia gets a scoped tool allowlist (read_workspace, apply_patch, measure_task, ask_human) and tool_choice=auto, so she READS the checkout, authors the fix (apply_patch), MEASURES it in the warm sandbox (measure_task, her in-loop feedback), and ITERATES until she stops (success) or hits the component iteration cap (failed). apply_patch and measure_task no longer StopLoop — the loop continues on their results. Routing never trusts her stopping decision (G3): the floors trigger + route read the harness-stamped measurement.result regardless of loop outcome.\n\nATTEMPT ACCOUNTING (R3): on_enter appends task.attempt.instance = $entity.instance on the RUN (subject-override the coordinator loop's agent.run.entity-id) AT SPAWN TIME — object = the coordinator loop instance (distinct per dispatch). Appended at spawn (not terminal) so a crashed/wedged loop still consumed an attempt (honest accounting, restart-safe). The floors/review routes count DISTINCT objects of task.attempt.instance via length_* against the constant budget 3. This is the FIRST attempt; retries are appended by the floors-retry (06c) and review-retry (07b) routers, the other two sanctioned developer spawners.\n\nRUN BINDING: run_scope=inherit reads the coordinator loop's agent.loop.run anchor (stamped on the run entity, dev-from-task/01) and binds Amelia's RunID to the same run, so read_workspace/apply_patch/measure_task resolve THIS run's checkout + warm sandbox. related_loops threads the run entity id so Amelia can query_entity the run to read the projected task.spec contract.\n\nROLE = developer (Amelia). SELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps dev.developer.dispatched=$entity.instance on the coordinator loop (the firing entity), guarded by dev.developer.dispatched length_eq 0 — the house pattern (publish_agent is not idempotent; the decision fact stays on the loop, so without this a replay would re-spawn a duplicate developer). Marker stamped BEFORE the publish so a publish failure stalls-toward-human rather than duplicating. The RETRY re-dispatches are DISTINCT triggers (the floors/review routes on a failed attempt with budget remaining), not this rule re-firing.\n\nCONTEXT-COMPLETE PROMPT (R7): the prompt threads the run entity id and instructs Amelia to read the full task contract (goal, target_files, test_command, assumptions, non_goals) via query_entity + read_workspace before authoring — entity-id-only prompts are gone. Rules cannot template cross-entity task.spec fields (a rule reads only the firing coordinator loop), so the read tools + a rich prompt are the whole context channel (audit-verified).",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.loop.role",
+      "operator": "eq",
+      "value": "coordinator",
+      "required": true
+    },
+    {
+      "field": "coordinator.decision.next-action",
+      "operator": "eq",
+      "value": "dev_from_task",
+      "required": true
+    },
+    {
+      "field": "agent.run.entity-id",
+      "operator": "ne",
+      "value": "",
+      "required": true
+    },
+    {
+      "field": "dev.developer.dispatched",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.developer.dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "task.attempt.instance",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.developer",
+      "role": "developer",
+      "model": "developer",
+      "tools": [
+        "query_entity",
+        "read_workspace",
+        "apply_patch",
+        "measure_task",
+        "ask_human",
+        "code_context",
+        "code_impact",
+        "code_search",
+        "doc_context"
+      ],
+      "tool_choice": {
+        "mode": "auto"
+      },
+      "related_loops": {
+        "run-loop-entity-id": "$entity.triple.agent.run.entity-id"
+      },
+      "properties": {
+        "phase": "develop"
+      },
+      "prompt": "SEMDEV DEVELOPER (Amelia) — develop this run's current task.\n\nYour run entity ID is $entity.triple.agent.run.entity-id. FIRST read the immutable task contract with query_entity(entity_id=\"$entity.triple.agent.run.entity-id\"): task.spec.goal, task.spec.target-files (the ONLY files you may touch), task.spec.test-command, task.spec.assumptions, task.spec.non-goals. Use read_workspace to read those files' current contents from the checkout. Then implement the change: author a unified diff (git format, a/ and b/ prefixes) touching only the declared target_files and record it with apply_patch. Then call measure_task(task_index=0) to run the frozen test command in the sandbox and read the real result. If it did not pass, revise and re-apply, then re-measure. When the test passes and you have nothing more to do, stop (do not call another tool). You author the intelligence; the harness measures the outcome and you never claim it (G3)."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "dispatch-developer — Amelia's bounded multi-turn dev loop (R2, group 4)",
+    "trigger_rationale": "fires on the coordinator loop that decided dev_from_task (the decision lives on the loop). run_scope=inherit binds Amelia to the run so her tools target its checkout/sandbox.",
+    "multi_turn": "tools allowlist [read_workspace, apply_patch, measure_task, ask_human] + tool_choice=auto make this a bounded multi-turn loop (R2): Amelia reads, patches, measures IN-LOOP (apply_patch/measure_task dropped StopLoop), and iterates. The in-loop cap is the agentic-loop component's max_iterations (uniform at M0; per-spawn is semstreams #528). Routing reads the harness-stamped measurement.result, never her stopping decision (G3).",
+    "attempt_counter": "on_enter appends task.attempt.instance on the run AT SPAWN (R3): object=the coordinator loop instance, distinct per dispatch; the floors/review routes count DISTINCT objects via length_* vs the constant budget 3. Appended at spawn (not terminal) so a wedged loop still consumed an attempt.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.developer.dispatched marker + length_eq 0 guard, stamped BEFORE the publish. Distinct from the retry re-dispatches (06c/07b), which are their own triggers.",
+    "serialization_invariant": "this rule + the floors-retry route (06c) + the review-retry route (07b) + the transient-retry route (06f) are the ONLY sanctioned role=developer spawners — one developer loop in flight per task (pinned)."
+  }
+}

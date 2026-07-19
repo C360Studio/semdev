@@ -1113,6 +1113,14 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 		"dev_from_task_route_retry":           true, // 06c — the floors-route retry
 		"dev_from_task_review_retry":          true, // 07b — the review-route retry (D16)
 		"dev_from_task_route_transient_retry": true, // 06f — the transient-retry route (adopt-reason-aware-escalate)
+		// The semsource-condition VARIANT siblings (integrate-semsource-ab-harness, D2):
+		// byte-identical to their baselines but for the appended semsource read tools
+		// (the parity pin), and NEVER loaded alongside them (the mutual-exclusion pin +
+		// boot's file SUBSTITUTION) — so the one-developer-in-flight invariant holds in
+		// either condition: exactly one of each pair exists in any loaded rule set.
+		"dev_from_task_dispatch_developer_semsource": true,
+		"dev_from_task_route_retry_semsource":        true,
+		"dev_from_task_review_retry_semsource":       true,
 	}
 	var spawners []string
 	for _, r := range rules {
@@ -1592,9 +1600,21 @@ func TestEveryRuleFileIsBootstrapped(t *testing.T) {
 		if relErr != nil {
 			return relErr
 		}
-		if !listed[filepath.ToSlash(rel)] {
-			t.Errorf("rule file %q exists on disk but is NOT in the bootstrap rules_files — the runtime never loads it, so the rule silently never fires while every disk-walking census stays green (add it to configs/semdev-bootstrap.json, or delete the file)", rel)
+		slash := filepath.ToSlash(rel)
+		if listed[slash] {
+			return nil
 		}
+		// The semsource-condition VARIANT convention (integrate-semsource-ab-harness,
+		// D2): an `X-semsource.json` sibling is loaded by boot SUBSTITUTING it for its
+		// listed baseline `X.json` when the experiment condition is declared — so a
+		// variant is "bootstrapped" iff its baseline is listed. An orphan variant
+		// (baseline not listed) is dead and fails below like any unlisted file.
+		if strings.HasSuffix(slash, "-semsource.json") {
+			if listed[strings.TrimSuffix(slash, "-semsource.json")+".json"] {
+				return nil
+			}
+		}
+		t.Errorf("rule file %q exists on disk but is NOT in the bootstrap rules_files (nor a -semsource variant of a listed baseline) — the runtime never loads it, so the rule silently never fires while every disk-walking census stays green (add it to configs/semdev-bootstrap.json, or delete the file)", rel)
 		return nil
 	})
 	if err != nil {

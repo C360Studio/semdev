@@ -60,6 +60,15 @@ var Entries = []Entry{
 	// and file contents are not triples, so these are the read-side harness seams.
 	{Name: "read_workspace", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "read-workspace-tool"},
 	{Name: "read_diff", Kind: KindTool, Capability: "dev-from-task", AlignmentNote: "read-diff-tool"},
+	// The four semsource read proxies (integrate-semsource-ab-harness, D1): thin
+	// read-only executors over semsource's public HTTP surface, named exactly as its
+	// product surface names them. ALWAYS registered (schema-only nil client on a
+	// baseline boot — the census-integrity lever), advertised ONLY by the
+	// semsource-condition variant dispatch pack (the arm-purity lever).
+	{Name: "code_context", Kind: KindTool, Capability: "semsource-ab", AlignmentNote: "semsource-read-proxy-tools"},
+	{Name: "code_impact", Kind: KindTool, Capability: "semsource-ab", AlignmentNote: "semsource-read-proxy-tools"},
+	{Name: "code_search", Kind: KindTool, Capability: "semsource-ab", AlignmentNote: "semsource-read-proxy-tools"},
+	{Name: "doc_context", Kind: KindTool, Capability: "semsource-ab", AlignmentNote: "semsource-read-proxy-tools"},
 }
 
 // ComponentNames returns the declared names of Entries of KindComponent.

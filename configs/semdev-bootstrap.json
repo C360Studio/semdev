@@ -10,6 +10,11 @@
     "environment": "development"
   },
   "tier": "agentic",
+  "experiment": {
+    "_comment": "The semsource A/B condition (integrate-semsource-ab-harness) — a semdev-OWNED section the framework loader ignores. condition: \"\" (unconfigured, the baseline DEFAULT — zero new facts, zero semsource code paths), \"baseline\" (stamps experiment.run.condition=baseline as an evidence label), or \"semsource\" (requires semsource_endpoint; boot swaps the -semsource variant dispatch pack in, constructs the live proxy client, and launch gates on semsource's PER-SIGNAL readiness — index.ready AND embedding.ready). The condition is an evidence label only: no rule reads experiment.* (conformance-linted).",
+    "condition": "",
+    "semsource_endpoint": ""
+  },
   "nats": {
     "urls": [
       "nats://localhost:4222"
@@ -208,7 +213,11 @@
           "read_diff",
           "apply_patch",
           "measure_task",
-          "submit_review"
+          "submit_review",
+          "code_context",
+          "code_impact",
+          "code_search",
+          "doc_context"
         ],
         "restricted_decide_actions": [],
         "ports": {

@@ -69,6 +69,19 @@ func capabilities(t *testing.T) map[string]bool {
 			}
 		}
 	}
+	// The CANONICAL synced spec base also declares capabilities: once a change
+	// archives, its capability survives only there — without this, archiving
+	// the change that introduced a capability orphans every vocab entry citing
+	// it (the same census-vs-archive gap the validChangeSlugs date-prefix fix
+	// closed for provenance).
+	mainSpecs := filepath.Join(repoRoot(t), "openspec", "specs")
+	if entries, err := os.ReadDir(mainSpecs); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				caps[e.Name()] = true
+			}
+		}
+	}
 	if len(caps) == 0 {
 		t.Fatalf("no capability spec dirs under any active change in %s — the pin would pass vacuously", changesDir)
 	}

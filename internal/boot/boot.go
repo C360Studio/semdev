@@ -19,7 +19,9 @@ import (
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
+	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station/delivery"
 	"github.com/c360studio/semdev/internal/station/floors"
@@ -34,6 +36,7 @@ import (
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/readdiff"
 	"github.com/c360studio/semdev/internal/tools/readworkspace"
+	"github.com/c360studio/semdev/internal/tools/semsourceproxy"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/writechange"
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -113,7 +116,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 // station components capture the SAME instances these tools use. The census passes
 // nil for both, so those seams stay literal-nil and the tools register schema-only;
 // the live boot passes the shared instances.
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, exp experiment.Config, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -169,6 +172,19 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		}
 	} else if err := reg.RegisterExecutor(listcomments.New(nil, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", listcomments.ToolName, err)
+	}
+
+	// The four semsource read proxies (integrate-semsource-ab-harness, D1):
+	// ALWAYS registered — schema-only with a LITERAL-nil querier unless boot
+	// declares the semsource condition — so the G3 schema census sees every
+	// schema; the CONDITION controls only ADVERTISEMENT (the variant dispatch
+	// pack). A baseline boot constructs zero live semsource clients.
+	if exp.Semsource() && exp.SemsourceEndpoint != "" {
+		if err := reg.RegisterExecutor(semsourceproxy.New(semsource.NewClient(exp.SemsourceEndpoint), deps.Logger)); err != nil {
+			return fmt.Errorf("register semsource proxies: %w", err)
+		}
+	} else if err := reg.RegisterExecutor(semsourceproxy.New(nil, deps.Logger)); err != nil {
+		return fmt.Errorf("register semsource proxies: %w", err)
 	}
 	// (project_tasks was CONVERTED to the projection-station COMPONENT in group 6 (R6):
 	// its executor is deleted; the projection station calls the shared projecttasks.Project

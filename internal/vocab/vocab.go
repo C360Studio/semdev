@@ -55,6 +55,11 @@ const budgets = "adopt-per-task-routing-budgets"
 // gets bounded grace outside the convergence budget, and the escalate/park carries the reason.
 const reasonAware = "adopt-reason-aware-escalate"
 
+// semsourceAB is the change slug for the semsource A/B instrument: an operator-declared
+// per-run condition where the ONLY variable is the developer's available read tools, with
+// harness-measured condition-labeled evidence (semdev computes no winner).
+const semsourceAB = "integrate-semsource-ab-harness"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -65,6 +70,13 @@ var Predicates = []Predicate{
 	{"intake.actor.admitted", "admission-check", "forge-io", m0},
 	{"run.issue.ref", "issue-intake-adapter", "forge-io", m0},
 	{"run.change.approved", "approval-adapter", "forge-io", m0},
+	// experiment.run.condition is the A/B EVIDENCE LABEL (integrate-semsource-ab-harness, D3):
+	// stamped once on the run at mint by the launch path (writer experiment-intake, G5) from
+	// the operator's boot-config condition. NEVER a routing input — a whole-document conformance
+	// lint forbids any rule document (conditions, actions, prompts, substitution tokens) from
+	// referencing an experiment.* field, so no deterministic channel can act on the label; only
+	// the ledger reads it. Unconfigured boots stamp nothing (baseline default, zero new facts).
+	{"experiment.run.condition", "experiment-intake", "semsource-ab", semsourceAB},
 	{"human.opt.signal", "comment-adapter", "forge-io", m0},
 	{"run.awaiting.human", "park-rule", "run-lifecycle", m0},
 	{"run.dev.kickoff", "dev-rewake-rule", "dev-from-task", m0},

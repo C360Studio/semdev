@@ -44,7 +44,9 @@ import (
 
 	"github.com/c360studio/semdev/internal/boot"
 	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/floors"
+	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/mockllm"
 	"github.com/c360studio/semstreams/agentic/agentrun"
@@ -904,6 +906,17 @@ func driveSharedFrontOfArc(ctx context.Context, t *testing.T) (runEntityID strin
 // the warm container) and drive the arc after this returns.
 func startJourneyRuntime(ctx context.Context, t *testing.T, mock *mockllm.Harness) {
 	t.Helper()
+	startJourneyRuntimeExperiment(ctx, t, mock, "")
+}
+
+// startJourneyRuntimeExperiment is startJourneyRuntime with an optional
+// semsource-condition injection (integrate-semsource-ab-harness): a non-empty
+// semsourceEndpoint patches {"experiment": {"condition": "semsource", ...}}
+// into the journey's temp bootstrap, so boot swaps the -semsource variant
+// dispatch pack in and constructs the live proxy client — the exact operator
+// path, not a test-only wiring.
+func startJourneyRuntimeExperiment(ctx context.Context, t *testing.T, mock *mockllm.Harness, semsourceEndpoint string) {
+	t.Helper()
 
 	// Wipe NATS so THIS journey boots against a clean durable state (see resetNATS). Multiple
 	// full-arc journeys in one `task e2e` run each need their own fresh NATS — a prior journey's
@@ -918,8 +931,12 @@ func startJourneyRuntime(ctx context.Context, t *testing.T, mock *mockllm.Harnes
 	}
 	t.Cleanup(func() { _ = mock.Stop() })
 
+	configPath := journeyConfigPath(t, mock.Endpoint())
+	if semsourceEndpoint != "" {
+		configPath = injectSemsourceExperiment(t, configPath, semsourceEndpoint)
+	}
 	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
-		ConfigPath: journeyConfigPath(t, mock.Endpoint()),
+		ConfigPath: configPath,
 		// The patched config lives in a temp dir, so point persona seeding at the repo's real
 		// fragment tree — else the coordinator routes on the framework default persona instead
 		// of Sarah's decision contract.
@@ -1005,6 +1022,126 @@ func requireAttemptCount(ctx context.Context, t *testing.T, runEntityID string, 
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
+}
+
+// injectSemsourceExperiment patches the semsource condition into a journey's
+// temp bootstrap config — the operator's exact config surface, so the boot
+// path under test is the real one (variant-pack swap + live proxy client).
+func injectSemsourceExperiment(t *testing.T, configPath, endpoint string) string {
+	t.Helper()
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read journey config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode journey config: %v", err)
+	}
+	cfg["experiment"] = map[string]any{"condition": experiment.ConditionSemsource, "semsource_endpoint": endpoint}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("re-encode journey config: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "journey-bootstrap-semsource.json")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write journey config: %v", err)
+	}
+	return path
+}
+
+// TestBridgeProofSemsourceConditionPlumbing drives the semsource-CONDITION
+// plumbing end to end (integrate-semsource-ab-harness, task 5.3) — labeled
+// BRIDGE PROOF: retrieval VALUE is unmeasurable against a mock LLM (the mock
+// never reads the tool result); what this proves is the CONDITION MACHINERY:
+// the per-signal readiness probe passes, boot swaps the -semsource variant
+// dispatch pack in and constructs the live proxy client, the run is stamped
+// with the condition label, the developer loop's advertised allowlist is the
+// baseline set + the four proxies (post-#551 an UNADVERTISED code_search call
+// would be rejected and break the arc — so delivery proves advertisement),
+// and a proxy call ROUND-TRIPS against the real semsource inside the loop.
+//
+// GATED on a locally running semsource compose: set
+// SEMDEV_SEMSOURCE_E2E_ENDPOINT (e.g. http://localhost:8080 — see the
+// operator runbook, docs/semsource-ab-runbook.md); skipped otherwise. A
+// DECLARED endpoint that fails the probe FAILS the test (D4: never run a
+// degraded arm), it does not skip.
+func TestBridgeProofSemsourceConditionPlumbing(t *testing.T) {
+	endpoint := os.Getenv("SEMDEV_SEMSOURCE_E2E_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("SEMDEV_SEMSOURCE_E2E_ENDPOINT unset — the semsource-condition plumbing journey needs a local semsource compose (docs/semsource-ab-runbook.md)")
+	}
+
+	// D4 launch order: the PER-SIGNAL readiness probe comes FIRST.
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelProbe()
+	if err := experiment.CheckReadiness(probeCtx, semsource.NewClient(endpoint)); err != nil {
+		t.Fatalf("the declared semsource endpoint failed the per-signal readiness probe (D4 — wait for index.ready AND embedding.ready, never run a degraded arm): %v", err)
+	}
+
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(3),
+		// The developer's FIRST turn calls code_search — a REAL proxy
+		// round-trip through the advertised variant allowlist.
+		mockllm.Fixture{Marker: journeyDispatchTaskMarker, Tool: &mockllm.ToolCall{Name: "code_search", Args: map[string]any{"query": "health status check"}}},
+		mockllm.Fixture{Marker: journeyDispatchTaskMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}}},
+		mockllm.Fixture{Marker: journeyDispatchTaskMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}}},
+	)...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
+	defer cancel()
+	startJourneyRuntimeExperiment(ctx, t, mock, endpoint)
+
+	runEntityID := driveSharedFrontOfArc(ctx, t)
+
+	// The launch path's post-bind step: stamp the condition on the minted run
+	// (writer experiment-intake — the probe already passed above, D4 order).
+	func() {
+		client := connectFrontDoor(ctx, t)
+		defer func() { _ = client.Close(context.Background()) }()
+		if err := experiment.StampCondition(ctx, agentictools.NewNATSOwnedFactWriter(client), runEntityID, experiment.ConditionSemsource); err != nil {
+			t.Fatalf("stamp the semsource condition: %v", err)
+		}
+	}()
+	t.Logf("semsource station: probe passed per-signal, condition stamped on run %s", runEntityID)
+
+	// The arc must DELIVER through the variant pack: the dev loop's code_search
+	// turn only admits if the four proxies are advertised (#551), and only
+	// succeeds if the live client round-trips against the real semsource.
+	requireReviewApproved(ctx, t, runEntityID)
+	requireVerifyPassed(ctx, t, runEntityID)
+	requirePRDelivered(ctx, t, runEntityID)
+
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+	entities := scanEntities(ctx, client)
+	e, ok := entities[runEntityID]
+	if !ok {
+		t.Fatalf("run %s not found for the condition assert", runEntityID)
+	}
+	if got := tripleString(e, experiment.ConditionPredicate); got != experiment.ConditionSemsource {
+		t.Fatalf("%s = %q, want %q — the delivered run must carry its condition label (the ledger reads it)", experiment.ConditionPredicate, got, experiment.ConditionSemsource)
+	}
+
+	// POSITIVE round-trip proof: delivery alone is NOT it — a rejected
+	// (unadvertised, #551) or upstream-failed code_search returns an errResult
+	// the loop absorbs and the scripted arc still delivers. The trajectory
+	// step entity is the harness-stamped truth: a code_search tool_call step
+	// with tool-status=success proves the call was ADMITTED through the
+	// variant allowlist AND round-tripped against the real semsource.
+	found := false
+	for _, ent := range entities {
+		if tripleString(ent, agvocab.StepToolName) != "code_search" {
+			continue
+		}
+		found = true
+		if status := tripleString(ent, agvocab.StepToolStatus); status != "success" {
+			t.Fatalf("the in-loop code_search step has tool-status=%q (error: %q) — the proxy call was admitted but did NOT round-trip cleanly against semsource", status, tripleString(ent, agvocab.StepErrorMessage))
+		}
+	}
+	if !found {
+		t.Fatal("no code_search tool_call trajectory step found — the scripted proxy call never executed (rejected pre-admission, or the fixture cursor desynced)")
+	}
+	t.Logf("semsource station: arc DELIVERED under the semsource condition — variant pack loaded, code_search step tool-status=success against the live semsource, condition label on the run")
 }
 
 // requireRunTripleCount polls until the run carries exactly want triples of predicate. An

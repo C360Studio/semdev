@@ -18,6 +18,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `intake.actor.admitted` | admission-check | forge-io |
 | `run.issue.ref` | issue-intake-adapter | forge-io |
 | `run.change.approved` | approval-adapter | forge-io |
+| `experiment.run.condition` | experiment-intake | semsource-ab |
 | `human.opt.signal` | comment-adapter | forge-io |
 | `run.awaiting.human` | park-rule | run-lifecycle |
 | `run.dev.kickoff` | dev-rewake-rule | dev-from-task |
@@ -94,6 +95,10 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `apply_patch` | tool | sandbox | `apply-patch-tool` |
 | `read_workspace` | tool | dev-from-task | `read-workspace-tool` |
 | `read_diff` | tool | dev-from-task | `read-diff-tool` |
+| `code_context` | tool | semsource-ab | `semsource-read-proxy-tools` |
+| `code_impact` | tool | semsource-ab | `semsource-read-proxy-tools` |
+| `code_search` | tool | semsource-ab | `semsource-read-proxy-tools` |
+| `doc_context` | tool | semsource-ab | `semsource-read-proxy-tools` |
 
 The rest of the M0 arc is rule packs, persona fragments, and reused framework
 tools (no semdev Go component); the ingest projector (`brownfield-spec-projector`)

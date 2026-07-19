@@ -3,6 +3,7 @@ package conformance
 import (
 	"testing"
 
+	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -71,6 +72,10 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		// stamped by check_floors IN the atomic mirror (never by a rule: a rule-stamped
 		// sibling lands in its own KV revision and the convergence routes race it).
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteTransientFlagPredicate},
+		// experiment.run.condition: the A/B evidence label, stamped by the launch
+		// path (experiment-intake) — the tie between the vocab writer string and
+		// the Source the transport actually lands on the graph.
+		{"experiment-intake", experiment.Source, experiment.ConditionPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteVerdictPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteAttemptPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteBudgetPredicate},
