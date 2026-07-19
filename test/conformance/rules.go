@@ -87,6 +87,7 @@ type ruleAction struct {
 	Object     string            `json:"object"`
 	Role       string            `json:"role"`
 	Tools      []string          `json:"tools"`
+	Prompt     string            `json:"prompt"`
 	RunScope   string            `json:"run_scope"`
 	Properties map[string]string `json:"properties"`
 	ToolChoice struct {

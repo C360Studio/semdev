@@ -1,8 +1,8 @@
 ## 0. PREREQUISITE — baseline `query_entity` allowlist fix (design fact 5; lands BEFORE any variant)
 
-- [ ] 0.1 Red-first conformance pin: every tool a spawn PROMPT names is in that spawn's `tools` allowlist (prompt⊆advertised) — MUST FAIL on today's pack (all four spawn prompts instruct `query_entity`; none advertises it; post-#551 a real-LLM attempt opens with a rejected `not_advertised` call)
-- [ ] 0.2 Add `query_entity` to the four spawn allowlists (`04-dispatch-developer`, `06c-route-retry`, `07b-review-retry`, `06a-route-advance`) → pin green; rule descriptions/metadata updated (G10)
-- [ ] 0.3 Offline ladder + all four docker journeys stay green (mock never calls `query_entity` — this is a no-regression check, labeled bridge proof)
+- [x] 0.1 Red-first conformance pin `TestSpawnPromptToolsAreAdvertised` (`test/conformance/rules_test.go`): every tool a spawn PROMPT instructs is in that spawn's `tools` allowlist (prompt⊆advertised) — verified RED on the unfixed pack (04/06a/06c/07b all instruct `query_entity`, none advertised). Matcher strips double-quoted literals first so the coordinator's `decide(action="ask_human")` TAXONOMY value is not misread as a tool call (no false positive); registered in the regression manifest
+- [x] 0.2 Added `query_entity` to the four spawn allowlists (`04-dispatch-developer`, `06c-route-retry`, `07b-review-retry`, `06a-route-advance`) → pin green; the stale `TestDispatchDeveloperIsMultiTurnAndSelfExtinguishing` allowlist message updated (G10)
+- [x] 0.3 Offline ladder + all 5 docker journeys stay green WITH `-race` (mock never calls `query_entity` — a no-regression bridge-proof check; PULLED FORWARD as a standalone commit ahead of the rest of this change, per the pre-real-LLM directive)
 
 ## 1. Vocabulary + condition stamp (G5/G9)
 

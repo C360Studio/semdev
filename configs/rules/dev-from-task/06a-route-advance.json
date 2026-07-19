@@ -24,7 +24,7 @@
       "subject": "agent.task.reviewer",
       "role": "reviewer",
       "model": "reviewer",
-      "tools": ["read_workspace", "read_diff", "submit_review", "ask_human"],
+      "tools": ["query_entity", "read_workspace", "read_diff", "submit_review", "ask_human"],
       "tool_choice": { "mode": "auto" },
       "properties": {
         "phase": "review"

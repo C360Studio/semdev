@@ -30,7 +30,7 @@
       "subject": "agent.task.developer",
       "role": "developer",
       "model": "developer",
-      "tools": ["read_workspace", "apply_patch", "measure_task", "ask_human"],
+      "tools": ["query_entity", "read_workspace", "apply_patch", "measure_task", "ask_human"],
       "tool_choice": { "mode": "auto" },
       "related_loops": {
         "run-loop-entity-id": "$entity.triple.agent.run.entity-id"

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -516,7 +517,7 @@ func TestDispatchDeveloperIsMultiTurnAndSelfExtinguishing(t *testing.T) {
 		t.Error("dispatch-developer must spawn a BOUNDED MULTI-TURN loop (tool_choice mode=auto), not a single forced author turn (R2)")
 	}
 	if !disp.declaresTools() {
-		t.Error("dispatch-developer must declare an explicit tools allowlist (the config-lint; Amelia's scoped [read_workspace, apply_patch, measure_task, ask_human])")
+		t.Error("dispatch-developer must declare an explicit tools allowlist (the config-lint; Amelia's scoped [query_entity, read_workspace, apply_patch, measure_task, ask_human])")
 	}
 	if !disp.hasTriple("task.attempt.instance") {
 		t.Error("dispatch-developer must append task.attempt.0 AT SPAWN (R3) — the attempt counter the route counts against the budget")
@@ -1040,6 +1041,65 @@ func TestEveryModelSpawnDeclaresToolsAllowlist(t *testing.T) {
 	}
 	if !sawSpawn {
 		t.Fatal("no publish_agent spawns found; the config-lint would pass vacuously")
+	}
+}
+
+// The PROMPT⊆ADVERTISED config-lint (integrate-semsource-ab group 0, semstreams #551): every
+// tool a spawn's PROMPT instructs the model to CALL must be in that spawn's tools allowlist.
+// Post-#551 the per-loop executor rejects a call outside the advertised set (ToolErrorPermission),
+// so a prompt that says "read the task contract with query_entity" while query_entity is
+// unadvertised makes every REAL-LLM attempt open with a rejected not_advertised call — invisible
+// under the mock (which never calls query_entity) but fatal on the first real token. Red-first:
+// this FAILS if any spawn prompt names an unadvertised tool.
+//
+// Matching: a tool is "instructed" if its name appears as a whole word in the prompt AFTER
+// stripping double-quoted string literals. The strip drops the coordinator's decide-action
+// TAXONOMY values (e.g. decide(action="ask_human")) — which name a ROUTE DECISION, not a tool call
+// — while keeping bare tool instructions (query_entity(...), "with query_entity", "with
+// read_workspace"). The tool universe is the agentic-tools allowed_tools gate, so a word that is
+// not a registered tool is prose, not a missing advertisement.
+func TestSpawnPromptToolsAreAdvertised(t *testing.T) {
+	root := repoRoot(t)
+	rules, err := loadRules(root)
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	cfg, err := loadBootstrap(root)
+	if err != nil {
+		t.Fatalf("load bootstrap: %v", err)
+	}
+	known := cfg.Components.AgenticTools.Config.AllowedTools
+	if len(known) == 0 {
+		t.Fatal("allowed_tools is empty — the prompt⊆advertised lint would pass vacuously")
+	}
+	toolRe := make(map[string]*regexp.Regexp, len(known))
+	for _, tool := range known {
+		toolRe[tool] = regexp.MustCompile(`\b` + regexp.QuoteMeta(tool) + `\b`)
+	}
+	quoted := regexp.MustCompile(`"[^"]*"`)
+	sawSpawn := false
+	for _, r := range rules {
+		for _, a := range r.OnEnter {
+			if a.Type != "publish_agent" || a.Prompt == "" {
+				continue
+			}
+			sawSpawn = true
+			advertised := make(map[string]bool, len(a.Tools))
+			for _, tool := range a.Tools {
+				advertised[tool] = true
+			}
+			// Strip quoted literals so a decide-action taxonomy value is not read as a tool call.
+			prose := quoted.ReplaceAllString(a.Prompt, "")
+			for _, tool := range known {
+				if advertised[tool] || !toolRe[tool].MatchString(prose) {
+					continue
+				}
+				t.Errorf("rule %q (role %q) prompt instructs tool %q but does NOT advertise it in the spawn tools allowlist %v — post-#551 the executor rejects the unadvertised call (ToolErrorPermission), so the FIRST real-LLM attempt opens with a rejected not_advertised call (invisible under the mock). Add %q to the allowlist or drop it from the prompt.", r.ID, a.Role, tool, a.Tools, tool)
+			}
+		}
+	}
+	if !sawSpawn {
+		t.Fatal("no publish_agent spawns with prompts found; the prompt⊆advertised lint would pass vacuously")
 	}
 }
 
