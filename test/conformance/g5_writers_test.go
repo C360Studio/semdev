@@ -64,6 +64,13 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		// route-mirror sites (adopt-per-task-routing-budgets, #568) — one logical writer,
 		// two code sites (the route.attempt.instance precedent).
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteBudgetPredicate},
+		// route.transient.instance: the transient-retry counter mirror (adopt-reason-aware-escalate),
+		// stamped by check_floors under route-mirror alongside the other route.* mirrors.
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteTransientPredicate},
+		// route.attempt.transient: the transient classification of the loop's terminal —
+		// stamped by check_floors IN the atomic mirror (never by a rule: a rule-stamped
+		// sibling lands in its own KV revision and the convergence routes race it).
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteTransientFlagPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteVerdictPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteAttemptPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteBudgetPredicate},

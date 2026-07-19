@@ -37,6 +37,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `task.spec.target-files` | task-projector | dev-from-task |
 | `task.spec.test-command` | task-projector | dev-from-task |
 | `task.attempt.instance` | dev-dispatch-rule | dev-from-task |
+| `task.transient.instance` | dev-dispatch-rule | dev-from-task |
 | `attempt.commit.sha` | patch-committer | sandbox |
 | `floor.finding.rejected` | floor-tools | dev-from-task |
 | `floor.finding.detail` | floor-tools | dev-from-task |
@@ -63,6 +64,8 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `route.review.verdict` | route-mirror | dev-from-task |
 | `route.attempt.instance` | route-mirror | dev-from-task |
 | `route.task.budget` | route-mirror | dev-from-task |
+| `route.transient.instance` | route-mirror | dev-from-task |
+| `route.attempt.transient` | route-mirror | dev-from-task |
 | `route.attempt.unclean` | dev-route-rule | dev-from-task |
 | `route.attempt.routed` | dev-route-rule | dev-from-task |
 | `delivery.route.routed` | dev-route-rule | dev-from-task |

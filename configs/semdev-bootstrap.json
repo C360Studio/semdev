@@ -170,6 +170,8 @@
           "rules/dev-from-task/06e-route-not-clean-floor.json",
           "rules/dev-from-task/06c-route-retry.json",
           "rules/dev-from-task/06d-route-escalate.json",
+          "rules/dev-from-task/06f-route-transient-retry.json",
+          "rules/dev-from-task/06g-route-transient-park.json",
           "rules/dev-from-task/07a-review-approved.json",
           "rules/dev-from-task/07b-review-retry.json",
           "rules/dev-from-task/07c-review-park.json",

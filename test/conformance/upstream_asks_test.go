@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semstreams/agentic"
+	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 )
 
 // Upstream-ask tripwires (simplify-m0-execution-rail, task 1.2).
@@ -26,11 +27,13 @@ import (
 //   guards. Of the MECHANICAL UPGRADES they enable, the #519 per-task ATTEMPT budget is now
 //   ADOPTED (adopt-per-task-routing-budgets, with #568 length_gte): the retry/escalate routes
 //   read $entity.triple.route.task.budget.value (the mirrored projected task.spec.budget)
-//   instead of the constant 3. The other two remain routing follow-ups NOT yet adopted —
-//   per-task ITERATION budgets (loop_max_iterations, #528) and a reason-aware escalate route
-//   (errors.Is ErrMaxIterationsReached / #529, framework fact filed as #569); each guard's doc
-//   names its follow-up. That M0 behavior (uniform iteration cap, outcome=failed routing) is
-//   proven by the e2e and remains correct until those upgrades are deliberately taken. #551 and #566, by
+//   instead of the constant 3. #529's reason-aware routing is ALSO now adopted
+//   (adopt-reason-aware-escalate, via #569's agent.loop.terminal-reason fact —
+//   TestTripwire569TerminalReasonFact): check_floors classifies the reason into the atomic
+//   route.attempt.transient mirror flag, so a transient loop failure (model_error/handler_error)
+//   gets bounded grace outside the convergence budget and the park carries the reason. Only #528's
+//   per-task ITERATION budget (loop_max_iterations) remains a routing follow-up NOT yet adopted;
+//   its guard's doc names it. The uniform iteration cap stays e2e-proven until #528 is taken. #551 and #566, by
 //   contrast, were adopted on the bump alone — #551's already-scoped per-spawn `tools`
 //   lists became load-bearing at execution, and #566's local-copy getters made the
 //   -race e2e journeys reliably green — both with no rule/config change.
@@ -161,10 +164,14 @@ func TestTripwire528PerSpawnMaxIterations(t *testing.T) {
 // than the free-form Reason string. This asserts the sentinel still exists and still matches
 // (self and wrapped) via errors.Is; it FIRES if the sentinel is removed or stops matching.
 //
-// MECHANICAL UPGRADE (available, not yet adopted — a routing follow-up): make the dev-loop
-// escalate route reason-aware — exhaustion (errors.Is ErrMaxIterationsReached) → escalate
-// toward the human; a transient model error → retry within budget — instead of routing on
-// outcome=failed alone.
+// MECHANICAL UPGRADE — ADOPTED (adopt-reason-aware-escalate, with #569): the dev-loop routing
+// is now reason-aware. The Go sentinel is not read by a rule directly (rules read facts, G2);
+// instead #569 surfaces the classified reason as the graph fact agent.loop.terminal-reason
+// (guarded below by TestTripwire569TerminalReasonFact), which check_floors classifies into the
+// ATOMIC route.attempt.transient mirror flag (a rule-stamped collapse would race the convergence
+// routes' exclusion — the pinned double-dispatch) so a transient model/handler error gets bounded
+// grace outside the convergence budget and the escalate/park carries the reason. This sentinel
+// guard stays: it protects the max_iterations classification the reason fact is derived from.
 func TestTripwire529UniformExhaustionReason(t *testing.T) {
 	// Anchor 1: the outcome constants this rail routes over still EXIST (compile-time floor).
 	_ = []string{
@@ -190,6 +197,35 @@ func TestTripwire529UniformExhaustionReason(t *testing.T) {
 		t.Fatal("REGRESSION (#529): a wrapped agentic.ErrMaxIterationsReached no longer matches " +
 			"via errors.Is — the typed exhaustion signal is broken. The reason-aware escalate " +
 			"upgrade depends on it; restore upstream or re-open #529.")
+	}
+}
+
+// TestTripwire569TerminalReasonFact — semstreams #569 (the loop's classified terminal reason
+// stamped as a rule-readable graph fact, landed beta.153). A REGRESSION GUARD:
+// adopt-reason-aware-escalate DEPENDS on it — a rule can only read facts (G2), not a Go
+// errors.Is sentinel, so buildLoopFailureTriples surfacing LoopFailedEvent.Reason as
+// agent.loop.terminal-reason is what lets check_floors classify WHY a developer loop failed
+// (the atomic route.attempt.transient mirror flag) and the escalate/park messages quote it. Drop it and every loop failure collapses back to outcome=failed alone —
+// transient grace silently stops working (no route.attempt.transient ever stamped) and a flaky
+// endpoint burns the convergence budget again.
+//
+// Source-anchored on the compiled framework: the exported vocab constant AND the stamping site in
+// graph_writer.go (guarded by `event.Reason != ""`). FIRES if either moves.
+func TestTripwire569TerminalReasonFact(t *testing.T) {
+	// Anchor 1: the vocab constant exists and is the canonical 3-seg predicate the rules bind.
+	if agvocab.LoopTerminalReason != "agent.loop.terminal-reason" {
+		t.Fatalf("REGRESSION (#569): agvocab.LoopTerminalReason = %q, want \"agent.loop.terminal-reason\" — "+
+			"check_floors reads that predicate for the transient classification (compile-anchored via "+
+			"agvocab) and the escalate/park messages substitute it; a rename breaks reason-aware "+
+			"routing. Re-anchor the readers and this guard.", agvocab.LoopTerminalReason)
+	}
+	// Anchor 2: the stamping site still surfaces the classified reason from the failure event.
+	src := readSemstreamsSource(t, "processor", "agentic-loop", "graph_writer.go")
+	if !strings.Contains(src, "agvocab.LoopTerminalReason") || !strings.Contains(src, "event.Reason") {
+		t.Fatal("REGRESSION (#569): graph_writer.go no longer stamps agvocab.LoopTerminalReason from " +
+			"event.Reason — the classified terminal reason is not reaching the graph, so a rule cannot " +
+			"read it. Reason-aware routing (transient grace + the reason-aware park) is inert. Restore " +
+			"upstream or re-open #569.")
 	}
 }
 

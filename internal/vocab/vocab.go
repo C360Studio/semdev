@@ -50,6 +50,11 @@ const reshape = "simplify-m0-execution-rail"
 // scalar instead of the hard-coded constant 3.
 const budgets = "adopt-per-task-routing-budgets"
 
+// reasonAware is the change slug that adopts reason-aware developer-loop routing (semstreams
+// #529/#569 agent.loop.terminal-reason): a TRANSIENT loop failure (model_error/handler_error)
+// gets bounded grace outside the convergence budget, and the escalate/park carries the reason.
+const reasonAware = "adopt-reason-aware-escalate"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -100,6 +105,12 @@ var Predicates = []Predicate{
 	// count. One logical writer dev-dispatch-rule realized by the three sanctioned spawners
 	// (04/06c/07b); rules carry no Source, so the single entry is not drifted.
 	{"task.attempt.instance", "dev-dispatch-rule", "dev-from-task", m0},
+	// task.transient.instance is the run-side TRANSIENT-retry counter (adopt-reason-aware-escalate,
+	// #529/#569): the transient-retry route appends one triple per transient (model_error/
+	// handler_error) re-dispatch, distinct from task.attempt.instance so a transient blip does NOT
+	// consume the convergence budget. Same one-writer/realized-by-a-spawner shape as
+	// task.attempt.instance; length_* over it (mirrored) bounds the transient grace.
+	{"task.transient.instance", "dev-dispatch-rule", "dev-from-task", reasonAware},
 	// attempt.commit.sha is the immutable-snapshot pointer: the SHA apply_patch commits
 	// after each successful apply (latest-wins, writer patch-committer). The cold verify
 	// clones this commit and read_diff diffs base..this — so what is verified/reviewed is a
@@ -160,6 +171,12 @@ var Predicates = []Predicate{
 	{"route.attempt.rejected", "route-mirror", "dev-from-task", reshape},
 	{"route.review.verdict", "route-mirror", "dev-from-task", reshape},
 	{"route.attempt.instance", "route-mirror", "dev-from-task", reshape},
+	// route.transient.instance is the developer-loop MIRROR of task.transient.instance (adopt-
+	// reason-aware-escalate): check_floors mirrors it onto L_n so the transient-retry route counts
+	// the transient grace via length_lt/length_gte against a LITERAL cap. Same route-mirror writer
+	// and append-mirror shape as route.attempt.instance; an absent mirror is a valid count 0 (array
+	// op over empty), so — unlike the substituted budget — there is no fail-open wedge.
+	{"route.transient.instance", "route-mirror", "dev-from-task", reasonAware},
 	// route.task.budget is the per-task ATTEMPT budget (the projected task.spec.budget,
 	// clamped [1,5]) mirrored onto the firing loop so the retry/escalate routes read it via
 	// $entity.triple.route.task.budget.value instead of the old constant 3 (adopt-per-task-
@@ -175,6 +192,16 @@ var Predicates = []Predicate{
 	// eq false OR route.attempt.rejected eq true), stamped single-valued "true" by the pure
 	// logic:or floors-route rule and read by the pure-AND retry/escalate rules.
 	{"route.attempt.unclean", "dev-route-rule", "dev-from-task", reshape},
+	// route.attempt.transient is the TRANSIENT classification of the loop's terminal
+	// (adopt-reason-aware-escalate): check_floors reads L_n's harness-stamped
+	// agent.loop.terminal-reason and stamps "true" (model_error/handler_error) or "false"
+	// (anything else, incl. absent) — ALWAYS present, in the SAME ReplaceTriples as
+	// route.attempt.passed. NOT a rule-stamped collapse: the engine writes each rule action as
+	// its own KV revision and evaluates per debounce-flush, so a sibling rule's stamp races the
+	// convergence routes' exclusion (the pinned double-dispatch). The transient-retry/park
+	// routes fire on eq "true"; the convergence retry/escalate exclude on eq "false" — a
+	// condition PARTITION over the one atomic mirror snapshot.
+	{"route.attempt.transient", "route-mirror", "dev-from-task", reasonAware},
 	// route.attempt.routed is the shared fired-once self-extinguish marker the floors-route
 	// and review-route rules stamp on their firing loop BEFORE any (non-idempotent) publish;
 	// a fresh loop per attempt re-arms it, so retries route for free.

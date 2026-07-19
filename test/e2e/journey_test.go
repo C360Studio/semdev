@@ -173,6 +173,20 @@ const journeyFixtureRetryFixDiff = "--- a/health.go\n" +
 // parks them until Quinn's rejection re-enters development.
 const journeyReviewRetryMarker = "requested changes"
 
+// journeyDispatchTaskMarker is a substring UNIQUE to the INITIAL dispatch prompt
+// (dev-from-task/04-dispatch-developer.json — "develop this run's current task") — it is
+// ABSENT from the transient-retry prompt (06f, "interrupted by a TRANSIENT infrastructure
+// error") and every other spawn. The transient-grace journey sets it as the mockllm error
+// marker so ONLY the initial dispatch's model call 500s (a transient model_error terminal);
+// the 06f re-dispatch prompt lacks it, so the retried loop proceeds normally.
+const journeyDispatchTaskMarker = "develop this run's current task"
+
+// journeyTransientMarker is the distinctive substring of the TRANSIENT-retry re-dispatch prompt
+// (dev-from-task/06f-route-transient-retry.json — "TRANSIENT infrastructure error"), absent from
+// the initial dispatch (04) and every other spawn. The transient-grace journey keys the retry
+// loop's fixtures on it so the positional cursor parks them until the transient re-dispatch arrives.
+const journeyTransientMarker = "TRANSIENT infrastructure error"
+
 // journeyReviewFinding is the required change Quinn raises on her FIRST review of the rejection
 // journey. A single finding forces verdict=changes_requested even on a PASSING measurement (G3:
 // approved ⟺ measured-pass ∧ no findings) — the rejection lever. It is realistic (G8): a review
@@ -738,8 +752,18 @@ func TestBridgeProofBudgetOneEscalatesOnFirstRed(t *testing.T) {
 	t.Logf("escalate station: attempt 1 measured RED → 06d floors-escalate at count 1 = budget on run %s", runEntityID)
 
 	// The run PARKS toward the human via the floors-escalate route (06d) — no PR, no false green.
-	requireRunParked(ctx, t, runEntityID, 90*time.Second)
-	t.Logf("escalate station: run parked (run.awaiting.human) at budget 1 — fail-closed (SB5)")
+	// REASON-AWARE (#569): 06d's park message carries the engine's classified terminal reason via
+	// $entity.triple.agent.loop.terminal-reason.value. This journey's loop COMPLETED (measured
+	// red), so the reason is absent and substitutes empty — the assertion proves the TEMPLATE
+	// shipped and the substitution resolved (the message explains an empty reason in place).
+	parkMsg := requireRunParked(ctx, t, runEntityID, 90*time.Second)
+	if !strings.Contains(parkMsg, "last engine terminal reason:") {
+		t.Fatalf("06d's park message is not reason-aware — want the 'last engine terminal reason:' template (#569), got %q", parkMsg)
+	}
+	if strings.Contains(parkMsg, "$entity.triple") {
+		t.Fatalf("06d's park message carries an UNRESOLVED substitution token — the reason must substitute (empty here, since a completed-red loop stamps no terminal reason), got %q", parkMsg)
+	}
+	t.Logf("escalate station: run parked (run.awaiting.human, reason-aware message) at budget 1 — fail-closed (SB5)")
 
 	// Turn accounting: front-of-arc 4 + one failing dev loop (apply, measure RED, stop = 3) = 7. No
 	// Quinn (a RED attempt never advances to review). A different count means a retry fired past the
@@ -747,6 +771,108 @@ func TestBridgeProofBudgetOneEscalatesOnFirstRed(t *testing.T) {
 	if got := mock.RequestCount(); got != 7 {
 		t.Fatalf("expected exactly 7 model turns (front-of-arc 4 + one failing dev loop apply/measure/stop = 3), got %d — a mismatch means a retry fired past budget 1, an extra loop spawned, or a turn went unscripted", got)
 	}
+}
+
+// TestBridgeProofTransientGraceRetries drives the TRANSIENT-FAILURE GRACE station
+// (adopt-reason-aware-escalate, #529/#569). The INITIAL developer dispatch (04) fails with a
+// TRANSIENT model_error terminal — the mockllm error-proxy 500s its model call (and the
+// agentic-model client's retries of it), which the loop engine classifies as
+// agent.loop.terminal-reason="model_error". That is NOT genuine non-convergence: check_floors
+// classifies the reason and stamps route.attempt.transient="true" ATOMICALLY in the route
+// mirror, and the transient-retry route (06f) re-dispatches a FRESH developer loop WITHOUT
+// consuming the convergence budget. The retried loop's model call carries the 06f prompt (which lacks the dispatch error marker), so
+// it proceeds normally: apply → measure GREEN → advance → review → verify → deliver. Zero paid
+// tokens (the 500s are injected by the loopback proxy, never a provider).
+//
+// The LOAD-BEARING assertions: the convergence attempt budget count stays 1 (the initial
+// dispatch — the transient re-dispatch appends task.transient.instance, NOT task.attempt.instance,
+// so a flaky endpoint did not burn a convergence slot) AND a transient counter appears AND the
+// run DELIVERS. Against a rail with no transient grace the model_error would count as a failed
+// convergence attempt (or double-dispatch with 06c), so this is a direct proof of the adoption.
+func TestBridgeProofTransientGraceRetries(t *testing.T) {
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(3),
+		// The INITIAL dispatch (04, prompt contains journeyDispatchTaskMarker) 500s → the model
+		// client retries (all 500, none reaching ssmock) → model_error terminal → the floors
+		// mirror stamps route.attempt.transient="true" → 06f transient-retry (a DIFFERENT
+		// prompt, not 500'd).
+		mockllm.Fixture{Marker: journeyDispatchTaskMarker, Error: true},
+		// The transient-retry loop (06f prompt — journeyTransientMarker): the GOOD fix → measure
+		// GREEN → advance. Parked on the cursor until the transient re-dispatch arrives.
+		mockllm.Fixture{Marker: journeyTransientMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}}},
+		mockllm.Fixture{Marker: journeyTransientMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		// Quinn reviews the cleared attempt → approved → verify + delivery (both components).
+		mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}}},
+	)...)
+
+	// A transient model_error + the client's retry backoff before the grace re-dispatch, then a
+	// full recovering dev loop + review + cold verify → a wider window than the happy path.
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
+	defer cancel()
+	startJourneyRuntime(ctx, t, mock)
+
+	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
+	runEntityID := driveSharedFrontOfArc(ctx, t)
+
+	// The transient grace fired: a transient counter is stamped (the model_error re-dispatch) and
+	// the run RECOVERED — the retried loop measured green and delivered. requirePRDelivered fails
+	// loud if the run PARKED instead (a broken transient route that exhausted to 06g).
+	requireTriplePresent(ctx, t, runEntityID, "task.transient.instance")
+	t.Logf("transient station: initial dispatch failed model_error → 06f transient-retry re-dispatched (task.transient.instance stamped) on run %s", runEntityID)
+
+	// Budget UNTOUCHED: exactly ONE convergence attempt (the initial dispatch appended #1 at spawn;
+	// the transient re-dispatch appended task.transient.instance, NOT task.attempt.instance). More
+	// than one would mean a transient failure wrongly consumed a convergence-budget slot.
+	requireAttemptCount(ctx, t, runEntityID, 1, 4*time.Minute)
+	t.Logf("transient station: convergence budget untouched — exactly 1 task.attempt.instance (the transient retry was free)")
+
+	requireReviewApproved(ctx, t, runEntityID)
+	requireVerifyPassed(ctx, t, runEntityID)
+	requirePRDelivered(ctx, t, runEntityID)
+
+	// Determinism hardening: re-assert the budget AFTER delivery. The earlier count check
+	// returns at first observation (count==1 holds from the initial dispatch onward), so a
+	// LATE convergence double-dispatch — the pre-fix race's exact signature — could land
+	// after it; post-delivery, any stray task.attempt.instance append has long since landed.
+	requireAttemptCount(ctx, t, runEntityID, 1, 30*time.Second)
+	t.Logf("transient station: run RECOVERED from the transient failure and DELIVERED (delivery.pr.ref) — grace outside the convergence budget")
+}
+
+// TestBridgeProofTransientCapParks drives the transient-exhaustion PARK (06g): the initial
+// dispatch AND both graced re-dispatches die transiently — the mockllm error gates match the
+// dispatch prompt AND the transient-retry prompt, so every developer model call 500s. Three
+// transient deaths: the dispatch (transient count 0 → 06f grace #1, appends
+// task.transient.instance), retry #1 (count 1 → grace #2), retry #2 (count 2 → 06g length_gte
+// 2 parks). Proves the grace is BOUNDED (a persistently-dead endpoint parks toward the human,
+// never an unbounded retry loop), the park message substitutes a REAL non-empty reason
+// (model_error — the budget-1 journey only proves the template over an empty reason), and the
+// convergence budget stays untouched (all three deaths were free of task.attempt.instance).
+func TestBridgeProofTransientCapParks(t *testing.T) {
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(3),
+		mockllm.Fixture{Marker: journeyDispatchTaskMarker, Error: true},
+		mockllm.Fixture{Marker: journeyTransientMarker, Error: true},
+	)...)
+
+	// Three loop deaths each behind the model client's retry backoff, then the park.
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
+	defer cancel()
+	startJourneyRuntime(ctx, t, mock)
+
+	runEntityID := driveSharedFrontOfArc(ctx, t)
+
+	parkMsg := requireRunParked(ctx, t, runEntityID, 4*time.Minute)
+	if !strings.Contains(parkMsg, "TRANSIENT") || !strings.Contains(parkMsg, "model_error") {
+		t.Fatalf("06g's park message must name the transient class and the SUBSTITUTED reason (model_error) — the reason-aware park over a real terminal reason (#569), got %q", parkMsg)
+	}
+	if strings.Contains(parkMsg, "$entity.triple") {
+		t.Fatalf("06g's park message carries an unresolved substitution token: %q", parkMsg)
+	}
+	t.Logf("transient-cap station: three model_error deaths → 2 graces consumed → 06g parked with the transient reason on run %s", runEntityID)
+
+	// Exactly the cap's worth of graces, and the convergence budget untouched (the initial
+	// dispatch's single append — the transient track never touched it).
+	requireRunTripleCount(ctx, t, runEntityID, "task.transient.instance", 2, 30*time.Second)
+	requireAttemptCount(ctx, t, runEntityID, 1, 30*time.Second)
+	t.Logf("transient-cap station: task.transient.instance=2 (the cap), task.attempt.instance=1 — bounded grace, budget free")
 }
 
 // driveSharedFrontOfArc drives the front of every negative-path journey IDENTICALLY — publish the
@@ -876,6 +1002,37 @@ func requireAttemptCount(ctx context.Context, t *testing.T, runEntityID string, 
 			t.Fatalf("run %s has %d %s triples, want exactly %d within %s — dispatch-developer (04) appends #1 "+
 				"and each retry re-dispatch (06c) appends +1; too few means the retry route never fired (attempt "+
 				"1's red measure did not drive a re-dispatch)", runEntityID, count, pred, want, timeout)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// requireRunTripleCount polls until the run carries exactly want triples of predicate. An
+// over-count fails FAST — an errant extra append cannot be waited away — and a transient
+// scan miss (scanEntities swallows read faults into an empty map) is retried, not failed.
+func requireRunTripleCount(ctx context.Context, t *testing.T, runEntityID, pred string, want int, timeout time.Duration) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		count := 0
+		if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
+			for _, tr := range e.Triples {
+				if tr.Predicate == pred {
+					count++
+				}
+			}
+		}
+		if count == want {
+			return
+		}
+		if count > want {
+			t.Fatalf("run %s has %d %s triples, want exactly %d — an extra append means a route misfired", runEntityID, count, pred, want)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s has %d %s triples, want exactly %d within %s", runEntityID, count, pred, want, timeout)
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
@@ -1176,11 +1333,13 @@ func requireReviewEventuallyApproved(ctx context.Context, t *testing.T, runEntit
 // green (no verify.cleanroom.result). It fails FAST and loud if a delivery.pr.ref appears (a parked run that somehow
 // delivered is a worse bug than a timeout). The final no-verify check catches a run that parked yet
 // had already been cold-verified — a run must not both park and carry a green verify.cleanroom.result.
-func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, timeout time.Duration) {
+// Returns the park message so callers can assert its content (the reason-aware park, #569).
+func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, timeout time.Duration) string {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
 
+	park := ""
 	requireEventually(t, timeout, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
@@ -1190,7 +1349,11 @@ func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, tim
 			t.Fatalf("run %s DELIVERED (delivery.pr.ref=%q) but the exhausted-budget journey must PARK, never ship — "+
 				"the exhaustion park (dev-from-task/06d floors-escalate or 07c review-park) did not fire, or a delivery route fired on an unapproved run", runEntityID, ref)
 		}
-		return tripleString(e, "run.awaiting.human") != ""
+		// Capture the message inside the successful poll observation — a post-poll re-scan
+		// can transiently miss (scanEntities swallows read faults into an empty map) and
+		// would return "" for a park the poll already proved present.
+		park = tripleString(e, "run.awaiting.human")
+		return park != ""
 	}, "run "+runEntityID+" never parked (run.awaiting.human absent) — the exhaustion park must fire when "+
 		"route.attempt.instance count reaches the per-task budget B (route.attempt.instance length_gte "+
 		"$…route.task.budget.value): 07c review-park when Quinn keeps rejecting at count ≥ B, or 06d floors-escalate "+
@@ -1202,6 +1365,7 @@ func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, tim
 			t.Fatalf("parked run %s carries verify.cleanroom.result=%q — a parked (never-approved) run must never reach the cold verify (no false green, SB5)", runEntityID, v)
 		}
 	}
+	return park
 }
 
 // requireVerifyPassed polls the run entity until verify.cleanroom.result == "pass" — the proof the

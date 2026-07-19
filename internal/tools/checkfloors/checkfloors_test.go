@@ -29,18 +29,25 @@ func (f fakeAttempts) Resolve(_ context.Context, _ string, idx int) (floors.Atte
 }
 
 // fakeReader replays the run's measurement + attempt facts the route mirror reads
-// (measurement.result.passed, task.attempt.instance), filtered by the queried prefix.
+// (measurement.result.passed, task.attempt.instance), filtered by the queried prefix —
+// and, keyed by ENTITY, the loop's own facts (agent.loop.terminal-reason) so the pins
+// prove the transient classification reads L_n, not the run.
 type fakeReader struct {
-	facts []message.Triple
-	err   error
+	facts     []message.Triple // served for every entity except loopEntity (the run's facts)
+	loopFacts []message.Triple // served for loopEntity (the loop's terminal-reason)
+	err       error
 }
 
-func (r fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.Triple, error) {
+func (r fakeReader) ReadFacts(_ context.Context, entityID, prefix string) ([]message.Triple, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
+	src := r.facts
+	if entityID == loopEntity {
+		src = r.loopFacts
+	}
 	var out []message.Triple
-	for _, tr := range r.facts {
+	for _, tr := range src {
 		if strings.HasPrefix(tr.Predicate, prefix) {
 			out = append(out, tr)
 		}
@@ -78,13 +85,29 @@ func budgetFact(b string) message.Triple {
 	return message.Triple{Predicate: "task.spec.budget", Object: b, Source: "task-projector"}
 }
 
+// transientFact builds one appended task.transient.instance counter triple (object = a
+// transiently-retried loop id) the route mirror copies onto L_n as route.transient.instance
+// (adopt-reason-aware-escalate).
+func transientFact(loopID string) message.Triple {
+	return message.Triple{Predicate: "task.transient.instance", Object: loopID, Source: "dev-dispatch-rule"}
+}
+
+// terminalReasonFact builds the LOOP's harness-stamped agent.loop.terminal-reason (semstreams
+// #569, stamped by the agentic-loop graph writer atomically with the outcome) the transient
+// classification reads. Lives on L_n, never the run — feed it to fakeReader.loopFacts.
+func terminalReasonFact(reason string) message.Triple {
+	return message.Triple{Predicate: "agent.loop.terminal-reason", Object: reason, Source: "agentic-loop"}
+}
+
 type fakeWriter struct {
 	owned    []string // predicates ReadOwnedPredicates returns (the stale set)
+	entities []string // the entity each ReplaceTriples call targeted (index-aligned with replaces)
 	replaces [][]message.Triple
 	removes  [][]string
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, rm []string) error {
+func (w *fakeWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, rm []string) error {
+	w.entities = append(w.entities, entityID)
 	w.replaces = append(w.replaces, add)
 	w.removes = append(w.removes, rm)
 	return nil
@@ -542,6 +565,165 @@ func TestCheckFloorsMirrorNonCanonicalBudgetFaults(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The TRANSIENT-retry counter is mirrored onto L_n (adopt-reason-aware-escalate, task 2.3):
+// given a run with N task.transient.instance objects, the mirror stamps N
+// route.transient.instance on L_n so the transient-retry route counts the grace. Given none,
+// none is stamped (a valid count 0 — no fail-open, unlike the substituted budget).
+func TestCheckFloorsMirrorStampsTransientCounter(t *testing.T) {
+	w := &fakeWriter{}
+	reader := fakeReader{facts: []message.Triple{
+		measuredPassed("false"),
+		attemptFact("dev-loop-1"),
+		budgetFact("3"),
+		transientFact("dev-loop-1a"),
+		transientFact("dev-loop-1b"),
+	}}
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
+	}
+	transientObjs := map[string]bool{}
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == RouteTransientPredicate {
+				if tr.Subject != loopEntity {
+					t.Errorf("%s stamped on %q, want the floors LOOP entity %q", RouteTransientPredicate, tr.Subject, loopEntity)
+				}
+				if tr.Source != RouteMirrorSource {
+					t.Errorf("%s Source = %q, want %q (G5)", RouteTransientPredicate, tr.Source, RouteMirrorSource)
+				}
+				transientObjs[tr.Object.(string)] = true
+			}
+		}
+	}
+	if len(transientObjs) != 2 || !transientObjs["dev-loop-1a"] || !transientObjs["dev-loop-1b"] {
+		t.Errorf("%s must mirror both task.transient.instance objects, got %v", RouteTransientPredicate, transientObjs)
+	}
+}
+
+// A run with NO task.transient.instance mirrors zero route.transient.instance (a valid count 0,
+// no fault) — the common path where no transient failure has occurred.
+func TestCheckFloorsMirrorAbsentTransientIsZeroNoFault(t *testing.T) {
+	w := &fakeWriter{}
+	reader := fakeReader{facts: []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")}}
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	if err != nil {
+		t.Fatalf("an absent transient counter must NOT fault (valid count 0): %v", err)
+	}
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Predicate == RouteTransientPredicate {
+				t.Errorf("no task.transient.instance seeded, but %s was mirrored", RouteTransientPredicate)
+			}
+		}
+	}
+}
+
+// The TRANSIENT FLAG classification (adopt-reason-aware-escalate): route.attempt.transient is
+// "true" iff the LOOP's harness-stamped agent.loop.terminal-reason is in the transient set
+// (model_error/handler_error), "false" for every other reason INCLUDING absent (the normal
+// completed-loop terminal) — and it is ALWAYS stamped, so the convergence routes' eq "false"
+// exclusion never reads an absent field.
+func TestCheckFloorsMirrorTransientFlagClassification(t *testing.T) {
+	cases := []struct {
+		name      string
+		loopFacts []message.Triple
+		want      string
+	}{
+		{"absent reason (completed loop)", nil, "false"},
+		{"model_error is transient", []message.Triple{terminalReasonFact("model_error")}, "true"},
+		{"handler_error is transient", []message.Triple{terminalReasonFact("handler_error")}, "true"},
+		{"max_iterations is a genuine terminal", []message.Triple{terminalReasonFact("max_iterations")}, "false"},
+		{"graph_state_reset_required is a genuine terminal", []message.Triple{terminalReasonFact("graph_state_reset_required")}, "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &fakeWriter{}
+			reader := fakeReader{
+				facts:     []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")},
+				loopFacts: tc.loopFacts,
+			}
+			_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+			if err != nil {
+				t.Fatalf("RunFloors: %v", err)
+			}
+			var got string
+			for _, batch := range w.replaces {
+				for _, tr := range batch {
+					if tr.Predicate == RouteTransientFlagPredicate {
+						got = tr.Object.(string)
+						if tr.Subject != loopEntity {
+							t.Errorf("%s stamped on %q, want the floors LOOP entity %q", RouteTransientFlagPredicate, tr.Subject, loopEntity)
+						}
+						if tr.Source != RouteMirrorSource {
+							t.Errorf("%s Source = %q, want %q (G5)", RouteTransientFlagPredicate, tr.Source, RouteMirrorSource)
+						}
+					}
+				}
+			}
+			if got != tc.want {
+				t.Errorf("%s = %q, want %q (the flag must ALWAYS be stamped — an absent flag makes the eq exclusions read absent→false and stalls the convergence routes)", RouteTransientFlagPredicate, got, tc.want)
+			}
+		})
+	}
+}
+
+// THE RACE PIN (adopt-reason-aware-escalate, the double-dispatch caught live by
+// TestBridgeProofTransientGraceRetries): the transient flag must ride the SAME ReplaceTriples
+// call as route.attempt.passed — the engine writes each mutation as its own KV revision and
+// evaluates rules per debounce-flush against fetched state, so a flag landing in a SEPARATE
+// revision creates an eval pass where 06b's unclean chain is satisfiable but the transient
+// exclusion is not yet visible → 06c convergence-retry fires alongside 06f transient-retry
+// (double dispatch, one-in-flight violated). Atomic-with-passed is the WHOLE fix — this pin
+// fails if the flag is ever moved to its own write (or back to a rule-stamped collapse).
+func TestCheckFloorsMirrorTransientFlagAtomicWithPassed(t *testing.T) {
+	w := &fakeWriter{}
+	reader := fakeReader{
+		facts:     []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")},
+		loopFacts: []message.Triple{terminalReasonFact("model_error")},
+	}
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
+	}
+	found := false
+	for i, batch := range w.replaces {
+		hasPassed, hasFlag := false, false
+		for _, tr := range batch {
+			if tr.Predicate == RoutePassedPredicate {
+				hasPassed = true
+			}
+			if tr.Predicate == RouteTransientFlagPredicate {
+				hasFlag = true
+			}
+		}
+		if !hasPassed {
+			continue
+		}
+		found = true
+		if w.entities[i] != loopEntity {
+			t.Errorf("the mirror ReplaceTriples targeted entity %q, want the floors LOOP entity %q — a mirror written to the wrong entity fires no route while every triple-level pin stays green", w.entities[i], loopEntity)
+		}
+		if !hasFlag {
+			t.Fatalf("route.attempt.passed stamped WITHOUT %s in the same ReplaceTriples — the transient classification must be atomic with the mirror or the convergence routes race it (the pinned double-dispatch)", RouteTransientFlagPredicate)
+		}
+		// The single-valued flag must also be in the replace (remove-first) set so a
+		// re-mirror upserts rather than accreting a second value.
+		inRemove := false
+		for _, p := range w.removes[i] {
+			if p == RouteTransientFlagPredicate {
+				inRemove = true
+			}
+		}
+		if !inRemove {
+			t.Errorf("%s missing from the mirror's replace predicates — a re-mirror would accrete a second value instead of upserting", RouteTransientFlagPredicate)
+		}
+	}
+	if !found {
+		t.Fatal("no ReplaceTriples batch carried route.attempt.passed — the mirror did not run")
 	}
 }
 

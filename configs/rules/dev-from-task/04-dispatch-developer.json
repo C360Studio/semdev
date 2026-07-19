@@ -51,6 +51,6 @@
     "multi_turn": "tools allowlist [read_workspace, apply_patch, measure_task, ask_human] + tool_choice=auto make this a bounded multi-turn loop (R2): Amelia reads, patches, measures IN-LOOP (apply_patch/measure_task dropped StopLoop), and iterates. The in-loop cap is the agentic-loop component's max_iterations (uniform at M0; per-spawn is semstreams #528). Routing reads the harness-stamped measurement.result, never her stopping decision (G3).",
     "attempt_counter": "on_enter appends task.attempt.instance on the run AT SPAWN (R3): object=the coordinator loop instance, distinct per dispatch; the floors/review routes count DISTINCT objects via length_* vs the constant budget 3. Appended at spawn (not terminal) so a wedged loop still consumed an attempt.",
     "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.developer.dispatched marker + length_eq 0 guard, stamped BEFORE the publish. Distinct from the retry re-dispatches (06c/07b), which are their own triggers.",
-    "serialization_invariant": "this rule + the floors-retry route (06c) + the review-retry route (07b) are the ONLY sanctioned role=developer spawners — one developer loop in flight per task (pinned)."
+    "serialization_invariant": "this rule + the floors-retry route (06c) + the review-retry route (07b) + the transient-retry route (06f) are the ONLY sanctioned role=developer spawners — one developer loop in flight per task (pinned)."
   }
 }

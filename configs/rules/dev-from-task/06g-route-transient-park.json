@@ -1,0 +1,44 @@
+{
+  "id": "dev_from_task_route_transient_park",
+  "type": "expression",
+  "name": "Transient route → PARK: transient cap reached → park toward the human",
+  "description": "The transient-exhaustion park (adopt-reason-aware-escalate, #529/#569/SB5). When a developer loop failed for a TRANSIENT reason (route.attempt.transient=true) AND the transient-retry grace is exhausted (route.transient.instance count ≥ CAP=2), the endpoint is persistently failing — PARK toward the human rather than retry unbounded (the bounded-loop invariant, extended to the transient track). This is distinct from the convergence escalate (06d): the run did not fail to CONVERGE, its loops kept dying on infrastructure, so the park names the TRANSIENT reason and tells the human a re-run may just work once the endpoint recovers.\n\nTRIGGER = the developer loop L_n: route.attempt.transient eq \"true\" (the check_floors ATOMIC-MIRROR classification of the loop's terminal reason, stamped in the SAME ReplaceTriples as route.attempt.passed — see 06f for why it is never a rule-stamped collapse) AND route.attempt.unclean eq \"true\" (the shared not-clean trigger — see 06f for the totality argument: a passed=false gate leaves the passed=true∧rejected=true∧transient=true cell unrouted) AND route.transient.instance length_gte 2 (required:true — cap reached, fail-closed; #568 length_gte against the LITERAL cap) AND route.attempt.routed length_eq 0 (self-extinguish). Mutually exclusive with the transient-retry (06f, length_lt 2) on the transient count.\n\nWRITER: run.awaiting.human — a sanctioned park realization (G5), same meaning as the others, differing only in trigger. REASON-AWARE (#569): the object carries $entity.triple.agent.loop.terminal-reason.value (the transient reason), resolved firing-entity-only on this developer loop (no mirror); G3 — the engine's classified fact, never synthesized.\n\nRUN BINDING: the park marker goes on the RUN (subject-override this developer loop L_n's agent.run.entity-id).\n\nSELF-EXTINGUISHING: route.attempt.routed on L_n (a LOOP-scoped guard — the loop does not carry the run-scoped park marker).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "route.attempt.transient", "operator": "eq", "value": "true", "required": false },
+    { "field": "route.attempt.unclean", "operator": "eq", "value": "true", "required": false },
+    { "field": "route.transient.instance", "operator": "length_gte", "value": 2, "required": true },
+    { "field": "route.attempt.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.attempt.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "run.awaiting.human",
+      "object": "the dev loop kept failing on TRANSIENT infrastructure errors and reached the transient-retry cap; last engine terminal reason: '$entity.triple.agent.loop.terminal-reason.value' (model_error/handler_error — a re-run may succeed once the endpoint recovers)"
+    },
+    {
+      "type": "publish",
+      "subject": "user.response.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "park",
+    "station": "transient park — transient cap reached → park toward the human (adopt-reason-aware-escalate/SB5)",
+    "trigger_rationale": "route.attempt.transient eq true (the atomic check_floors mirror flag) AND route.attempt.unclean eq true AND route.transient.instance length_gte 2 (cap reached). Partitions the transient count with 06f's length_lt 2; length_gte is fail-closed (catches an over-count too).",
+    "reason_aware": "the run.awaiting.human object substitutes $entity.triple.agent.loop.terminal-reason.value (firing-entity-only, #569/#519) so the human knows the failures were transient infrastructure, not non-convergence.",
+    "writer_note": "run.awaiting.human is written by the park-rule subsystem (G5) — a sanctioned park realization. Rule add_triple carries no Source, so the single vocab entry is not drifted.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped route.attempt.routed marker (not run.awaiting.human, which lives on the run)."
+  }
+}

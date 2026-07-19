@@ -1,0 +1,57 @@
+{
+  "id": "dev_from_task_route_transient_retry",
+  "type": "expression",
+  "name": "Transient route → RETRY: transient failure, grace remains → re-dispatch Amelia (free of the convergence budget)",
+  "description": "The transient-retry route (adopt-reason-aware-escalate, #529/#569). When a developer loop failed for a TRANSIENT reason (route.attempt.transient=\"true\" — the check_floors ATOMIC-MIRROR classification of the loop's harness-stamped agent.loop.terminal-reason ∈ {model_error, handler_error}, stamped in the SAME ReplaceTriples as route.attempt.passed) AND the attempt was NOT clean (route.attempt.unclean=\"true\", the 06b/06e OR-collapse — passed=false OR a floor rejected) AND the transient-retry grace still has room (route.transient.instance count < CAP=2), re-dispatch a FRESH developer loop — WITHOUT consuming the convergence attempt budget. A flaky endpoint must not exhaust a task's convergence budget: on_enter appends task.transient.instance (the SEPARATE transient counter), NOT task.attempt.instance, so route.attempt.instance (the budget count) is unchanged. If the retried loop then succeeds → advance (06a); if it fails GENUINELY → the convergence routes (06c/06d) take over on the untouched budget; if it fails transiently again → the transient count rises toward the cap (06g parks).\n\n★ WHY THE CLASSIFICATION IS IN THE MIRROR, NOT A RULE: the engine executes each rule action as its OWN graph mutation (one KV revision per add_triple) and evaluates per debounce-flush against freshly-fetched state — so a rule-stamped transient collapse lands in a SEPARATE revision from 06b's unclean stamp, and 06c's exclusion RACES it (the double-dispatch caught live by TestBridgeProofTransientGraceRetries). Route mutual exclusion is only sound as a CONDITION PARTITION over one atomic snapshot; the mirror's single ReplaceTriples is that snapshot. route.attempt.transient is therefore ALWAYS present (\"true\"/\"false\") wherever any floors-route condition is satisfiable.\n\n⚠ SERIALIZATION INVARIANT: this rule joins dispatch-developer (04), floors-retry (06c), and review-retry (07b) as a SANCTIONED role=developer spawner (pinned — one developer in flight per task). It fires on a TERMINATED loop's terminal and is self-extinguishing, so exactly one developer loop is ever in flight.\n\nTRIGGER = the developer loop L_n: route.attempt.transient eq \"true\" AND route.attempt.unclean eq \"true\" AND route.transient.instance length_lt 2 (required:true — the transient grace cap; a LITERAL, so an absent counter is a valid 0 = the first transient failure, no fail-open) AND route.attempt.routed length_eq 0 (self-extinguish). Mutually exclusive with the transient-park (06g, length_gte 2) on the transient count, and with the convergence routes (06c/06d exclude via route.attempt.transient eq \"false\" — the same atomic flag, opposite value).\n\n★ WHY THE GATE IS unclean, NOT passed=false (route TOTALITY): the mirror stamps passed/rejected/transient INDEPENDENTLY, so the cell passed=true ∧ rejected=true ∧ transient=true is reachable (measured green, a structural floor rejected the artifact, then the loop's final model call died transiently). A passed=false gate leaves that cell UNROUTED — 06a needs rejected=false, 06c/06d are transient-excluded — a permanent silent stall (caught in adversarial review). unclean covers exactly the not-advance region, so 06c ∪ 06d ∪ 06f ∪ 06g ⊇ unclean (the 8-cell totality census pins it). Race-safe: unclean is only the SHARED TRIGGER — a late-landing unclean delays this route a pass; it cannot split the partition, which lives on the ATOMIC mirror flag. A measured-green rejected=false loop still advances via 06a (unclean never stamped).\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe, CRITICAL): on_enter FIRST stamps route.attempt.routed=$entity.instance on L_n, guarded by route.attempt.routed length_eq 0, BEFORE the publish. publish_agent is NOT idempotent — a re-fire would spawn a DUPLICATE developer. A fresh loop per re-dispatch re-arms it.",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "route.attempt.transient", "operator": "eq", "value": "true", "required": false },
+    { "field": "route.attempt.unclean", "operator": "eq", "value": "true", "required": false },
+    { "field": "route.transient.instance", "operator": "length_lt", "value": 2, "required": true },
+    { "field": "route.attempt.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.attempt.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "task.transient.instance",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.developer",
+      "role": "developer",
+      "model": "developer",
+      "tools": ["query_entity", "read_workspace", "apply_patch", "measure_task", "ask_human"],
+      "tool_choice": { "mode": "auto" },
+      "related_loops": {
+        "run-loop-entity-id": "$entity.triple.agent.run.entity-id"
+      },
+      "properties": {
+        "phase": "develop"
+      },
+      "prompt": "SEMDEV DEVELOPER (Amelia) — your previous attempt on this run's task was interrupted by a TRANSIENT infrastructure error (the model or a tool endpoint failed), NOT by a problem with your work. There is nothing to fix from that interruption — just proceed with the task.\n\nYour run entity ID is $entity.triple.agent.run.entity-id. Read the task contract and any prior recorded measurement/floor findings with query_entity(entity_id=\"$entity.triple.agent.run.entity-id\"); read the files with read_workspace. Author (or continue) the fix touching only task.spec.target-files with apply_patch, then measure_task(task_index=0). Iterate until the test passes, then stop. You author the fix; the harness measures it and you never claim the outcome (G3)."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "route",
+    "station": "transient retry — transient failure + grace remains → re-dispatch Amelia free of the convergence budget (adopt-reason-aware-escalate)",
+    "serialization_invariant": "this rule + dispatch-developer (04) + floors-retry (06c) + review-retry (07b) are the ONLY sanctioned role=developer spawners (pinned) — one developer in flight per task.",
+    "transient_flag": "route.attempt.transient is the check_floors MIRROR classification (always \"true\"/\"false\", atomic with route.attempt.passed in one ReplaceTriples) — NOT a rule-stamped collapse; a rule-stamped sibling lands in a separate KV revision and the convergence routes race it (the pinned double-dispatch).",
+    "transient_budget": "route.transient.instance length_lt 2 (a LITERAL cap, so absent = 0 = first transient failure, no fail-open). Partitions the transient count with 06g's length_gte 2 (no gap, no overlap).",
+    "not_budget": "on_enter appends task.transient.instance (NOT task.attempt.instance) — a transient re-dispatch does NOT consume the convergence budget.",
+    "restart_safe": "SELF-EXTINGUISHING via route.attempt.routed (shared, LOOP-scoped) stamped BEFORE the publish — CRITICAL (publish_agent is not idempotent)."
+  }
+}

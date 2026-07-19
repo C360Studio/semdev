@@ -23,13 +23,18 @@ non-convergence — the routing upgrade `adopt-per-task-routing-budgets` deferre
 - New fact `task.transient.instance` (a run-side transient-retry counter, writer
   `dev-dispatch-rule`, appended once per transient re-dispatch) mirrored onto the developer
   loop as `route.transient.instance` (writer `route-mirror`, like `route.attempt.instance`);
-  and a new intermediate `route.attempt.transient` (the reason OR-collapse — model_error OR
-  handler_error, writer `dev-route-rule`). All named in the spec delta.
-- New developer-loop route rules: a transient-retry (`route.attempt.transient` true AND
-  `route.transient.instance length_lt CAP`) and a transient-exhausted park (`length_gte
-  CAP`, reusing #568). The convergence retry/escalate routes gain a
-  `route.attempt.transient length_eq 0` exclusion guard (so a transient terminal cannot fire
-  them — clean mutual exclusion) and the escalate/park routes gain the reason-aware message.
+  and the transient flag `route.attempt.transient` — check_floors' ATOMIC-MIRROR
+  classification of the loop's terminal reason (model_error/handler_error → "true", else
+  "false", ALWAYS stamped in the same ReplaceTriples as `route.attempt.passed`; writer
+  `route-mirror`). All named in the spec delta. (A rule-stamped OR-collapse was the first
+  cut; the docker journey caught it double-dispatching — each rule action is its own KV
+  revision, so a sibling rule's exclusion races it. See design facts 5+6.)
+- New developer-loop route rules: a transient-retry (`route.attempt.transient` eq "true" AND
+  `route.attempt.passed` eq "false" AND `route.transient.instance length_lt CAP`) and a
+  transient-exhausted park (`length_gte CAP`, reusing #568). The convergence retry/escalate
+  routes gain a `route.attempt.transient eq "false"` exclusion (a condition PARTITION over
+  the atomic mirror snapshot — a transient terminal provably cannot fire them) and the
+  escalate/park routes gain the reason-aware message.
   The convergence partition (`length_lt B` / `length_gte B`) is otherwise unchanged.
 
 Scope: the DEVELOPER loop (06-series). Quinn's review loop transient failures stay covered

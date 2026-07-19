@@ -44,6 +44,21 @@ behavior-benign, tracked upstream. Zero paid tokens; zero
 predicate/entity-contract rejections under beta.150's fail-closed graph-write
 gate.
 
+Post-claim addendum (beta.153): #566 landed, the caveat above is historical —
+the whole suite runs **with `-race`** green. The journey roster has since grown
+(same kind vocabulary, all mock + fixture-seeded, zero paid tokens): the
+per-task-budget journeys (`TestBridgeProofBudgetOneEscalatesOnFirstRed`,
+budget-boundary escalate; the exhaustion journey re-keyed to the authored
+budget) and the reason-aware transient pair
+(`TestBridgeProofTransientGraceRetries` — a real `model_error` terminal gets
+bounded grace outside the convergence budget then delivers;
+`TestBridgeProofTransientCapParks` — three transient deaths exhaust the grace
+cap and park naming the substituted reason). The grace journey is additionally
+the RED-FIRST docker pin for the rule-engine double-dispatch race
+(adopt-reason-aware-escalate): it failed ~50% of `-race` runs against the
+first-cut rule-stamped classification and is the live falsifier the shipped
+atomic-mirror mechanism was built against.
+
 Non-claims carried with this rung (brief §Non-claims): no real-LLM evidence, no
 arbitrary-repo generality, no unattended-operation claim (operator-authority
 park is the posture), no parallel execution.

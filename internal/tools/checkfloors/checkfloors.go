@@ -31,6 +31,7 @@ import (
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 )
 
 // Source is stamped on every floor.finding triple. It MUST equal the writer declared for
@@ -68,7 +69,48 @@ const (
 	// ReplaceTriples pass as route.attempt.* (the D7 atomicity invariant — the routes never
 	// see the attempt count without the budget).
 	RouteBudgetPredicate = "route.task.budget"
+	// RouteTransientPredicate is the MULTI-VALUED mirror of the run's task.transient.instance
+	// counter (adopt-reason-aware-escalate, #529/#569): the transient-retry/park routes count it
+	// via length_lt/length_gte against a LITERAL cap. Like route.attempt.instance, the complete
+	// current set is mirrored each pass. An absent mirror is a valid count 0 (array op over an
+	// empty set), so — unlike the substituted budget — there is NO fail-open wedge and no D7 fault.
+	RouteTransientPredicate = "route.transient.instance"
+	// RouteTransientFlagPredicate is the SINGLE-VALUED transient classification of the loop's
+	// terminal (adopt-reason-aware-escalate): "true" iff the loop's harness-stamped
+	// agent.loop.terminal-reason is in the transient set (model_error/handler_error), else
+	// "false" — ALWAYS stamped, and stamped in the SAME ReplaceTriples pass as
+	// route.attempt.passed (the D7 atomicity invariant). The transient-retry/park routes fire
+	// on eq "true"; the convergence retry/escalate routes exclude on eq "false".
+	//
+	// This classification lives HERE, not in a rule, by G1's escape clause — PROVEN necessary:
+	// the engine executes each rule action as its OWN graph mutation (one KV revision per
+	// add_triple, processor/rule/triple_mutator.go) and evaluates rules per debounce-flush
+	// against freshly-fetched state, so a rule-stamped collapse (the route.attempt.unclean
+	// pattern) lands in a SEPARATE revision from its same-pass siblings. A convergence route
+	// excluding on that rule-stamped triple races it — the double-dispatch caught live by
+	// TestBridgeProofTransientGraceRetries. Mutual exclusion between routes is only sound as a
+	// CONDITION PARTITION over one atomic snapshot, and the atomic snapshot primitive is this
+	// mirror's single ReplaceTriples. The classification is a fixed normalization of a
+	// harness-stamped fact (no LLM input, G3; no lifecycle transition — the routes still
+	// decide, G2), exactly the fail-closed posture route.attempt.passed already takes.
+	RouteTransientFlagPredicate = "route.attempt.transient"
 )
+
+// transientReasons is the fixed set of agent.loop.terminal-reason values classified as
+// TRANSIENT (an infrastructure interruption, not a property of the attempt's work): the
+// model endpoint erroring (model_error) or a tool/handler fault (handler_error). The other
+// documented reasons (max_iterations, graph_state_reset_required — vocabulary/agentic
+// register.go) are genuine terminals the convergence budget must absorb. Kept in lockstep
+// with the transient-route rule prose; a conformance pin asserts the flag is stamped.
+var transientReasons = map[string]bool{
+	"model_error":   true,
+	"handler_error": true,
+}
+
+// transientPredicate is the run's TRANSIENT-retry counter (task.transient.instance), appended
+// by the transient-retry route. Read shape identical to the task.attempt.instance read; the
+// mirror copies its distinct objects onto L_n so the transient routes count the grace.
+const transientPredicate = "task.transient.instance"
 
 // budgetPredicate is the run's projected per-task attempt budget (task.spec.budget,
 // writer task-projector, clamped [1,5]). Composed from the SAME devtask consts the projector
@@ -157,13 +199,30 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 	if err != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: read task.spec.budget for the route mirror on %s: %w", runEntityID, err)
 	}
-	mirror := routeMirrorTriples(routeLoopEntityID, taskIndex, passed, rejected, budget, attemptObjs, time.Now().UTC())
-	// ReplaceTriples → MergeTriples FULL-SET-REPLACES per predicate: route.passed/rejected
-	// and route.task.budget (single-valued) are replaced, and route.attempt.<i> is set to the
-	// COMPLETE current attempt set (all N objects) — writing only the newest would DROP the
-	// prior ones. route.task.budget rides the SAME pass as route.attempt.* (D7 atomicity).
+	// The TRANSIENT-retry counter (adopt-reason-aware-escalate). An absent counter is a valid 0
+	// (the first transient failure), so a read fault is the only error worth surfacing — an empty
+	// set is normal and mirrors nothing (no fail-open, so no D7 fault like the budget).
+	transientObjs, err := readTransientObjects(ctx, reader, runEntityID)
+	if err != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: read task.transient for the route mirror on %s: %w", runEntityID, err)
+	}
+	// The loop's harness-stamped terminal reason (read from L_n, NOT the run — the loop
+	// entity is where WriteLoopFailure stamps it, atomically with the outcome that
+	// triggered the floors dispatch, so it is always readable by now). Absent is the
+	// normal completed-loop case → classified NOT transient.
+	reason, err := readTerminalReason(ctx, reader, routeLoopEntityID)
+	if err != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: read the loop terminal reason for the route mirror on %s: %w", routeLoopEntityID, err)
+	}
+	mirror := routeMirrorTriples(routeLoopEntityID, taskIndex, passed, rejected, budget, transientReasons[reason], attemptObjs, transientObjs, time.Now().UTC())
+	// ReplaceTriples → MergeTriples FULL-SET-REPLACES per predicate: route.passed/rejected,
+	// route.task.budget, and route.attempt.transient (single-valued) are replaced, and
+	// route.attempt.<i> is set to the COMPLETE current attempt set (all N objects) — writing
+	// only the newest would DROP the prior ones. The budget AND the transient flag ride the
+	// SAME pass as route.attempt.* (D7 atomicity — the routes never see the count without
+	// the budget, and never see unclean's inputs without the transient classification).
 	// Idempotent on a retry (the same complete set replaces itself).
-	if merr := writer.ReplaceTriples(ctx, routeLoopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate, RouteBudgetPredicate}); merr != nil {
+	if merr := writer.ReplaceTriples(ctx, routeLoopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate, RouteBudgetPredicate, RouteTransientFlagPredicate}); merr != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: stamp the route mirror on %s: %w", routeLoopEntityID, merr)
 	}
 	return FloorResult{Rejected: rejected, Findings: findings, AttemptID: attemptID}, nil
@@ -287,7 +346,7 @@ func attemptPredicate(idx int) string { _ = idx; return "task.attempt.instance" 
 // via length_*). All carry RouteMirrorSource (the single logical writer route-mirror, shared
 // with submit_review) so neither the floor facts nor the measurement facts gain a second
 // writer (G5). budget is the RAW authored task.spec.budget string (never re-rendered).
-func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bool, budget string, attempts []string, now time.Time) []message.Triple {
+func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bool, budget string, transient bool, attempts, transients []string, now time.Time) []message.Triple {
 	mk := func(pred, obj string) message.Triple {
 		return message.Triple{Subject: loopEntityID, Predicate: pred, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0}
 	}
@@ -296,11 +355,60 @@ func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bo
 		mk(RoutePassedPredicate, passed),
 		mk(RouteRejectedPredicate, strconv.FormatBool(rejected)),
 		mk(RouteBudgetPredicate, budget),
+		// The transient classification of THIS loop's terminal — always present, so the
+		// convergence routes' eq "false" exclusion never reads an absent field (see
+		// RouteTransientFlagPredicate for why this cannot be a rule-stamped collapse).
+		mk(RouteTransientFlagPredicate, strconv.FormatBool(transient)),
 	}
 	for _, obj := range attempts {
 		out = append(out, mk(RouteAttemptPredicate, obj))
 	}
+	// The transient-retry mirror (adopt-reason-aware-escalate). Empty on the common path (no
+	// transient failures yet) → nothing appended → an absent mirror the transient routes read as 0.
+	for _, obj := range transients {
+		out = append(out, mk(RouteTransientPredicate, obj))
+	}
 	return out
+}
+
+// readTerminalReason reads the LOOP entity's agent.loop.terminal-reason — the classified
+// failure reason the agentic-loop graph writer stamps atomically with the outcome
+// (semstreams #569, buildLoopFailureTriples). Returns "" (no error) when absent: a
+// successfully completed loop stamps no reason, and "" classifies NOT transient.
+func readTerminalReason(ctx context.Context, reader changefacts.Reader, loopEntityID string) (string, error) {
+	triples, err := reader.ReadFacts(ctx, loopEntityID, agvocab.LoopTerminalReason)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate != agvocab.LoopTerminalReason {
+			continue
+		}
+		if s, ok := tr.Object.(string); ok {
+			return s, nil
+		}
+	}
+	return "", nil
+}
+
+// readTransientObjects reads the distinct objects of the run's task.transient.instance counter
+// (one per transient re-dispatch) so the mirror can append them onto L_n and the transient-retry
+// route counts the grace via length_*. Identical read shape to readAttemptObjects.
+func readTransientObjects(ctx context.Context, reader changefacts.Reader, runEntityID string) ([]string, error) {
+	triples, err := reader.ReadFacts(ctx, runEntityID, transientPredicate)
+	if err != nil {
+		return nil, err
+	}
+	var objs []string
+	for _, tr := range triples {
+		if tr.Predicate != transientPredicate {
+			continue
+		}
+		if s, ok := tr.Object.(string); ok {
+			objs = append(objs, s)
+		}
+	}
+	return objs, nil
 }
 
 // readTaskBudget reads the run's projected per-task attempt budget (task.spec.budget) as a

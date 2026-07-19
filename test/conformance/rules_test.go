@@ -45,6 +45,18 @@ func (r ruleFile) hasTriple(predicate string) bool {
 	return false
 }
 
+// stampObjectContains reports whether the rule has an add_triple for the given predicate whose
+// Object contains substr — used to assert a substituted token (e.g. a .value reason) is carried
+// in a stamped fact's object.
+func (r ruleFile) stampObjectContains(predicate, substr string) bool {
+	for _, a := range r.OnEnter {
+		if a.Type == "add_triple" && a.Predicate == predicate && strings.Contains(a.Object, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // markerBeforePublish reports whether the fired-once marker add_triple precedes the
 // FIRST publish_agent in on_enter — the SB7 restart-safety ordering: the marker must
 // be stamped BEFORE the (non-idempotent) spawn so a publish failure leaves the run
@@ -644,6 +656,15 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" || c.Value != budgetToken {
 		t.Errorf("retry must require route.attempt.instance length_lt %s (the PER-TASK budget mirror, #519/#568 — not the old constant 3), got %+v", budgetToken, c)
 	}
+	// The transient exclusion (adopt-reason-aware-escalate): a TRANSIENT loop failure is diverted
+	// to the transient-retry route (06f) and must NOT fire the convergence retry. The exclusion
+	// MUST be eq "false" against check_floors' ALWAYS-STAMPED atomic mirror flag — NOT an absence
+	// guard against a rule-stamped collapse: a sibling rule's stamp lands in its own KV revision,
+	// so an absence exclusion reads a pass where unclean is visible but the stamp is not and
+	// double-dispatches (06c + 06f — the race TestBridgeProofTransientGraceRetries caught live).
+	if c, ok := ret.condition("route.attempt.transient"); !ok || c.Operator != "eq" || c.Value != "false" {
+		t.Errorf("retry must exclude a transient failure with route.attempt.transient eq \"false\" (the atomic mirror flag — an absence guard against a rule-stamped collapse races and double-dispatches), got %+v", c)
+	}
 	if !ret.hasAbsenceGuard(marker) || !ret.markerBeforePublish(marker) || !ret.hasTriple("task.attempt.instance") {
 		t.Error("retry must be self-extinguishing (route.routed before the developer publish) and append task.attempt.0 at spawn (R3)")
 	}
@@ -658,8 +679,16 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := esc.condition("route.attempt.instance"); !ok || c.Operator != "length_gte" || c.Value != budgetToken {
 		t.Errorf("escalate must require route.attempt.instance length_gte %s (fail-closed: count ≥ B catches an over-count, and partitions the count with retry's length_lt B — #519/#568, replaces the old length_gt 2), got %+v", budgetToken, c)
 	}
+	if c, ok := esc.condition("route.attempt.transient"); !ok || c.Operator != "eq" || c.Value != "false" {
+		t.Errorf("escalate must exclude a transient failure with route.attempt.transient eq \"false\" (the atomic mirror flag; a transient loop failure parks via 06g, not the convergence escalate), got %+v", c)
+	}
 	if !esc.hasTriple("run.awaiting.human") || esc.firesTransition() {
 		t.Error("escalate must park (run.awaiting_human) with NO lifecycle transition (G2)")
+	}
+	// Reason-aware park (adopt-reason-aware-escalate, #569): the escalate's run.awaiting.human
+	// object carries the loop's classified terminal reason via the .value substitution.
+	if !esc.stampObjectContains("run.awaiting.human", "agent.loop.terminal-reason.value") {
+		t.Error("escalate must carry the classified terminal reason in its run.awaiting.human message ($entity.triple.agent.loop.terminal-reason.value) — the reason-aware park (#569)")
 	}
 	// The partition now uses the PER-TASK budget substitution, not literals: retry length_lt B,
 	// escalate length_gte B against the SAME route.task.budget.value token → {0..B-1} ∪ {B..}
@@ -670,6 +699,220 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	escC, _ := esc.condition("route.attempt.instance")
 	if retC.Value != budgetToken || escC.Value != budgetToken {
 		t.Errorf("retry (%v) and escalate (%v) must both compare against the SAME budget token %s — a divergent boundary reintroduces a gap/overlap", retC.Value, escC.Value, budgetToken)
+	}
+}
+
+// The TRANSIENT ROUTE (dev-from-task/06f-06g, adopt-reason-aware-escalate #529/#569): a developer
+// loop that FAILED for a transient reason (agent.loop.terminal-reason model_error/handler_error)
+// gets bounded grace OUTSIDE the convergence budget.
+//   - route.attempt.transient is check_floors' ATOMIC-MIRROR classification of the loop's
+//     terminal reason — ALWAYS stamped "true"/"false" in the SAME ReplaceTriples as
+//     route.attempt.passed. NO RULE may stamp it: the engine writes each rule action as its own
+//     KV revision and evaluates per debounce-flush, so a rule-stamped collapse races the
+//     convergence routes' exclusion (the double-dispatch TestBridgeProofTransientGraceRetries
+//     caught live on docker). Route mutual exclusion must be a condition PARTITION over the one
+//     atomic snapshot: transient eq "true" (06f/06g) vs eq "false" (06c/06d).
+//   - 06f transient-retry: transient=true AND passed=false AND route.transient.instance
+//     length_lt CAP → re-dispatch Amelia appending task.transient.instance (NOT
+//     task.attempt.instance — budget untouched).
+//   - 06g transient-park: transient=true AND passed=false AND route.transient.instance
+//     length_gte CAP → park (reason-aware). length_lt CAP / length_gte CAP partition the
+//     transient count with no gap. Red-first.
+func TestTransientRouteTotalityAndSelfExtinguish(t *testing.T) {
+	rules := runLifecycleRules(t)
+	const marker = "route.attempt.routed"
+
+	// NO rule stamps route.attempt.transient — it is the check_floors mirror's fact (G5 writer
+	// route-mirror). A rule stamping it re-creates the racy collapse: its stamp lands in its own
+	// KV revision, and any exclusion reading it double-dispatches against the stamping pass.
+	for id, r := range rules {
+		if r.hasTriple("route.attempt.transient") {
+			t.Errorf("rule %q stamps route.attempt.transient — the transient flag is check_floors' ATOMIC mirror fact (G5: route-mirror); a rule-stamped sibling lands in a separate KV revision and races every exclusion that reads it (the pinned double-dispatch)", id)
+		}
+	}
+
+	// 06f transient-retry: bounded by the transient cap, re-dispatches a developer WITHOUT
+	// consuming the convergence budget (appends task.transient.instance, NOT task.attempt.instance).
+	ret, ok := rules["dev_from_task_route_transient_retry"]
+	if !ok {
+		t.Fatal("missing dev_from_task_route_transient_retry rule (06f)")
+	}
+	if c, ok := ret.condition("route.attempt.transient"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("transient-retry must fire on route.attempt.transient eq true (the atomic mirror flag), got %+v", c)
+	}
+	// The shared trigger is UNCLEAN, not passed=false: the mirror stamps passed/rejected/
+	// transient independently, so passed=true ∧ rejected=true ∧ transient=true is reachable
+	// (measured green, floor rejected, final model call died transiently) — a passed=false
+	// gate leaves that cell UNROUTED (06a needs rejected=false; 06c/06d are transient-
+	// excluded) = a permanent silent stall. The 8-cell census below proves totality.
+	if c, ok := ret.condition("route.attempt.unclean"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("transient-retry must gate on route.attempt.unclean eq true (a passed=false gate strands the passed∧rejected∧transient cell; a measured-green rejected=false loop still advances via 06a because unclean is never stamped), got %+v", c)
+	}
+	if !ret.hasAbsenceGuard(marker) {
+		t.Error("transient-retry must self-extinguish via route.attempt.routed length_eq 0")
+	}
+	retC, ok := ret.condition("route.transient.instance")
+	if !ok || retC.Operator != "length_lt" {
+		t.Errorf("transient-retry must require route.transient.instance length_lt <cap>, got %+v", retC)
+	}
+	if !ret.markerBeforePublish(marker) || !ret.hasTriple("task.transient.instance") {
+		t.Error("transient-retry must self-extinguish before the developer publish and append task.transient.instance at spawn")
+	}
+	if ret.hasTriple("task.attempt.instance") {
+		t.Error("transient-retry must NOT append task.attempt.instance — a transient re-dispatch does not consume the convergence budget")
+	}
+	spawnsDev := false
+	for _, a := range ret.OnEnter {
+		if a.Type == "publish_agent" && a.Role == "developer" {
+			spawnsDev = true
+		}
+	}
+	if !spawnsDev {
+		t.Error("transient-retry must spawn a fresh role=developer loop")
+	}
+
+	// 06g transient-park: cap reached → park, reason-aware, no transition.
+	park, ok := rules["dev_from_task_route_transient_park"]
+	if !ok {
+		t.Fatal("missing dev_from_task_route_transient_park rule (06g)")
+	}
+	if c, ok := park.condition("route.attempt.transient"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("transient-park must fire on route.attempt.transient eq true (the atomic mirror flag), got %+v", c)
+	}
+	if c, ok := park.condition("route.attempt.unclean"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Errorf("transient-park must gate on route.attempt.unclean eq true (the shared not-clean trigger — see the retry's totality rationale), got %+v", c)
+	}
+	parkC, ok := park.condition("route.transient.instance")
+	if !ok || parkC.Operator != "length_gte" {
+		t.Errorf("transient-park must fire on route.transient.instance length_gte <cap> (exhausted), got %+v", parkC)
+	}
+	if !park.hasTriple("run.awaiting.human") || park.firesTransition() {
+		t.Error("transient-park must park (run.awaiting_human) with NO lifecycle transition (G2)")
+	}
+	if !park.stampObjectContains("run.awaiting.human", "agent.loop.terminal-reason.value") {
+		t.Error("transient-park must carry the transient terminal reason in its run.awaiting.human message (#569)")
+	}
+	if !park.hasAbsenceGuard(marker) {
+		t.Error("transient-park must self-extinguish via route.attempt.routed length_eq 0")
+	}
+	// The transient partition: retry length_lt CAP, park length_gte CAP against the SAME literal cap
+	// → {0..CAP-1} ∪ {CAP..} covers every transient count with no gap and no overlap. The type
+	// assertions must SUCCEED: if the caps drifted to strings (or a substitution token), both
+	// would coerce to 0 and the equality would pass vacuously while the boundary fails open.
+	rc, rok := retC.Value.(float64)
+	pc, pok := parkC.Value.(float64)
+	if !rok || !pok {
+		t.Fatalf("transient caps must be numeric LITERALS (retry %T=%v, park %T=%v) — a string or substitution token coerces to the engine's fail-open empty case", retC.Value, retC.Value, parkC.Value, parkC.Value)
+	}
+	if rc != pc {
+		t.Errorf("transient retry length_lt %v and park length_gte %v must use the SAME cap — a divergent boundary reintroduces a gap/overlap", retC.Value, parkC.Value)
+	}
+}
+
+// THE FLOORS-ROUTE CELL-TOTALITY CENSUS (adopt-reason-aware-escalate — the offline red-first
+// pin for the UNROUTED-CELL defect class). The mirror stamps passed/rejected/transient
+// INDEPENDENTLY, so all 8 boolean cells are reachable — including passed=true ∧ rejected=true ∧
+// transient=true (measured green, a structural floor rejected the artifact, then the loop's
+// final model call died transiently), the cell adversarial review caught UNROUTED when the
+// transient routes gated on passed=false: no route fires, no park, and the rail has no backstop
+// (B7) — a permanent silent stall. This census derives route.attempt.unclean exactly as the
+// 06b/06e OR-collapse stamps it, then statically evaluates every terminal route's conditions
+// with the engine's semantics (eq on an absent field → false; length_* over seeded counts;
+// required does not change matching, only error loudness) across each count regime, asserting
+// EXACTLY ONE route owns every cell — zero is a stall, two is a double dispatch.
+func TestFloorsRouteCellTotalityCensus(t *testing.T) {
+	rules := runLifecycleRules(t)
+	routeIDs := []string{
+		"dev_from_task_route_advance",         // 06a
+		"dev_from_task_route_retry",           // 06c
+		"dev_from_task_route_escalate",        // 06d
+		"dev_from_task_route_transient_retry", // 06f
+		"dev_from_task_route_transient_park",  // 06g
+	}
+	const budget = 3
+	// evalCond mirrors the engine: scalar eq compares the seeded string (absent → false);
+	// length_lt/length_gte/length_eq count the seeded multiset (absent → 0); the budget
+	// substitution token resolves to the seeded route.task.budget.
+	evalCond := func(c ruleCondition, scalars map[string]string, counts map[string]int) bool {
+		switch c.Operator {
+		case "eq":
+			v, present := scalars[c.Field]
+			want, _ := c.Value.(string)
+			return present && v == want
+		case "length_eq", "length_lt", "length_gte":
+			n := counts[c.Field]
+			var boundary int
+			switch v := c.Value.(type) {
+			case float64:
+				boundary = int(v)
+			case string:
+				if v != "$entity.triple.route.task.budget.value" {
+					t.Fatalf("census: unexpected substitution token %q in %s %s", v, c.Field, c.Operator)
+				}
+				boundary = budget
+			default:
+				t.Fatalf("census: unexpected condition value %T for %s", c.Value, c.Field)
+			}
+			switch c.Operator {
+			case "length_eq":
+				return n == boundary
+			case "length_lt":
+				return n < boundary
+			default:
+				return n >= boundary
+			}
+		default:
+			t.Fatalf("census: route condition uses unmodeled operator %q on %s — extend the census", c.Operator, c.Field)
+			return false
+		}
+	}
+	for _, passed := range []string{"true", "false"} {
+		for _, rejected := range []string{"true", "false"} {
+			for _, transient := range []string{"true", "false"} {
+				for _, attempts := range []int{1, budget} { // within-budget vs exhausted
+					for _, transients := range []int{0, 2} { // grace remains vs cap reached
+						scalars := map[string]string{
+							"route.attempt.passed":    passed,
+							"route.attempt.rejected":  rejected,
+							"route.attempt.transient": transient,
+						}
+						// The 06b/06e OR-collapse: unclean stamped iff not-clean; absent otherwise.
+						if passed == "false" || rejected == "true" {
+							scalars["route.attempt.unclean"] = "true"
+						}
+						counts := map[string]int{
+							"route.attempt.instance":   attempts,
+							"route.transient.instance": transients,
+							"route.attempt.routed":     0, // fresh loop, not yet routed
+						}
+						var fired []string
+						for _, id := range routeIDs {
+							r, ok := rules[id]
+							if !ok {
+								t.Fatalf("census: missing route rule %s", id)
+							}
+							if r.Logic == "or" {
+								t.Fatalf("census: %s is logic:or — the census models pure-AND routes", id)
+							}
+							all := true
+							for _, c := range r.Conditions {
+								if !evalCond(c, scalars, counts) {
+									all = false
+									break
+								}
+							}
+							if all {
+								fired = append(fired, id)
+							}
+						}
+						if len(fired) != 1 {
+							t.Errorf("cell passed=%s rejected=%s transient=%s attempts=%d transients=%d: %d routes fire (%v) — every cell must be owned by EXACTLY ONE route (zero = permanent silent stall, no backstop by design; two = double dispatch breaking one-in-flight)",
+								passed, rejected, transient, attempts, transients, len(fired), fired)
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -866,9 +1109,10 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 		t.Fatalf("load rules: %v", err)
 	}
 	sanctioned := map[string]bool{
-		"dev_from_task_dispatch_developer": true, // 04 — the initial dispatch
-		"dev_from_task_route_retry":        true, // 06c — the floors-route retry
-		"dev_from_task_review_retry":       true, // 07b — the review-route retry (D16)
+		"dev_from_task_dispatch_developer":    true, // 04 — the initial dispatch
+		"dev_from_task_route_retry":           true, // 06c — the floors-route retry
+		"dev_from_task_review_retry":          true, // 07b — the review-route retry (D16)
+		"dev_from_task_route_transient_retry": true, // 06f — the transient-retry route (adopt-reason-aware-escalate)
 	}
 	var spawners []string
 	for _, r := range rules {
@@ -878,7 +1122,7 @@ func TestOnlySanctionedDeveloperSpawners(t *testing.T) {
 			}
 			spawners = append(spawners, r.ID)
 			if !sanctioned[r.ID] {
-				t.Errorf("rule %q spawns a developer loop (role=%q subject=%q) but is not a sanctioned spawner — the one-developer-in-flight serialization invariant permits ONLY dispatch-developer (04), the floors-retry route (06c), and the review-retry route (07b)", r.ID, a.Role, a.Subject)
+				t.Errorf("rule %q spawns a developer loop (role=%q subject=%q) but is not a sanctioned spawner — the one-developer-in-flight serialization invariant permits ONLY dispatch-developer (04), the floors-retry route (06c), the review-retry route (07b), and the transient-retry route (06f)", r.ID, a.Role, a.Subject)
 			}
 		}
 	}
@@ -978,12 +1222,13 @@ func TestOnlySanctionedParkWriters(t *testing.T) {
 		t.Fatalf("load rules: %v", err)
 	}
 	sanctioned := map[string]bool{
-		"run_park_awaiting_human":         true, // run-lifecycle/03 — a coordinator ask_human decision
-		"sandbox_park_unprovable":         true, // sandbox/02 — an unprovable sandbox
-		"dev_from_task_route_escalate":    true, // 06d — the dev-loop budget exhausted
-		"dev_from_task_review_park":       true, // 07c — the review budget exhausted
-		"dev_from_task_review_no_verdict": true, // 07d — the reviewer produced no verdict
-		"dev_from_task_delivery_park":     true, // 08b — the delivery signals do not cohere
+		"run_park_awaiting_human":            true, // run-lifecycle/03 — a coordinator ask_human decision
+		"sandbox_park_unprovable":            true, // sandbox/02 — an unprovable sandbox
+		"dev_from_task_route_escalate":       true, // 06d — the dev-loop budget exhausted
+		"dev_from_task_review_park":          true, // 07c — the review budget exhausted
+		"dev_from_task_review_no_verdict":    true, // 07d — the reviewer produced no verdict
+		"dev_from_task_delivery_park":        true, // 08b — the delivery signals do not cohere
+		"dev_from_task_route_transient_park": true, // 06g — the transient-retry cap reached (adopt-reason-aware-escalate)
 	}
 	var writers []string
 	for _, r := range rules {
@@ -1317,6 +1562,43 @@ func TestRulesFilesResolve(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(configDir, rel)); err != nil {
 			t.Errorf("rules_files entry %q does not resolve relative to the config dir: %v", rel, err)
 		}
+	}
+}
+
+// The REVERSE census: every rule file on disk is LISTED in the bootstrap rules_files.
+// A file-on-disk the runtime never loads passes every conformance census green (loadRules
+// walks the disk) while the rule silently never fires — exactly how the transient routes
+// sat inert mid-WIP until configs/semdev-bootstrap.json gained their entries
+// (adopt-reason-aware-escalate). The offline pin for that failure shape.
+func TestEveryRuleFileIsBootstrapped(t *testing.T) {
+	root := repoRoot(t)
+	cfg, err := loadBootstrap(root)
+	if err != nil {
+		t.Fatalf("load bootstrap: %v", err)
+	}
+	listed := make(map[string]bool)
+	for _, rel := range cfg.Components.Rule.Config.RulesFiles {
+		listed[filepath.ToSlash(rel)] = true
+	}
+	rulesDir := filepath.Join(root, "configs", "rules")
+	err = filepath.WalkDir(rulesDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(filepath.Join(root, "configs"), path)
+		if relErr != nil {
+			return relErr
+		}
+		if !listed[filepath.ToSlash(rel)] {
+			t.Errorf("rule file %q exists on disk but is NOT in the bootstrap rules_files — the runtime never loads it, so the rule silently never fires while every disk-walking census stays green (add it to configs/semdev-bootstrap.json, or delete the file)", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk configs/rules: %v", err)
 	}
 }
 
