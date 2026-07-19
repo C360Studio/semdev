@@ -135,10 +135,10 @@ func (c *Client) Query(ctx context.Context, route, query string) ([]byte, error)
 }
 
 func truncate(b []byte) string {
-	const max = 512
-	if len(b) <= max {
+	const limit = 512
+	if len(b) <= limit {
 		return string(b)
 	}
 	// Cut on a rune boundary so an error message never carries mojibake.
-	return strings.ToValidUTF8(string(b[:max]), "") + "…"
+	return strings.ToValidUTF8(string(b[:limit]), "") + "…"
 }
