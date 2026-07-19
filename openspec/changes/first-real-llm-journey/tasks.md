@@ -31,7 +31,7 @@
 
 ## 5. The paid run itself (operator-gated — blocked on GEMINI_API_KEY in the launch shell)
 
-- [ ] 5.1 Operator exports `GEMINI_API_KEY`; `task realllm:probe` passes (one forced ping tool call against the real endpoint)
+- [ ] 5.1 Operator puts `GEMINI_API_KEY` in the gitignored `.env` (`cp .env.example .env`; the Taskfile dotenv-loads it — plumbing proven with a dummy key reaching curl); `task realllm:probe` passes (one forced ping tool call against the real endpoint)
 - [ ] 5.2 First paid run: `task realllm:launch` (wraps the LOAD-BEARING `-count=1 -timeout 80m` — go test's default 10m would panic-kill the paid run mid-arc — plus the NATS reset and the log tee) with `task realllm:status` armed in a second shell and abort criteria in hand
 - [ ] 5.3 Ledger entry (kind `real-llm`) with cost + sidecar records; M1 rung claimed ONLY on that named evidence (G7)
 
@@ -40,3 +40,4 @@
 - [x] 6.1 Swap the journey to the framework's first-class Gemini route (provider `gemini` + `wire_backend: wire`, `GEMINI_API_KEY`, `gemini-3.1-pro-preview`, prices 2.00/12.00 per 1M) copying `configs/gemini-example.json` from the beta.153 module — the Anthropic-compat route stays documented as the verified alternative
 - [x] 6.2 Operator lane in the Taskfile (house convention): `realllm:probe` / `realllm:launch` / `realllm:status`; runbook §2/§4/§5 reference the tasks
 - [x] 6.3 Gates re-proven after the swap: vet + gate-path tests (skip / malformed / keyless) + `task check`
+- [x] 6.4 Secrets lane: gitignored `.env` dotenv-loaded by the Taskfile (semspec-proven pattern; `.env.example` committed; `.gitignore` already covered `.env`/`!.env.example`; injection proven end-to-end with a dummy key — precondition passed and the key reached curl, zero cost)

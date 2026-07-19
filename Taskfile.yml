@@ -1,5 +1,10 @@
 version: "3"
 
+# Secrets ride a gitignored .env (cp .env.example .env), loaded here for every
+# task — the semspec-proven pattern. Real env vars still win over .env values,
+# so a shell export overrides the file.
+dotenv: ['.env']
+
 tasks:
   build:
     desc: Build all binaries and packages
@@ -76,7 +81,7 @@ tasks:
       real money. See docs/real-llm-runbook.md §2.
     preconditions:
       - sh: test -n "$GEMINI_API_KEY"
-        msg: "GEMINI_API_KEY is unset — export it in this shell first (runbook §0)."
+        msg: "GEMINI_API_KEY is empty — cp .env.example .env and fill it in (or export it; runbook §0)."
     cmds:
       - >-
         curl -sS https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
@@ -100,7 +105,7 @@ tasks:
     deps: [nats:reset]
     preconditions:
       - sh: test -n "$GEMINI_API_KEY"
-        msg: "GEMINI_API_KEY is unset — export it in this shell first (runbook §0)."
+        msg: "GEMINI_API_KEY is empty — cp .env.example .env and fill it in (or export it; runbook §0)."
     cmds:
       - >-
         SEMDEV_REAL_LLM=1 go test -tags=e2e -count=1 -timeout 80m

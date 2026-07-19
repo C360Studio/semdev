@@ -11,10 +11,14 @@ evidence the ledger cannot accept (G7).
    `task e2e` (a cached `ok` is not a run — use `go test -race -tags=e2e
    -count=1 ./test/e2e/...` after `task nats:reset` if in doubt). All seven
    bridge-proof journeys pass before the first paid token.
-2. **Key present**: `export GEMINI_API_KEY=...` in the launching shell. The
-   journey reads it via the registry's `api_key_env` — it never appears in a
-   config file. A declared run (`SEMDEV_REAL_LLM=1`) with the key missing
-   FAILS immediately by design; do not "fix" that by weakening the gate.
+2. **Key present**: `cp .env.example .env` and fill in `GEMINI_API_KEY` —
+   the Taskfile loads `.env` for every task (`dotenv`, the semspec-proven
+   pattern; a shell `export` still overrides the file). `.env` is gitignored;
+   the journey reads the key via the registry's `api_key_env` — it never
+   appears in a config file or commit. A declared run (`SEMDEV_REAL_LLM=1`)
+   with the key missing FAILS immediately by design; do not "fix" that by
+   weakening the gate. NOTE: bare `go test` invocations do NOT load `.env` —
+   launch through `task realllm:launch`, or export the key yourself.
 3. **Docker up**, NATS compose reachable (the journey resets it itself).
 4. **Abort criteria written down** (§3) before launch, not improvised after.
 
