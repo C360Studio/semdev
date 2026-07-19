@@ -61,15 +61,19 @@ health/flow-getter data-race fix — bumped as a clean compile+vet with the offl
 #566 tripwire, and 3× green `-race` docker journeys as evidence).
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
-(the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
-rule-native execution rail), and `integrate-semsource-ab-harness` (authored; group 0
-landed, groups 1–11 next in the arc). ARCHIVED (implemented + specs synced):
+(the real sandbox + cold clean-room verify), and `simplify-m0-execution-rail` (the
+rule-native execution rail). ARCHIVED (implemented + specs synced):
 `migrate-semstreams-beta147`, `adopt-per-task-routing-budgets` (#568 per-task attempt
-budgets, shipped `79a884a`), and `adopt-reason-aware-escalate` (#529/#569 transient grace
+budgets, shipped `79a884a`), `adopt-reason-aware-escalate` (#529/#569 transient grace
 via the atomic-mirror classification, shipped `56b30a4` — the rule-engine double-dispatch
-race chased, fixed, and pinned).
+race chased, fixed, and pinned), and `integrate-semsource-ab-harness` (the A/B instrument,
+shipped `da38652`: condition-gated read tools behind a parity-pinned variant pack + a
+fail-closed per-signal launch gate; the semsource-condition plumbing journey proven green
+against a live semsource — both reviewers approve; the M1 real driver must mint via
+`experiment.Launch`).
 `openspec/specs/` now holds the CANONICAL synced capability specs (the stacked
-implemented deltas merged, oldest→newest, INCLUDING routing-budgets + reason-aware); the recorded evidence ledger is `docs/evidence-ledger.md`
+implemented deltas merged, oldest→newest, INCLUDING routing-budgets + reason-aware +
+semsource-ab — now 9 caps); the recorded evidence ledger is `docs/evidence-ledger.md`
 (G7 — M0 claimed on named bridge proof, M1 not claimed).
 The full arc runs against real docker: front door → issue_intake → create_change
 → validate → **human approval** → project task.spec → provision + prove-cold
