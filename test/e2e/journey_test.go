@@ -196,23 +196,6 @@ const journeyFixtureAddressDiff = "--- a/health.go\n" +
 	" \tdefault:\n" +
 	" \t\treturn Healthy\n"
 
-// journeyFixtureAddress2Diff is Amelia's THIRD attempt in the exhaustion journey: another
-// green-keeping comment delta (relative to attempt 2's committed tree) that still cannot satisfy
-// an ever-rejecting reviewer. Distinct from journeyFixtureAddressDiff so it applies cleanly on
-// the chained checkout. Measures GREEN (comment-only); the budget exhausts on the reviewer, not
-// the harness.
-const journeyFixtureAddress2Diff = "--- a/health.go\n" +
-	"+++ b/health.go\n" +
-	"@@ -28,7 +28,7 @@ func Classify(cpu, mem float64) Status {\n" +
-	" \tswitch {\n" +
-	" \tcase pressure >= criticalThreshold:\n" +
-	" \t\treturn Unhealthy\n" +
-	"-\tcase pressure >= warningThreshold: // warning boundary is inclusive by design (reviewed)\n" +
-	"+\tcase pressure >= warningThreshold: // boundary inclusive — re-documented per review\n" +
-	" \t\treturn Degraded\n" +
-	" \tdefault:\n" +
-	" \t\treturn Healthy\n"
-
 // entityStatesBucket is the graph fact-store KV bucket the loop's decide triple
 // lands in (graph-ingest's kv-write output). The journey scans it for the
 // coordinator's decision.
@@ -283,7 +266,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 		},
 		mockllm.Fixture{
 			Marker: journeyIssueRef,
-			Tool:   &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()},
+			Tool:   &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs(3)},
 		},
 		// Validation + projection + provision are publish-triggered COMPONENTS now (R6, group 6):
 		// the validate rule (coordinator/03), the projection rule (dev-from-task/03), and the
@@ -536,7 +519,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 // the cursor (ssmock tryRoleToolCall) — so attempt 1's loop ends on a completion (its 3rd
 // turn's prompt lacks the retry marker) BEFORE the route re-dispatches. Ordering, not luck.
 func TestBridgeProofRetryFailThenPass(t *testing.T) {
-	mock := mockllm.New(append(journeyFrontOfArcFixtures(),
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(3),
 		// Attempt 1 (SEMDEV DEVELOPER dispatch prompt): the WIP diff compiles but leaves the boundary
 		// bug → the in-container measure is RED → floors route not_clean → retry re-dispatch.
 		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureWipDiff}}},
@@ -604,7 +587,7 @@ func TestBridgeProofRetryFailThenPass(t *testing.T) {
 // distinctive "requested changes" substring (parked on the cursor until the re-entry prompt
 // arrives); the checkout chains so attempt 2's addressing diff is a delta on attempt 1's fix.
 func TestBridgeProofReviewRejectionReentry(t *testing.T) {
-	mock := mockllm.New(append(journeyFrontOfArcFixtures(),
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(3),
 		// Attempt 1 (dispatch prompt): the GOOD fix → measure GREEN → floors advance → Quinn reviews.
 		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}}},
 		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
@@ -654,34 +637,35 @@ func TestBridgeProofReviewRejectionReentry(t *testing.T) {
 }
 
 // TestBridgeProofBudgetExhaustionParks drives the BUDGET-EXHAUSTION PARK station (task 10.3,
-// design R10/SB5): when the shared per-task iteration budget (3) is exhausted without the task
-// converging, the run PARKS toward the human — it never ships a PR and never claims a green. Here
-// Quinn rejects THREE times (a finding each), so each attempt re-enters development (07b) until the
-// budget is spent, and the third rejection at count 3 triggers the review-exhaustion park (07c,
-// route.review.verdict=changes_requested ∧ route.attempt.instance count ≥ 3). Zero paid tokens.
+// design R10/SB5/D6): when the shared per-task ATTEMPT budget is exhausted without the task
+// converging, the run PARKS toward the human — it never ships a PR and never claims a green.
 //
-// This journeys the REVIEW-exhaustion park (07c). The floors-exhaustion park (06d, three RED
-// measurements → escalate) is the SAME park writer (run.awaiting.human) with a different trigger
-// and is NOT separately journeyed: consecutive 06c floors-retry loops share one prompt, so the
-// positional mock cursor cannot cleanly separate them — whereas the review path interleaves a Quinn
-// review (a distinct marker) between Amelia's retry loops, which terminates each cleanly. All three
-// measurements PASS (comment-only deltas on the chained checkout); the budget exhausts on the
-// reviewer, not the harness.
+// The task authors an EXPLICIT budget of 2 (not the old hard-coded 3): this proves the per-task
+// budget is LOAD-BEARING — the route reads route.task.budget (the mirror of the projected
+// task.spec.budget), so the boundary moves with the authored value. Against the pre-#568
+// constant-3 rules this journey would run a THIRD attempt and never park at 2, so it is a direct
+// regression proof of the adoption. Quinn rejects TWICE (a finding each): attempt 1 re-enters
+// development (07b, count 1 < 2), and the second rejection at count 2 triggers the review-exhaustion
+// park (07c, route.review.verdict=changes_requested ∧ route.attempt.instance count ≥ 2 = budget).
+// Zero paid tokens. A companion journey (TestBridgeProofBudgetOneEscalatesOnFirstRed) exercises the
+// boundary at budget 1 on the FLOORS-escalate route, so it is proven at more than one value (D6).
+//
+// This journeys the REVIEW-exhaustion park (07c). The floors-exhaustion park (06d) is the SAME park
+// writer (run.awaiting.human) with a different trigger — covered at budget 1 by the companion, where
+// a single RED attempt escalates immediately (no consecutive 06c loops to confuse the positional mock
+// cursor). All measurements here PASS (comment-only deltas on the chained checkout); the budget
+// exhausts on the reviewer, not the harness.
 func TestBridgeProofBudgetExhaustionParks(t *testing.T) {
 	rejectWithFinding := mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review",
 		Args: map[string]any{"task_index": 0, "findings": []any{journeyReviewFinding}}}}
-	mock := mockllm.New(append(journeyFrontOfArcFixtures(),
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(2),
 		// Attempt 1 (dispatch): fix → measure GREEN → advance → Quinn REJECTS → 07b (count→2).
 		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureFixDiff}}},
 		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
 		rejectWithFinding,
-		// Attempt 2 (07b re-entry): address → measure GREEN → advance → Quinn REJECTS again → 07b (count→3).
+		// Attempt 2 (07b re-entry): address → measure GREEN → advance → Quinn REJECTS again at count 2
+		// = budget → the review-exhaustion PARK (07c, count ≥ B via length_gte), NOT another re-dispatch.
 		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureAddressDiff}}},
-		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
-		rejectWithFinding,
-		// Attempt 3 (07b re-entry): another delta → measure GREEN → advance → Quinn REJECTS a THIRD
-		// time at count 3 → the review-exhaustion PARK (07c), NOT another re-dispatch.
-		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureAddress2Diff}}},
 		mockllm.Fixture{Marker: journeyReviewRetryMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
 		rejectWithFinding,
 	)...)
@@ -694,23 +678,74 @@ func TestBridgeProofBudgetExhaustionParks(t *testing.T) {
 	runEntityID := driveSharedFrontOfArc(ctx, t)
 
 	// Wide-window EXHAUSTION gate (absorbs attempt 1's COLD compile): the budget is fully spent —
-	// THREE attempts were dispatched (04 = #1, two 07b re-entries = #2/#3). The third rejection at
-	// count 3 cannot re-dispatch (07b needs count < 3); it parks (07c). Exactly three.
-	requireAttemptCount(ctx, t, runEntityID, 3, 4*time.Minute)
-	t.Logf("exhaustion station: Quinn rejected 3x → budget spent (3 attempts) on run %s", runEntityID)
+	// TWO attempts were dispatched (04 = #1, one 07b re-entry = #2). The second rejection at count 2
+	// cannot re-dispatch (07b needs count < 2 = budget); it parks (07c). Exactly two — against the old
+	// constant-3 rules a THIRD would run, so this count IS the load-bearing-budget proof.
+	requireAttemptCount(ctx, t, runEntityID, 2, 4*time.Minute)
+	t.Logf("exhaustion station: Quinn rejected 2x → budget=2 spent (2 attempts) on run %s", runEntityID)
 
 	// The run PARKS toward the human — no PR, no false green. requireRunParked fails loud if the run
 	// delivered (a stray delivery route) or if the cold verify ever ran on the unapproved run.
-	// 90s (matching the rejection sibling): after the count-3 gate returns, attempt 3 still has to
-	// apply + measure (warm) + floors + the third review + 07c before the park lands.
+	// 90s (matching the rejection sibling): after the count-2 gate returns, attempt 2 still has to
+	// apply + measure (warm) + floors + the second review + 07c before the park lands.
 	requireRunParked(ctx, t, runEntityID, 90*time.Second)
 	t.Logf("exhaustion station: run parked (run.awaiting.human), no delivery.pr.ref, no verify.cleanroom.result — fail-closed (SB5)")
 
-	// Turn accounting: front-of-arc 4 + three dev loops (3 each = 9) + three Quinn reviews (1 each =
-	// 3) = 16. A different count means the budget did not exhaust at exactly three attempts, an extra
-	// loop spawned, or a turn went unscripted.
-	if got := mock.RequestCount(); got != 16 {
-		t.Fatalf("expected exactly 16 model turns (front-of-arc 4 + three dev loops 3×3 + three Quinn reviews 1×3), got %d — a mismatch means the budget did not exhaust at three attempts (07b/07c boundary) or a turn went unscripted", got)
+	// Turn accounting: front-of-arc 4 + two dev loops (3 each = 6) + two Quinn reviews (1 each = 2)
+	// = 12. A different count means the budget did not exhaust at exactly two attempts (07b/07c
+	// boundary at B=2), an extra loop spawned, or a turn went unscripted.
+	if got := mock.RequestCount(); got != 12 {
+		t.Fatalf("expected exactly 12 model turns (front-of-arc 4 + two dev loops 3×3 + two Quinn reviews 1×2), got %d — a mismatch means the budget did not exhaust at two attempts (07b/07c boundary at B=2) or a turn went unscripted", got)
+	}
+}
+
+// TestBridgeProofBudgetOneEscalatesOnFirstRed proves the per-task budget boundary at a SECOND value
+// (D6): with an authored budget of 1, the FIRST failed attempt exhausts the budget, so the
+// FLOORS-escalate route (06d) parks the run immediately — there is NO retry (06c needs count < 1,
+// but dispatch already appended count 1 at spawn). This exercises route.attempt.instance length_gte
+// $…route.task.budget.value at B=1 on the floors path (the exhaustion sibling covers 07c at B=2), and
+// it is the clean way to journey 06d: a single RED attempt escalates at once, with no consecutive
+// 06c loops to confuse the positional mock cursor. Zero paid tokens.
+//
+// Against the pre-#568 constant-3 rules this journey would RETRY (count 1 < 3) instead of parking, so
+// parking after one attempt is a direct proof the authored budget is load-bearing.
+func TestBridgeProofBudgetOneEscalatesOnFirstRed(t *testing.T) {
+	mock := mockllm.New(append(journeyFrontOfArcFixtures(1),
+		// Attempt 1 (dispatch prompt): the WIP diff compiles but leaves the boundary bug → the
+		// in-container measure is RED → floors route not_clean → 06d escalate at count 1 = budget → PARK.
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "apply_patch", Args: map[string]any{"diff": journeyFixtureWipDiff}}},
+		mockllm.Fixture{Marker: journeyDeveloperMarker, Tool: &mockllm.ToolCall{Name: "measure_task", Args: map[string]any{"task_index": 0}}},
+		// CURSOR GUARD (never consumed): after the RED measure, Amelia's loop takes one more turn.
+		// A tool-fixture cursor left EXHAUSTED would make the mock fall back to "first advertised
+		// tool, empty args" (read_workspace) and spin the loop to its iteration cap; a trailing
+		// fixture whose marker the dispatch prompt does NOT contain instead yields a marker-miss →
+		// completion, so the loop stops cleanly on its 3rd turn (apply/measure/stop). This RED
+		// attempt escalates (06d) and never reaches review, so this Quinn guard is never consumed.
+		mockllm.Fixture{Marker: journeyReviewMarker, Tool: &mockllm.ToolCall{Name: "submit_review", Args: map[string]any{"task_index": 0}}},
+	)...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	startJourneyRuntime(ctx, t, mock)
+
+	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
+	runEntityID := driveSharedFrontOfArc(ctx, t)
+
+	// Exactly ONE attempt: dispatch (04) appended count 1 at spawn; the RED measurement makes the
+	// floors route not_clean, and 06d escalates at count 1 ≥ budget 1 — it does NOT re-dispatch (06c
+	// retry needs count < 1). More than one would mean a retry wrongly fired past the authored budget.
+	requireAttemptCount(ctx, t, runEntityID, 1, 4*time.Minute)
+	t.Logf("escalate station: attempt 1 measured RED → 06d floors-escalate at count 1 = budget on run %s", runEntityID)
+
+	// The run PARKS toward the human via the floors-escalate route (06d) — no PR, no false green.
+	requireRunParked(ctx, t, runEntityID, 90*time.Second)
+	t.Logf("escalate station: run parked (run.awaiting.human) at budget 1 — fail-closed (SB5)")
+
+	// Turn accounting: front-of-arc 4 + one failing dev loop (apply, measure RED, stop = 3) = 7. No
+	// Quinn (a RED attempt never advances to review). A different count means a retry fired past the
+	// budget, an extra loop spawned, or a turn went unscripted.
+	if got := mock.RequestCount(); got != 7 {
+		t.Fatalf("expected exactly 7 model turns (front-of-arc 4 + one failing dev loop apply/measure/stop = 3), got %d — a mismatch means a retry fired past budget 1, an extra loop spawned, or a turn went unscripted", got)
 	}
 }
 
@@ -852,14 +887,16 @@ func requireAttemptCount(ctx context.Context, t *testing.T, runEntityID string, 
 // publish-triggered COMPONENTS (R6), so they consume ZERO model turns and need no fixtures.
 // The negative-path journeys (retry/rejection/exhaustion) reuse this prefix and append only
 // their divergent developer/review tail. (The bridge proof keeps its own annotated inline copy
-// as the reference walk-through.)
-func journeyFrontOfArcFixtures() []mockllm.Fixture {
+// as the reference walk-through.) budget is the per-task attempt budget the change authors — the
+// projection clamps it to [1,5] and the routes enforce it via route.task.budget (the exhaustion
+// journeys author a small explicit budget to prove the boundary is per-task, not the old constant 3).
+func journeyFrontOfArcFixtures(budget int) []mockllm.Fixture {
 	return []mockllm.Fixture{
 		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
 			"action": journeyDecideAction, "reason": "new admitted issue " + journeyIssueRef + " needs a run"}}},
 		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
 			"action": "create_change", "reason": "author the change for " + journeyIssueRef}}},
-		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs()}},
+		{Marker: journeyIssueRef, Tool: &mockllm.ToolCall{Name: "create_change", Args: journeyChangeArgs(budget)}},
 		{Marker: journeyDevRewakeMarker, Tool: &mockllm.ToolCall{Name: "decide", Args: map[string]any{
 			"action": journeyDevAction, "reason": "the change is approved and the run resumed; develop the run's tasks"}}},
 	}
@@ -1151,12 +1188,13 @@ func requireRunParked(ctx context.Context, t *testing.T, runEntityID string, tim
 		}
 		if ref := tripleString(e, "delivery.pr.ref"); ref != "" {
 			t.Fatalf("run %s DELIVERED (delivery.pr.ref=%q) but the exhausted-budget journey must PARK, never ship — "+
-				"the review-exhaustion park (dev-from-task/07c) did not fire, or a delivery route fired on an unapproved run", runEntityID, ref)
+				"the exhaustion park (dev-from-task/06d floors-escalate or 07c review-park) did not fire, or a delivery route fired on an unapproved run", runEntityID, ref)
 		}
 		return tripleString(e, "run.awaiting.human") != ""
-	}, "run "+runEntityID+" never parked (run.awaiting.human absent) — the review-exhaustion park (dev-from-task/07c) "+
-		"must fire when Quinn rejects at budget count ≥ 3: check the third submit_review stamped route.review.verdict=changes_requested "+
-		"and route.attempt.instance reached count 3 (07b re-dispatch stops at count 3, 07c takes over)")
+	}, "run "+runEntityID+" never parked (run.awaiting.human absent) — the exhaustion park must fire when "+
+		"route.attempt.instance count reaches the per-task budget B (route.attempt.instance length_gte "+
+		"$…route.task.budget.value): 07c review-park when Quinn keeps rejecting at count ≥ B, or 06d floors-escalate "+
+		"when a measurement stays RED at count ≥ B (retry 06c/07b stops at count < B)")
 
 	// No false green: an unapproved, parked run must never carry a passing cold verify.
 	if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
@@ -1419,7 +1457,7 @@ func journeySandboxSourceDir(t *testing.T) string {
 // them, and the (real) project_tasks tool freezes them into task.spec at the
 // projection station. A thin task (no rich fields) would make devtask.Project fail
 // toward the human, so projection would refuse and never stamp task.spec.
-func journeyChangeArgs() map[string]any {
+func journeyChangeArgs(budget int) map[string]any {
 	return map[string]any{
 		"slug":     journeyChangeSlug,
 		"proposal": map[string]any{"intent": journeyChangeIntent, "scope_in": []any{"the spine"}},
@@ -1456,7 +1494,7 @@ func journeyChangeArgs() map[string]any {
 				"test_command": "go test ./...",
 				"assumptions":  []any{"the health package classifies cpu/mem pressure"},
 				"non_goals":    []any{"no production hardening at M0"},
-				"budget":       3,
+				"budget":       budget,
 			}},
 		}},
 	}

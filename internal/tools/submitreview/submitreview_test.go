@@ -327,8 +327,10 @@ func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
 func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	w := &fakeWriter{}
 	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
-	// One passing task + two counted attempts; a finding forces changes_requested.
+	// One passing task (with a budget) + two counted attempts; a finding forces
+	// changes_requested. The budget rides the mirror so the review retry/park routes read it.
 	facts := append(oneTaskPassing(),
+		taskSpecFact(devtask.FactBudget, "3"),
 		message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-1", Source: "dev-dispatch-rule"},
 		message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-2", Source: "dev-dispatch-rule"},
 	)
@@ -345,12 +347,12 @@ func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop entity id: %v", err)
 	}
-	var gotVerdict string
+	var gotVerdict, gotBudget string
 	attemptObjs := map[string]bool{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			switch tr.Predicate {
-			case RouteVerdictPredicate, RouteAttemptPredicate:
+			case RouteVerdictPredicate, RouteAttemptPredicate, RouteBudgetPredicate:
 				if tr.Subject != loopEntityID {
 					t.Errorf("route mirror %q stamped on %q, want the review LOOP entity %q", tr.Predicate, tr.Subject, loopEntityID)
 				}
@@ -363,6 +365,8 @@ func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 				gotVerdict = tr.Object.(string)
 			case RouteAttemptPredicate:
 				attemptObjs[tr.Object.(string)] = true
+			case RouteBudgetPredicate:
+				gotBudget = tr.Object.(string)
 			}
 		}
 	}
@@ -371,6 +375,80 @@ func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	}
 	if len(attemptObjs) != 2 {
 		t.Errorf("%s must mirror both task.attempt.instance objects, got %v", RouteAttemptPredicate, attemptObjs)
+	}
+	// The review route reads the per-task budget off this loop too (07b/07c) — a raw copy.
+	if gotBudget != "3" {
+		t.Errorf("%s = %q, want the RAW authored budget copy \"3\"", RouteBudgetPredicate, gotBudget)
+	}
+}
+
+// D7 (task 3.5): an ABSENT budget faults the review mirror loudly. A verdict pass with a
+// LoopID but no task.spec.budget returns an errResult back to the loop and stamps NOTHING on
+// the review loop (atomicity — no route.attempt.* / route.review.verdict without the budget),
+// so rules 07b/07c never evaluate the fail-open empty substitution. The run-side verdict
+// (the substance) is still stamped; only the loop mirror is withheld.
+func TestReviewMirrorAbsentBudgetErrs(t *testing.T) {
+	w := &fakeWriter{}
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	// oneTaskPassing has NO task.spec.budget → the mirror budget read faults.
+	facts := append(oneTaskPassing(),
+		message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-1", Source: "dev-dispatch-rule"},
+	)
+	c := call(0, "regression found")
+	c.LoopID = "review-loop-abc"
+	res, err := New(&fakeReader{facts: facts}, w, platform, nil).Execute(context.Background(), c)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error == "" {
+		t.Fatal("an absent task.spec.budget must fault the review mirror loudly (D7 errResult), got no error")
+	}
+	if res.StopLoop {
+		t.Error("the budget fault must NOT StopLoop — the loop re-runs and faults loudly until the contract holds")
+	}
+	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, c.LoopID)
+	if err != nil {
+		t.Fatalf("loop entity id: %v", err)
+	}
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			if tr.Subject == loopEntityID {
+				t.Errorf("nothing may be stamped on the review loop when the budget is absent (atomicity), but %s was", tr.Predicate)
+			}
+		}
+	}
+}
+
+// D7 parse-validation: a PRESENT-but-non-canonical budget (blank, whitespace-padded, or
+// non-integer — anything the engine's coerceToInt rejects) faults the review mirror loudly, like
+// an absent budget. readTaskBudget validates the RAW stamped value with strconv.Atoi (no trim), so
+// a value that merely "looks" numeric (" 2 ", "2.5") never slips through to a fail-open route stall.
+func TestReviewMirrorNonCanonicalBudgetErrs(t *testing.T) {
+	platform := types.PlatformMeta{Org: "c360", Platform: "semdev-001"}
+	loopEntityID, err := agentic.TryLoopExecutionEntityID(platform.Org, platform.Platform, "review-loop-abc")
+	if err != nil {
+		t.Fatalf("loop entity id: %v", err)
+	}
+	for _, bad := range []string{"", " 2 ", "2.5", "abc"} {
+		w := &fakeWriter{}
+		facts := append(oneTaskPassing(), taskSpecFact(devtask.FactBudget, bad),
+			message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-1", Source: "dev-dispatch-rule"})
+		c := call(0, "regression found")
+		c.LoopID = "review-loop-abc"
+		res, err := New(&fakeReader{facts: facts}, w, platform, nil).Execute(context.Background(), c)
+		if err != nil {
+			t.Fatalf("budget %q: execute: %v", bad, err)
+		}
+		if res.Error == "" {
+			t.Errorf("budget %q: a non-canonical budget must fault the review mirror (D7 errResult), got no error", bad)
+		}
+		for _, batch := range w.replaces {
+			for _, tr := range batch {
+				if tr.Subject == loopEntityID {
+					t.Errorf("budget %q: nothing may be stamped on the review loop on a non-canonical budget, but %s was", bad, tr.Predicate)
+				}
+			}
+		}
 	}
 }
 

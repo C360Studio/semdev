@@ -62,6 +62,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `route.attempt.rejected` | route-mirror | dev-from-task |
 | `route.review.verdict` | route-mirror | dev-from-task |
 | `route.attempt.instance` | route-mirror | dev-from-task |
+| `route.task.budget` | route-mirror | dev-from-task |
 | `route.attempt.unclean` | dev-route-rule | dev-from-task |
 | `route.attempt.routed` | dev-route-rule | dev-from-task |
 | `delivery.route.routed` | dev-route-rule | dev-from-task |

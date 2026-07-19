@@ -464,17 +464,12 @@ func TestDevRewakeGatedOnSandboxReadiness(t *testing.T) {
 	}
 }
 
-// toFloat coerces a JSON-decoded numeric condition value (float64) to float64 for the
-// budget-partition arithmetic.
-func toFloat(v any) float64 {
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
-	}
-	return 0
-}
+// budgetToken is the #519 scalar-value substitution the retry/escalate routes read for the
+// PER-TASK attempt budget: the route-mirror stamps route.task.budget on the firing loop, and
+// the routes compare route.attempt.instance against $entity.triple.route.task.budget.value
+// (adopt-per-task-routing-budgets, #568). retry = length_lt B, escalate/park = length_gte B,
+// both against this same token → {0..B-1} ∪ {B..} partitions every count with no gap/overlap.
+const budgetToken = "$entity.triple.route.task.budget.value"
 
 // declaresTools reports whether every publish_agent action in the rule declares a
 // non-empty tools allowlist (the config-lint: no allowlist-less model-publishing spawn).
@@ -578,11 +573,12 @@ func TestFloorsTriggerFiresOnDeveloperTerminal(t *testing.T) {
 // rules are UNCHANGED — they key on route.*, which the component now mirrors onto L_n).
 //   - 06a advance: route.passed=true AND route.rejected=false → spawn Quinn (reviewer).
 //   - 06b not_clean: logic:OR (route.passed=false OR route.rejected=true) → route.not_clean.
-//   - 06c retry: route.not_clean=true AND route.attempt.0 length_lt 3 → re-dispatch Amelia.
-//   - 06d escalate: route.not_clean=true AND route.attempt.0 length_gt 2 → park.
+//   - 06c retry: route.not_clean=true AND route.attempt.instance length_lt B → re-dispatch Amelia.
+//   - 06d escalate: route.not_clean=true AND route.attempt.instance length_gte B → park.
 //
 // TOTALITY: advance covers (true,false); not_clean is its exact OR-complement; retry/escalate
-// partition the count (length_lt 3 / length_gt 2, no gap). Red-first: break any and this fails.
+// partition the count against the PER-TASK budget B (length_lt B / length_gte B, no gap/overlap
+// for any B). Red-first: break any and this fails.
 func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	rules := runLifecycleRules(t)
 	const marker = "route.attempt.routed"
@@ -644,8 +640,8 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := ret.condition("route.attempt.unclean"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Errorf("retry must require route.not_clean eq \"true\", got %+v", c)
 	}
-	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" {
-		t.Errorf("retry must require route.attempt.0 length_lt <budget> (budget remains), got %+v", c)
+	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" || c.Value != budgetToken {
+		t.Errorf("retry must require route.attempt.instance length_lt %s (the PER-TASK budget mirror, #519/#568 — not the old constant 3), got %+v", budgetToken, c)
 	}
 	if !ret.hasAbsenceGuard(marker) || !ret.markerBeforePublish(marker) || !ret.hasTriple("task.attempt.instance") {
 		t.Error("retry must be self-extinguishing (route.routed before the developer publish) and append task.attempt.0 at spawn (R3)")
@@ -658,19 +654,21 @@ func TestFloorsRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := esc.condition("route.attempt.unclean"); !ok || c.Operator != "eq" || c.Value != "true" {
 		t.Errorf("escalate must require route.not_clean eq \"true\", got %+v", c)
 	}
-	if c, ok := esc.condition("route.attempt.instance"); !ok || c.Operator != "length_gt" {
-		t.Errorf("escalate must require route.attempt.0 length_gt <budget-1> (fail-closed: catches an over-count, and partitions the count with retry's length_lt), got %+v", c)
+	if c, ok := esc.condition("route.attempt.instance"); !ok || c.Operator != "length_gte" || c.Value != budgetToken {
+		t.Errorf("escalate must require route.attempt.instance length_gte %s (fail-closed: count ≥ B catches an over-count, and partitions the count with retry's length_lt B — #519/#568, replaces the old length_gt 2), got %+v", budgetToken, c)
 	}
 	if !esc.hasTriple("run.awaiting.human") || esc.firesTransition() {
 		t.Error("escalate must park (run.awaiting_human) with NO lifecycle transition (G2)")
 	}
-	// The budget literals must partition the count with no gap: retry length_lt N, escalate
-	// length_gt N-1. Assert they use the SAME budget so no count falls through both.
+	// The partition now uses the PER-TASK budget substitution, not literals: retry length_lt B,
+	// escalate length_gte B against the SAME route.task.budget.value token → {0..B-1} ∪ {B..}
+	// covers every count with no gap and no overlap, for any B in [1,5]. Assert both read the
+	// SAME token (a divergent token would reintroduce a gap the old literal lt-N/gt-(N-1) pin
+	// caught by arithmetic).
 	retC, _ := ret.condition("route.attempt.instance")
 	escC, _ := esc.condition("route.attempt.instance")
-	retN, escN := toFloat(retC.Value), toFloat(escC.Value)
-	if retN != escN+1 {
-		t.Errorf("retry length_lt %v and escalate length_gt %v must partition the count with no gap (lt N, gt N-1) — a count could otherwise fall through both or match both", retN, escN)
+	if retC.Value != budgetToken || escC.Value != budgetToken {
+		t.Errorf("retry (%v) and escalate (%v) must both compare against the SAME budget token %s — a divergent boundary reintroduces a gap/overlap", retC.Value, escC.Value, budgetToken)
 	}
 }
 
@@ -708,8 +706,8 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if c, ok := ret.condition("route.review.verdict"); !ok || c.Value != "changes_requested" {
 		t.Errorf("review-retry must fire on route.verdict changes_requested, got %+v", c)
 	}
-	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" {
-		t.Errorf("review-retry must require route.attempt.0 length_lt <budget> (the SHARED attempt budget, R4), got %+v", c)
+	if c, ok := ret.condition("route.attempt.instance"); !ok || c.Operator != "length_lt" || c.Value != budgetToken {
+		t.Errorf("review-retry must require route.attempt.instance length_lt %s (the SHARED per-task attempt budget, R4/#519/#568 — not the old constant 3), got %+v", budgetToken, c)
 	}
 	if !ret.hasTriple("task.attempt.instance") || !ret.markerBeforePublish(marker) {
 		t.Error("review-retry must append task.attempt.0 at spawn (shared budget) and self-extinguish before the developer publish")
@@ -729,8 +727,8 @@ func TestReviewRouteTotalityAndSelfExtinguish(t *testing.T) {
 	if !ok {
 		t.Fatal("missing dev_from_task_review_park rule")
 	}
-	if c, ok := park.condition("route.attempt.instance"); !ok || c.Operator != "length_gt" {
-		t.Errorf("review-park must fire on route.attempt.0 length_gt <budget-1> (exhausted), got %+v", c)
+	if c, ok := park.condition("route.attempt.instance"); !ok || c.Operator != "length_gte" || c.Value != budgetToken {
+		t.Errorf("review-park must fire on route.attempt.instance length_gte %s (exhausted, count ≥ B; #519/#568, replaces the old length_gt 2), got %+v", budgetToken, c)
 	}
 	if !park.hasTriple("run.awaiting.human") || park.firesTransition() {
 		t.Error("review-park must park with no transition (G2)")

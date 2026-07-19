@@ -72,6 +72,12 @@ func attemptFact(loopID string) message.Triple {
 	return message.Triple{Predicate: "task.attempt.instance", Object: loopID, Source: "dev-dispatch-rule"}
 }
 
+// budgetFact builds the run's projected task.spec.budget (the clamped [1,5] per-task attempt
+// budget) the route mirror copies onto L_n as route.task.budget (adopt-per-task-routing-budgets).
+func budgetFact(b string) message.Triple {
+	return message.Triple{Predicate: "task.spec.budget", Object: b, Source: "task-projector"}
+}
+
 type fakeWriter struct {
 	owned    []string // predicates ReadOwnedPredicates returns (the stale set)
 	replaces [][]message.Triple
@@ -319,6 +325,7 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 		attemptCommitFact("sha-b"),
 		attemptFact("dev-loop-1"),
 		attemptFact("dev-loop-2"),
+		budgetFact("3"),
 	}}
 	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
@@ -365,8 +372,9 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 // route.attempt.passed is copied as "false" — the route treats it as a red attempt, not green.
 func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 	w := &fakeWriter{}
-	// No measurement fact seeded → route.attempt.passed must fail closed to "false".
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{}, w, slog.Default(), runEntity, loopEntity, 0)
+	// No measurement fact seeded → route.attempt.passed must fail closed to "false". A budget
+	// IS seeded (the mirror requires it — D7 — and this test is about measurement absence).
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{facts: []message.Triple{budgetFact("3")}}, w, slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -398,6 +406,7 @@ func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 		measuredPassed("true"),
 		measuredCommit("sha-a"),
 		attemptCommitFact("sha-b"),
+		budgetFact("3"),
 	}}
 	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
@@ -407,6 +416,130 @@ func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 		for _, tr := range batch {
 			if tr.Predicate == RoutePassedPredicate && tr.Object.(string) != "false" {
 				t.Errorf("%s on a STALE green (measured sha-a, current sha-b) must be \"false\", got %q — a stale measurement must not advance a re-applied-but-unmeasured attempt", RoutePassedPredicate, tr.Object)
+			}
+		}
+	}
+}
+
+// The per-task attempt budget is mirrored onto L_n (task 3.3): given a run with
+// task.spec.budget=B, the mirror stamps route.task.budget=B on the dispatch loop — the
+// scalar the retry/escalate routes substitute for the old constant 3. ATOMICITY (D7/3.6):
+// route.task.budget rides the SAME ReplaceTriples pass as route.attempt.* — the routes never
+// see an attempt count without the budget (a half-mirror would let them read the fail-open
+// empty substitution).
+func TestCheckFloorsMirrorStampsBudget(t *testing.T) {
+	w := &fakeWriter{}
+	reader := fakeReader{facts: []message.Triple{
+		measuredPassed("false"),
+		attemptFact("dev-loop-1"),
+		budgetFact("4"),
+	}}
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	if err != nil {
+		t.Fatalf("RunFloors: %v", err)
+	}
+	// Find the mirror batch (the one carrying route.attempt.instance) and assert the budget
+	// is stamped in that SAME batch, on the loop entity, with the mirror Source.
+	var budget string
+	var sawBudget, sawAttempt bool
+	for _, batch := range w.replaces {
+		hasAttempt, hasBudget := false, false
+		for _, tr := range batch {
+			switch tr.Predicate {
+			case RouteAttemptPredicate:
+				hasAttempt = true
+			case RouteBudgetPredicate:
+				hasBudget = true
+				budget = tr.Object.(string)
+				if tr.Subject != loopEntity {
+					t.Errorf("%s stamped on %q, want the floors LOOP entity %q", RouteBudgetPredicate, tr.Subject, loopEntity)
+				}
+				if tr.Source != RouteMirrorSource {
+					t.Errorf("%s Source = %q, want %q (G5)", RouteBudgetPredicate, tr.Source, RouteMirrorSource)
+				}
+			}
+		}
+		if hasAttempt {
+			sawAttempt = true
+			if !hasBudget {
+				t.Errorf("D7 atomicity: route.attempt.* stamped without %s in the same ReplaceTriples pass", RouteBudgetPredicate)
+			}
+		}
+		if hasBudget {
+			sawBudget = true
+		}
+	}
+	if !sawAttempt || !sawBudget {
+		t.Fatalf("expected the mirror to stamp both route.attempt.instance and %s (sawAttempt=%v sawBudget=%v)", RouteBudgetPredicate, sawAttempt, sawBudget)
+	}
+	if budget != "4" {
+		t.Errorf("%s = %q, want the RAW authored budget copy \"4\"", RouteBudgetPredicate, budget)
+	}
+}
+
+// D7a: an ABSENT budget is a loud station fault, never a silent default. RunFloors returns an
+// error BEFORE any mirror write, so no route.* is stamped on L_n (atomicity — no attempt count
+// without a budget). CRUCIALLY, the current attempt's floor.finding.* on the RUN are genuine
+// harness output, already durable, and MUST NOT be cleared — the resolve-fault clear is for a
+// stale PRIOR pass only. Asserts both: no L_n mirror AND findings intact (not cleared).
+func TestCheckFloorsMirrorAbsentBudgetFaultsFindingsIntact(t *testing.T) {
+	w := &fakeWriter{}
+	// Measurement + attempts present, but NO task.spec.budget → the D7 mirror fault.
+	reader := fakeReader{facts: []message.Triple{
+		measuredPassed("false"),
+		attemptFact("dev-loop-1"),
+	}}
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	if err == nil {
+		t.Fatal("an absent task.spec.budget must fault the mirror loudly (D7), got nil error")
+	}
+	sawFindings := false
+	for _, batch := range w.replaces {
+		for _, tr := range batch {
+			switch tr.Predicate {
+			case RoutePassedPredicate, RouteRejectedPredicate, RouteAttemptPredicate, RouteBudgetPredicate:
+				t.Errorf("no route mirror may be stamped when the budget is absent (atomicity), but %s was", tr.Predicate)
+			case floors.RejectedPredicate:
+				sawFindings = true
+				if tr.Subject != runEntity {
+					t.Errorf("floor.finding stamped on %q, want the RUN %q", tr.Subject, runEntity)
+				}
+			}
+		}
+	}
+	if !sawFindings {
+		t.Error("the current attempt's floor.finding.* must be stamped on the run BEFORE the mirror phase (findings-first ordering)")
+	}
+	// findings MUST NOT be cleared: the budget fault is not a resolve fault. No ReplaceTriples
+	// remove list may carry a floor.finding predicate.
+	for _, rm := range w.removes {
+		for _, pred := range rm {
+			if strings.HasPrefix(pred, floors.FindingPrefix) {
+				t.Errorf("the budget fault cleared %q — the current attempt's genuine findings must stay durable (only a stale PRIOR pass is cleared, on a resolve fault)", pred)
+			}
+		}
+	}
+}
+
+// D7 parse-validation: a PRESENT-but-non-canonical budget (anything the engine's coerceToInt
+// would reject — a blank, whitespace-padded, or non-integer value) faults the mirror loudly, just
+// like an absent budget. readTaskBudget validates the RAW stamped value with strconv.Atoi (no
+// trim), so what it admits is exactly what the route can coerce — a value that merely "looks"
+// numeric (" 3 ", "3.0") never slips through to a fail-open route stall.
+func TestCheckFloorsMirrorNonCanonicalBudgetFaults(t *testing.T) {
+	for _, bad := range []string{"", " 3 ", "3.0", "abc"} {
+		w := &fakeWriter{}
+		reader := fakeReader{facts: []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact(bad)}}
+		_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+		if err == nil {
+			t.Errorf("budget %q: a non-canonical budget must fault the mirror (D7), got nil error", bad)
+		}
+		for _, batch := range w.replaces {
+			for _, tr := range batch {
+				switch tr.Predicate {
+				case RoutePassedPredicate, RouteRejectedPredicate, RouteAttemptPredicate, RouteBudgetPredicate:
+					t.Errorf("budget %q: no route mirror may be stamped on a non-canonical budget (atomicity), but %s was", bad, tr.Predicate)
+				}
 			}
 		}
 	}

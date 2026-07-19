@@ -45,6 +45,11 @@ const sandbox = "containerized-sandbox-dev-loop"
 // snapshot, rule-native routing, restart-safe provisioning).
 const reshape = "simplify-m0-execution-rail"
 
+// budgets is the change slug that adopts the per-task ATTEMPT budget (semstreams #568
+// length_gte): the routing rules read the projected task.spec.budget via a route-mirror
+// scalar instead of the hard-coded constant 3.
+const budgets = "adopt-per-task-routing-budgets"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -155,6 +160,15 @@ var Predicates = []Predicate{
 	{"route.attempt.rejected", "route-mirror", "dev-from-task", reshape},
 	{"route.review.verdict", "route-mirror", "dev-from-task", reshape},
 	{"route.attempt.instance", "route-mirror", "dev-from-task", reshape},
+	// route.task.budget is the per-task ATTEMPT budget (the projected task.spec.budget,
+	// clamped [1,5]) mirrored onto the firing loop so the retry/escalate routes read it via
+	// $entity.triple.route.task.budget.value instead of the old constant 3 (adopt-per-task-
+	// routing-budgets, semstreams #568 length_gte). A RAW copy of the authored contract value
+	// (not a derived decision — like route.attempt.*), stamped by the ONE logical writer
+	// route-mirror at its TWO sanctioned sites (check_floors→L_n for 06c/06d AND submit_review→
+	// the review loop for 07b/07c — the same one-writer/two-sites precedent as
+	// route.attempt.instance). Canonical 3-seg so `.value` arity-disambiguates.
+	{"route.task.budget", "route-mirror", "dev-from-task", budgets},
 
 	// THE ROUTE MARKERS (rule-owned, no Source drift — the multi-realized single-writer
 	// pattern). route.attempt.unclean is the OR-collapse intermediate (route.attempt.passed

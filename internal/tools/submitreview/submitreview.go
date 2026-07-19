@@ -32,6 +32,7 @@ package submitreview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -74,7 +75,27 @@ const RouteMirrorSource = "route-mirror"
 const (
 	RouteVerdictPredicate = "route.review.verdict"
 	RouteAttemptPredicate = "route.attempt.instance"
+	// RouteBudgetPredicate is the SINGLE-VALUED per-task attempt budget mirrored onto the
+	// REVIEW loop (adopt-per-task-routing-budgets, #568): a RAW copy of the run's projected
+	// task.spec.budget so the review retry/park routes (07b/07c) read `length_lt`/`length_gte
+	// $entity.triple.route.task.budget.value` instead of the constant 3. Stamped in the SAME
+	// ReplaceTriples pass as route.attempt.* (the D7 atomicity invariant — the routes never
+	// see the attempt count without the budget). A budget stamped only by the floors site
+	// would stall EVERY changes_requested verdict on the empty substitution, hence both sites.
+	RouteBudgetPredicate = "route.task.budget"
 )
+
+// budgetPredicate is the run's projected per-task attempt budget (task.spec.budget, writer
+// task-projector, clamped [1,5]). Composed from the SAME devtask consts the projector writes it
+// under, so a canonical-vocab rename cannot silently desync the read side (this tool already reads
+// the task.spec family via devtask.TaskSpecPrefix). The review-route mirror copies it RAW.
+const budgetPredicate = devtask.TaskSpecPrefix + devtask.FactBudget
+
+// errBudgetContract marks an absent/blank/non-canonical task.spec.budget — a projection-contract
+// violation (D7), distinct from a transient graph read fault — so Execute classifies it
+// ToolErrorInternal (a bug), while a transport ReadFacts fault keeps changefacts.ReadErrorKind's
+// classification (matching the sibling readAttemptObjects and the ReadErrorKind anti-drift contract).
+var errBudgetContract = errors.New("task.spec.budget projection-contract violation")
 
 // VerdictPredicate is the predicate this tool owns on the run entity: the reviewer's
 // current verdict (review.verdict.value). Single-task at M0 (beta.147 D1): the per-task
@@ -232,12 +253,34 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		if aerr != nil {
 			return errResult(call, changefacts.ReadErrorKind(aerr), "submit_review: read task.attempt for the route mirror on %s: %v", runEntityID, aerr)
 		}
+		// D7: the per-task budget is authored + clamped [1,5] on every task, so an absent or
+		// unparseable value is a projection-contract violation, not a normal input. Fault
+		// loudly (errResult back to the loop — the tool's documented "never a silent green"
+		// posture) and stamp NOTHING on the review loop this pass: rules 07b/07c fire here, and
+		// the route substitution fails OPEN on absence ($…value→"" → length_* coerce error
+		// swallowed → neither retry nor park fires → the changes_requested verdict stalls). No
+		// route.attempt.* is stamped without route.task.budget (the D7 atomicity invariant).
+		budget, berr := e.readTaskBudget(ctx, runEntityID)
+		if berr != nil {
+			// A projection-contract violation (absent/blank/non-canonical budget) is INTERNAL — a
+			// bug, not retryable; a transport ReadFacts fault keeps its ReadErrorKind classification
+			// (transient), matching the sibling readAttemptObjects above. Either way the errResult
+			// carries no StopLoop, so the loop re-runs and faults loudly (D7 — never a silent green).
+			kind := changefacts.ReadErrorKind(berr)
+			if errors.Is(berr, errBudgetContract) {
+				kind = agentic.ToolErrorInternal
+			}
+			return errResult(call, kind, "submit_review: read task.spec.budget for the route mirror on %s: %v", runEntityID, berr)
+		}
 		now := time.Now().UTC()
-		mirror := []message.Triple{{Subject: loopEntityID, Predicate: RouteVerdictPredicate, Object: verdict, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0}}
+		mirror := []message.Triple{
+			{Subject: loopEntityID, Predicate: RouteVerdictPredicate, Object: verdict, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0},
+			{Subject: loopEntityID, Predicate: RouteBudgetPredicate, Object: budget, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0},
+		}
 		for _, obj := range attempts {
 			mirror = append(mirror, message.Triple{Subject: loopEntityID, Predicate: RouteAttemptPredicate, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0})
 		}
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, mirror, []string{RouteVerdictPredicate}); merr != nil {
+		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, mirror, []string{RouteVerdictPredicate, RouteBudgetPredicate}); merr != nil {
 			return errResult(call, writeErrKind(merr), "submit_review: stamp the route mirror on %s: %v", loopEntityID, merr)
 		}
 	}
@@ -294,6 +337,35 @@ func (e *Executor) readAttemptObjects(ctx context.Context, runEntityID string, i
 		}
 	}
 	return objs, nil
+}
+
+// readTaskBudget reads the run's projected per-task attempt budget (task.spec.budget) as a
+// RAW string for the review-route mirror. It PARSE-VALIDATES the EXACT value it will stamp —
+// strconv.Atoi on the raw string, matching the engine's coerceToInt (no trim) that the route's
+// $…value substitution feeds — but NEVER re-renders it (no re-clamp, no derived value — G3/G5).
+// A transport read fault returns the raw ReadFacts error (transient, classified by ReadErrorKind);
+// an absent/blank/non-canonical value (anything Atoi rejects, e.g. " 3 ") wraps errBudgetContract
+// (a projection-contract violation, D7) so Execute faults loudly (errResult, nothing stamped on the
+// review loop) rather than stamping a value the route fails OPEN on.
+func (e *Executor) readTaskBudget(ctx context.Context, runEntityID string) (string, error) {
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, budgetPredicate)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate != budgetPredicate {
+			continue
+		}
+		s, _ := tr.Object.(string)
+		if s == "" {
+			return "", fmt.Errorf("%s present but empty/non-string: %w", budgetPredicate, errBudgetContract)
+		}
+		if _, perr := strconv.Atoi(s); perr != nil {
+			return "", fmt.Errorf("%s %q is not a bare integer the route can coerce: %w (%v)", budgetPredicate, s, errBudgetContract, perr)
+		}
+		return s, nil
+	}
+	return "", fmt.Errorf("%s absent — the projection station authors a clamped [1,5] budget on every task: %w", budgetPredicate, errBudgetContract)
 }
 
 // projectedTaskIDs returns the projected task IDs (matching measurement Result.TaskID)

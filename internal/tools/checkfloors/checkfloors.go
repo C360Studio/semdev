@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/floors"
 	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/message"
@@ -60,7 +61,20 @@ const (
 	// single-valued route.attempt.passed/rejected siblings (same route.attempt. prefix)
 	// never inflate the count. Rules MUST bind this exact name, never the prefix.
 	RouteAttemptPredicate = "route.attempt.instance"
+	// RouteBudgetPredicate is the SINGLE-VALUED per-task attempt budget mirrored onto L_n
+	// (adopt-per-task-routing-budgets, #568): a RAW copy of the run's projected
+	// task.spec.budget so the retry/escalate routes read `length_lt`/`length_gte
+	// $entity.triple.route.task.budget.value` instead of the constant 3. Stamped in the SAME
+	// ReplaceTriples pass as route.attempt.* (the D7 atomicity invariant — the routes never
+	// see the attempt count without the budget).
+	RouteBudgetPredicate = "route.task.budget"
 )
+
+// budgetPredicate is the run's projected per-task attempt budget (task.spec.budget,
+// writer task-projector, clamped [1,5]). Composed from the SAME devtask consts the projector
+// writes it under (projecttasks stamps devtask.TaskSpecPrefix + devtask.FactBudget), so a
+// canonical-vocab rename cannot silently desync the read side. The mirror copies it RAW onto L_n.
+const budgetPredicate = devtask.TaskSpecPrefix + devtask.FactBudget
 
 // Attempts resolves a task's current dev-loop attempt — the files it authored (with
 // contents) and the task's declared target files — from the run's checkout, into the
@@ -132,12 +146,24 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 	if err != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: read task.attempt for the route mirror on %s: %w", runEntityID, err)
 	}
-	mirror := routeMirrorTriples(routeLoopEntityID, taskIndex, passed, rejected, attemptObjs, time.Now().UTC())
+	// D7: the per-task budget is authored + clamped [1,5] on every task, so an absent or
+	// unparseable value on the run is a projection-contract violation, never a normal input.
+	// Fault LOUDLY before any mirror write (findings already durable — NOT cleared; the
+	// resolve-fault clear above is for a stale PRIOR pass, not this current attempt's genuine
+	// findings). The route substitution fails OPEN on absence ($…value→"" → length_* coerce
+	// error swallowed → neither retry nor escalate fires → silent stall), so withholding the
+	// whole mirror is the only safe posture: no route.attempt.* is stamped without the budget.
+	budget, err := readTaskBudget(ctx, reader, runEntityID)
+	if err != nil {
+		return FloorResult{}, fmt.Errorf("check_floors: read task.spec.budget for the route mirror on %s: %w", runEntityID, err)
+	}
+	mirror := routeMirrorTriples(routeLoopEntityID, taskIndex, passed, rejected, budget, attemptObjs, time.Now().UTC())
 	// ReplaceTriples → MergeTriples FULL-SET-REPLACES per predicate: route.passed/rejected
-	// (single-valued) are replaced, and route.attempt.<i> is set to the COMPLETE current
-	// attempt set (all N objects) — writing only the newest would DROP the prior ones.
+	// and route.task.budget (single-valued) are replaced, and route.attempt.<i> is set to the
+	// COMPLETE current attempt set (all N objects) — writing only the newest would DROP the
+	// prior ones. route.task.budget rides the SAME pass as route.attempt.* (D7 atomicity).
 	// Idempotent on a retry (the same complete set replaces itself).
-	if merr := writer.ReplaceTriples(ctx, routeLoopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate}); merr != nil {
+	if merr := writer.ReplaceTriples(ctx, routeLoopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate, RouteBudgetPredicate}); merr != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: stamp the route mirror on %s: %w", routeLoopEntityID, merr)
 	}
 	return FloorResult{Rejected: rejected, Findings: findings, AttemptID: attemptID}, nil
@@ -256,11 +282,12 @@ func readAttemptObjects(ctx context.Context, reader changefacts.Reader, runEntit
 func attemptPredicate(idx int) string { _ = idx; return "task.attempt.instance" }
 
 // routeMirrorTriples builds the route mirror the floors-route rules fire on: the scalar
-// route.passed / route.rejected copies plus one route.attempt.<idx> triple per distinct
-// attempt object (the count the budget route reads via length_*). All carry RouteMirrorSource
-// (the single logical writer route-mirror, shared with submit_review) so neither the floor
-// facts nor the measurement facts gain a second writer (G5).
-func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bool, attempts []string, now time.Time) []message.Triple {
+// route.passed / route.rejected copies, the single-valued route.task.budget copy, plus one
+// route.attempt.<idx> triple per distinct attempt object (the count the budget route reads
+// via length_*). All carry RouteMirrorSource (the single logical writer route-mirror, shared
+// with submit_review) so neither the floor facts nor the measurement facts gain a second
+// writer (G5). budget is the RAW authored task.spec.budget string (never re-rendered).
+func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bool, budget string, attempts []string, now time.Time) []message.Triple {
 	mk := func(pred, obj string) message.Triple {
 		return message.Triple{Subject: loopEntityID, Predicate: pred, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0}
 	}
@@ -268,11 +295,40 @@ func routeMirrorTriples(loopEntityID string, idx int, passed string, rejected bo
 	out := []message.Triple{
 		mk(RoutePassedPredicate, passed),
 		mk(RouteRejectedPredicate, strconv.FormatBool(rejected)),
+		mk(RouteBudgetPredicate, budget),
 	}
 	for _, obj := range attempts {
 		out = append(out, mk(RouteAttemptPredicate, obj))
 	}
 	return out
+}
+
+// readTaskBudget reads the run's projected per-task attempt budget (task.spec.budget) as a
+// RAW string for the route mirror. It PARSE-VALIDATES the EXACT value it will stamp — strconv.Atoi
+// on the raw string, matching the engine's coerceToInt (evaluator.go, no trim) that the route's
+// $…value substitution feeds — but NEVER re-renders it (no re-clamp, no derived value — G3/G5), so
+// what validates here is exactly what the route later coerces. Absent, blank, or non-canonical
+// (anything Atoi rejects, e.g. " 3 " or "3\n") is a projection-contract violation (D7), returned as
+// a non-nil error so the caller faults loudly rather than stamping a value the route fails OPEN on.
+func readTaskBudget(ctx context.Context, reader changefacts.Reader, runEntityID string) (string, error) {
+	triples, err := reader.ReadFacts(ctx, runEntityID, budgetPredicate)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate != budgetPredicate {
+			continue
+		}
+		s, _ := tr.Object.(string)
+		if s == "" {
+			return "", fmt.Errorf("%s present but empty/non-string — a projection-contract violation (D7)", budgetPredicate)
+		}
+		if _, perr := strconv.Atoi(s); perr != nil {
+			return "", fmt.Errorf("%s %q is not a bare integer the route can coerce — a projection-contract violation (D7): %w", budgetPredicate, s, perr)
+		}
+		return s, nil
+	}
+	return "", fmt.Errorf("%s absent — the projection station authors a clamped [1,5] budget on every task; its absence is a projection-contract violation (D7)", budgetPredicate)
 }
 
 // clearFindings removes the entire floor.finding.* package (the "clear my prefix"

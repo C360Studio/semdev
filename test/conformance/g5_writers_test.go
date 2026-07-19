@@ -60,8 +60,13 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RoutePassedPredicate},
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteRejectedPredicate},
 		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteAttemptPredicate},
+		// route.task.budget: the per-task attempt budget, mirrored by BOTH sanctioned
+		// route-mirror sites (adopt-per-task-routing-budgets, #568) — one logical writer,
+		// two code sites (the route.attempt.instance precedent).
+		{"check_floors", checkfloors.RouteMirrorSource, checkfloors.RouteBudgetPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteVerdictPredicate},
 		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteAttemptPredicate},
+		{"submit_review", submitreview.RouteMirrorSource, submitreview.RouteBudgetPredicate},
 		{"open_pr", openpr.Source, openpr.RefPredicate},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 		{"apply_patch", applypatch.Source, applypatch.CommitPredicate},

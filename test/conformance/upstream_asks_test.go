@@ -23,13 +23,14 @@ import (
 //   sentinel), #530 (on_recovery routing gate), #551 (executor per-loop
 //   advertised-tool enforcement, beta.149), and #566 (rule.Processor.Health/DataFlow
 //   no longer mutate a shared cache under a read lock, beta.153) are all regression
-//   guards. The MECHANICAL UPGRADES #519/#528/#529 enable — per-task iteration budgets
-//   (loop_max_iterations, #528), per-task attempt budgets via
-//   $entity.triple.task.spec.budget.value (#519), and a reason-aware escalate route
-//   (errors.Is ErrMaxIterationsReached, #529) — are routing-behavior changes NOT yet
-//   adopted; each guard's doc names its follow-up. The current M0 behavior (uniform
-//   iteration cap, literal-3 budget, outcome=failed routing) is proven by the e2e and
-//   remains correct until those upgrades are deliberately taken. #551 and #566, by
+//   guards. Of the MECHANICAL UPGRADES they enable, the #519 per-task ATTEMPT budget is now
+//   ADOPTED (adopt-per-task-routing-budgets, with #568 length_gte): the retry/escalate routes
+//   read $entity.triple.route.task.budget.value (the mirrored projected task.spec.budget)
+//   instead of the constant 3. The other two remain routing follow-ups NOT yet adopted —
+//   per-task ITERATION budgets (loop_max_iterations, #528) and a reason-aware escalate route
+//   (errors.Is ErrMaxIterationsReached / #529, framework fact filed as #569); each guard's doc
+//   names its follow-up. That M0 behavior (uniform iteration cap, outcome=failed routing) is
+//   proven by the e2e and remains correct until those upgrades are deliberately taken. #551 and #566, by
 //   contrast, were adopted on the bump alone — #551's already-scoped per-spawn `tools`
 //   lists became load-bearing at execution, and #566's local-copy getters made the
 //   -race e2e journeys reliably green — both with no rule/config change.
@@ -55,10 +56,14 @@ import (
 // would have fired, so this is re-anchored to source-inspect the substitution helper (the
 // same module-cache read the #530 guard uses; the helper is unexported).
 //
-// MECHANICAL UPGRADE (available, not yet adopted — a routing follow-up): replace the
-// constant-3 attempt-budget literals in configs/rules/dev-from-task/* with
-// `$entity.triple.task.spec.budget.value`, so the per-task budget from the projected
-// contract becomes load-bearing (it is advisory today).
+// MECHANICAL UPGRADE — ADOPTED (adopt-per-task-routing-budgets, with #568 length_gte): the
+// constant-3 attempt-budget literals in configs/rules/dev-from-task/{06c,06d,07b,07c} are now
+// `$entity.triple.route.task.budget.value` — the route-mirror copies the projected
+// task.spec.budget onto the firing loop and the retry/escalate routes substitute it, so the
+// per-task budget is load-bearing (it was advisory before). The substitution reads the
+// route-mirror predicate, not task.spec.budget directly, because .value is firing-entity-only
+// and the routes fire on L_n / the review loop, not the run. See
+// TestFloorsRouteTotalityAndSelfExtinguish / TestReviewRouteTotalityAndSelfExtinguish.
 func TestTripwire519ScalarValueSubstitution(t *testing.T) {
 	src := readSemstreamsSource(t, "processor", "rule", "execution_context.go")
 	const anchor = "applyTripleValueSubstitutions"
@@ -74,6 +79,39 @@ func TestTripwire519ScalarValueSubstitution(t *testing.T) {
 		t.Fatalf("execution_context.go no longer references gh#519 near %q — the .value contract "+
 			"may have moved; re-verify BY HAND that scalar-value substitution still resolves before "+
 			"trusting this pin", anchor)
+	}
+}
+
+// TestTripwire568LengthGteLteOperators — semstreams #568 (the array/length operator family
+// gains length_gte / length_lte, completing lt/lte/gt/gte to match the numeric family). A
+// REGRESSION GUARD: the fix LANDED in beta.153. adopt-per-task-routing-budgets DEPENDS on
+// length_gte — the escalate/park routes fire on `route.attempt.instance length_gte
+// $entity.triple.route.task.budget.value`; without it the ≥B boundary has no clean operator
+// (the design rejected the B-1/rule-split workarounds as cruft), so the retry/escalate
+// partition cannot be expressed. Source-anchored on the compiled framework: the operator
+// CONSTANTS in expression/types.go AND their registration/evaluation in evaluator.go. FIRES if
+// a future beta drops either — the routing rules would then silently stop matching (a coerce
+// error the evaluator swallows), stalling every not-clean attempt.
+func TestTripwire568LengthGteLteOperators(t *testing.T) {
+	types := readSemstreamsSource(t, "processor", "rule", "expression", "types.go")
+	evaluator := readSemstreamsSource(t, "processor", "rule", "expression", "evaluator.go")
+	for _, op := range []struct{ constName, literal string }{
+		{"OpLengthGte", `"length_gte"`},
+		{"OpLengthLte", `"length_lte"`},
+	} {
+		if !strings.Contains(types, op.constName) || !strings.Contains(types, op.literal) {
+			t.Fatalf("REGRESSION (#568): expression/types.go no longer declares %s = %s — the "+
+				"length-operator family lost a ≥/≤ variant. The escalate/park routes "+
+				"(route.attempt.instance length_gte $…route.task.budget.value) can no longer express "+
+				"the per-task budget boundary; restore upstream or re-open #568.", op.constName, op.literal)
+		}
+		// The constant existing but never registered in the evaluator's operator map would let a
+		// rule reference it yet never match — worse than a hard absence. Anchor the registration too.
+		if !strings.Contains(evaluator, op.constName) {
+			t.Fatalf("REGRESSION (#568): expression/evaluator.go no longer references %s — the operator "+
+				"constant exists but is not registered/evaluated, so a rule using it fails to match "+
+				"(a swallowed coerce error → no-match). Restore upstream or re-open #568.", op.constName)
+		}
 	}
 }
 
