@@ -59,14 +59,25 @@ load-bearing facts that shape every decision below:
 The routes fire on L_n; the budget is on the run; `.value` is firing-entity-only
 (fact 1). Options considered:
 
-- **(a) Mirror the budget onto L_n via the floors station — CHOSEN.** The station
-  already reads the run and stamps `route.*` on L_n; add `reader.ReadFacts(...,
-  "task.spec.budget")` and one `route.task.budget` triple to `routeMirrorTriples`.
-  Minimal Go on an existing sanctioned mirror. G1 (the pure-rule path does not
-  exist), G2 (no lifecycle transition — the station fires none), G3 (a raw copy
-  of the harness-projected clamped value, not a derived/model outcome), G5
-  (written under the existing `route-mirror` owner; new predicate declared with
-  that writer), G9 (one new predicate, named in the spec delta).
+- **(a) Mirror the budget via the sanctioned route-mirror — CHOSEN.** The
+  `route-mirror` owner is ONE logical writer with TWO code sites, and the four
+  routes fire on two different loops — so the budget rides **both** sites:
+  - `checkfloors.RunFloors` → the DEVELOPER loop L_n, where `06c`/`06d` fire:
+    add `reader.ReadFacts(..., "task.spec.budget")` and one `route.task.budget`
+    triple to `routeMirrorTriples`.
+  - `submit_review` → **Quinn's REVIEW loop**, where `07b`/`07c` fire
+    (`submitreview.go` already stamps `route.review.verdict` +
+    `route.attempt.instance` on its own loop in one pass): the same run-side
+    read, one more `route.task.budget` triple in that same pass.
+  A budget stamped on only one of the two would leave the other lane's routes
+  reading the silently-empty substitution on their ORDINARY path (e.g. every
+  `changes_requested` verdict) — see D7. Minimal Go on the existing sanctioned
+  mirror sites. G1 (the pure-rule path does not exist), G2 (no lifecycle
+  transition — neither site fires one), G3 (a raw copy of the harness-projected
+  clamped value, not a derived/model outcome), G5 (both sites stamp under the
+  established one-logical-writer `route-mirror` precedent already documented for
+  `route.attempt.instance`; new predicate declared with that writer), G9 (one
+  new predicate, named in the spec delta).
 - **(b) Carry the budget down via a rule at dispatch — REJECTED.** The dispatch
   rule (`04`) fires on the *coordinator* loop, which carries `agent.run.entity-id`
   (a pointer) but not `task.spec.budget`; `.value` there is `""` too. The
@@ -146,12 +157,61 @@ load-bearing, not the old constant. A second journey/pin SHOULD cover a distinct
 budget (e.g. author 1 → escalate on the first failed attempt) so the boundary is
 exercised at more than one value.
 
+### D7 — An absent budget is a loud station fault, never a silent default
+
+`task.spec.budget` is authored and clamped `[1,5]` by the projection station on
+every task, so its absence (or an unparseable value) on the run at mirror time is
+a projection bug — an impossible state under the authored contract, not a normal
+input. What the mirrors do then matters, because the substitution layer fails
+*open*: `$entity.triple.route.task.budget.value` resolves silently to `""` on
+absence (documented engine behavior, no log above Debug), and `length_lt ""` /
+`length_gte ""` is a coerce error the evaluator swallows at Debug as no-match —
+NEITHER retry nor escalate/park fires, and the run stalls with no park fact and
+no operator signal (M0 has no liveness watchdog; the non-claims are explicit
+about that). Both route-mirror sites (D1a) need a decided posture:
+
+- **(a) Fail the mirror site's turn loudly — CHOSEN, per-site shape:**
+  - **Floors station:** `RunFloors` returns an error when the run carries no
+    parseable `task.spec.budget`; the station base retries, and a persistent
+    fault stamps **nothing** on L_n. This inherits the documented R6 no-auto-park
+    posture (the same failure surface as a resolve/read fault today — loud in
+    logs, attempt does not advance, R8/group-8 owns stall-to-park). The budget
+    fault surfaces in the MIRROR phase, after the run-side `floor.finding` stamp
+    per the documented findings-first ordering: the current attempt's findings
+    are genuine harness output, already durable, and MUST NOT be cleared (the
+    resolve-fault clear exists to kill a stale PRIOR pass, not this) — only the
+    chaining signal is withheld.
+  - **submit_review executor:** the same absent-budget read returns an
+    `errResult` back to the loop (the tool's documented loud-fail posture —
+    "never a silent green"), stamping **nothing** on the review loop that pass.
+- **(b) Default to the min clamp (1) — REJECTED.** Masks the projection bug and
+  fabricates a contract value the projection never authored — a *derived* value
+  on a mirror that must stay raw copies (G3-adjacent; the mirror's whole claim
+  to G2-cleanliness is that it copies, never computes).
+- **(c) A budget-missing park rule — REJECTED.** New rule surface for a state
+  the atomicity invariant (below) makes structurally unreachable on both loops.
+  Revisit only if R8 wants a general stall-to-park rule.
+
+**ATOMICITY INVARIANT (pinned, owner-scoped):** NO route-mirror site stamps
+`route.attempt.*` without `route.task.budget` in its one `ReplaceTriples` pass —
+both sites: `checkfloors`→L_n and `submit_review`→review loop. "Attempt count
+present, budget absent" therefore cannot exist on either firing entity, and
+neither the 06c/06d nor the 07b/07c partition ever evaluates against a
+silently-empty substitution.
+
 ## Risks / Trade-offs
 
 - **[Depends on unreleased #568]** → This change is designed but not implemented
   until `length_gte` ships in a semstreams beta. No workaround is committed in the
   interim (deliberate — a workaround would be cruft to unwind). The semstreams
   team has indicated they will pick up #568 shortly.
+- **[Absent budget fails open at substitution]** → `$…value` resolves `""`
+  silently, and `length_lt ""` / `length_gte ""` is a swallowed coerce error →
+  no-match — a stall with no park. Closed by D7: a loud per-site fault (station
+  error / tool errResult) + the owner-scoped atomicity invariant (NO mirror site
+  stamps `route.attempt.*` without `route.task.budget` — both `checkfloors`→L_n
+  and `submit_review`→review loop, so neither route partition can see the
+  half-mirror).
 - **[The budget mirror could read stale]** → `route.task.budget` is stamped by the
   floors station on the same terminal that stamps `route.attempt.*`, so it is as
   fresh as the attempt count the route reads against it; the two are written in
@@ -170,15 +230,21 @@ exercised at more than one value.
 1. Land semstreams **#568** (`length_gte`/`length_lte`); bump the pin.
 2. `internal/vocab`: declare `route.task.budget` (writer `route-mirror`).
 3. `internal/tools/checkfloors`: read `task.spec.budget` off the run; stamp
-   `route.task.budget` on L_n in `routeMirrorTriples`.
-4. Rules `06c`/`07b` (retry): `length_lt $entity.triple.route.task.budget.value`.
+   `route.task.budget` on L_n in `routeMirrorTriples` (same single pass; absent
+   → error before any mirror write, findings NOT cleared — D7).
+4. `internal/tools/submitreview`: the same run-side read; stamp
+   `route.task.budget` on the REVIEW loop in the existing single
+   `ReplaceTriples` pass alongside `route.review.verdict` /
+   `route.attempt.instance` (absent → errResult, nothing stamped — D7).
+5. Rules `06c`/`07b` (retry): `length_lt $entity.triple.route.task.budget.value`.
    Rules `06d`/`07c` (escalate/park): `length_gte
    $entity.triple.route.task.budget.value`.
-5. Conformance: update the route-totality/partition pins to the variable boundary;
-   add `route.task.budget` to the mirror allowlist; flip the #519
+6. Conformance: update the route-totality/partition pins to the variable boundary;
+   add `route.task.budget` to the mirror allowlist (one logical writer, two
+   sanctioned sites — the `route.attempt.instance` precedent); flip the #519
    `upstream_asks_test.go` guard note to "adopted."
-6. e2e: D6 (explicit-budget exhaustion journey + a second budget value).
-7. Full ladder + docker journeys (without `-race`, per #566); adversarial review;
+7. e2e: D6 (explicit-budget exhaustion journey + a second budget value).
+8. Full ladder + docker journeys (without `-race`, per #566); adversarial review;
    commit.
 
 Rollback: revert the rule conditions to the literal `3` and drop the mirror — the

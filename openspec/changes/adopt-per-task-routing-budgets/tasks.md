@@ -6,14 +6,17 @@
 
 ## 2. Vocabulary (G5/G9)
 
-- [ ] 2.1 Declare `route.task.budget` in `internal/vocab` (writer `route-mirror`, capability `dev-from-task`, introduced-by this change)
+- [ ] 2.1 Declare `route.task.budget` in `internal/vocab` (writer `route-mirror`, capability `dev-from-task`, introduced-by this change). One LOGICAL writer, two sanctioned code sites (`checkfloors` + `submit_review`) — the established `route.attempt.instance` precedent, noted in both stamping sources
 - [ ] 2.2 Confirm `route.task.budget` is canonical 3-seg so `.value` arity-disambiguates (`vocab.Register` panic-guard covers it)
 
-## 3. Budget mirror (Go — the only product code, on the existing sanctioned mirror)
+## 3. Budget mirror (Go — the only product code, on BOTH sanctioned route-mirror sites, D1a/D7)
 
 - [ ] 3.1 `internal/tools/checkfloors`: read the run's `task.spec.budget` (one `reader.ReadFacts(ctx, runEntityID, "task.spec.budget")`, same shape as the existing `measurement.result.*` / `task.attempt.instance` reads)
-- [ ] 3.2 Stamp `route.task.budget` on L_n in `routeMirrorTriples` alongside `route.attempt.*`, under the `route-mirror` owner (raw copy of the clamped scalar; no re-clamp, no derived value — G3/G5)
-- [ ] 3.3 Unit pin: given a run with `task.spec.budget=B`, the floors mirror stamps `route.task.budget=B` on the dispatch loop entity; absent budget → mirror behaves fail-closed (define: default to the min clamp or park — decide and pin)
+- [ ] 3.2 Stamp `route.task.budget` on L_n in `routeMirrorTriples` alongside `route.attempt.*`, under the `route-mirror` owner; add it to the replaced-predicates list next to `RoutePassedPredicate`/`RouteRejectedPredicate` (single-valued). Raw copy of the AUTHORED string — parse-validate, never re-render; no re-clamp, no derived value (G3/G5)
+- [ ] 3.3 Unit pin (floors site): given a run with `task.spec.budget=B`, the mirror stamps `route.task.budget=B` on the dispatch loop entity; absent/unparseable budget → `RunFloors` returns an ERROR before any mirror write (D7a — loud R6 station fault, never a silent default). The fault is in the MIRROR phase: the current attempt's already-durable `floor.finding.*` are genuine harness output and MUST NOT be cleared (assert both: no L_n stamp AND findings intact — the resolve-fault clear is for stale PRIOR passes only)
+- [ ] 3.4 `internal/tools/submitreview`: the same run-side budget read; stamp `route.task.budget` on the REVIEW loop in the tool's existing single `ReplaceTriples` pass alongside `route.review.verdict` / `route.attempt.instance` (rules 07b/07c fire on the review loop — a budget stamped only by the floors site would stall EVERY changes_requested verdict on the empty substitution)
+- [ ] 3.5 Unit pin (review site): verdict pass stamps `route.task.budget=B` with the verdict; absent/unparseable budget → `errResult` back to the loop (the tool's documented loud-fail posture), NOTHING stamped on the review loop that pass
+- [ ] 3.6 Atomicity pin (D7, owner-scoped): NO route-mirror site stamps `route.attempt.*` without `route.task.budget` in its one `ReplaceTriples` pass — both `checkfloors`→L_n and `submit_review`→review loop — so neither the 06c/06d nor the 07b/07c partition can evaluate the silently-empty `$…value` substitution (the fail-open wedge)
 
 ## 4. Route rules (rule-native, no Go decision layer — G2)
 
@@ -25,7 +28,7 @@
 
 - [ ] 5.1 Update the floors/review route-totality + fail-closed-partition pins (`TestFloorsRouteTotalityAndSelfExtinguish`, `TestReviewRouteTotalityAndSelfExtinguish`) to the variable `length_lt B` / `length_gte B` boundary (no gap, no overlap across `[1,5]`)
 - [ ] 5.2 Add `route.task.budget` to the route-mirror allowlist in the G2 route-token census (a sanctioned mirror, NOT a Go-derived decision token — `TestNoGoDerivedRoutingTokens` must stay green)
-- [ ] 5.3 G5: `route.task.budget` single-writer pin (writer == `route-mirror`, matching the stamping source)
+- [ ] 5.3 G5: `route.task.budget` single-writer pin (writer == `route-mirror`, matching BOTH stamping sources — the one-logical-writer/two-sites precedent of `route.attempt.instance`)
 - [ ] 5.4 Flip the #519 "MECHANICAL UPGRADE (not yet adopted)" note in `upstream_asks_test.go` to "adopted"; keep the #528/#529 notes as deferred with the D5/D4 rationale
 - [ ] 5.5 Offline rule-load gate (`test/ruleload`) green with the substituted conditions
 

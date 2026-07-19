@@ -14,12 +14,16 @@ SHALL escalate toward the human and stop; it SHALL NOT loop unbounded.
 
 The enforced attempt budget SHALL be the per-task projected `task.spec.budget`
 (the authored budget clamped to `[1,5]` at projection), not a single global
-constant. Because the routing rules fire on the developer loop while
+constant. Because the routing rules fire on their own loops (retry/escalate on
+the developer loop; review-retry/park on the review loop) while
 `task.spec.budget` lives on the run entity, the harness SHALL make the projected
-budget readable by those rules by mirroring it onto the loop as
-`route.task.budget` — a raw copy of the already-clamped scalar, written by the
-single `route-mirror` owner alongside the `route.attempt.*` mirror, carrying no
-model-supplied or derived value (G3/G5). The retry boundary SHALL fire while the
+budget readable by those rules by mirroring it onto EVERY loop a budget-gated
+route fires on, as `route.task.budget` — a raw copy of the already-clamped
+scalar, written by the single logical `route-mirror` owner alongside that loop's
+`route.attempt.*` mirror and in the same atomic pass (never attempts without the
+budget), carrying no model-supplied or derived value (G3/G5). An absent or
+unparseable budget at mirror time SHALL fail that mirror site's turn loudly and
+stamp nothing — never a silent default. The retry boundary SHALL fire while the
 attempt count is below the budget, and the escalate/park boundary SHALL fire when
 the count reaches or exceeds it; the two boundaries SHALL partition the count with
 no gap and no overlap (fail-closed — an over-count escalates, never retries past

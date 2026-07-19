@@ -18,11 +18,14 @@ dynamic budgets" — the engine now does. This change redeems that promise.
 
 **In scope — #519, per-task attempt budget becomes load-bearing.** Engine
 verification (design.md) established that `$entity.triple.…value` reads only the
-firing entity, so the routes (which fire on the developer loop L_n) cannot read
-`task.spec.budget` (which lives on the run) directly. The budget therefore rides
-the **existing floors-station mirror** (the same Go path that already stamps
-`route.attempt.*` on L_n): the station reads `task.spec.budget` off the run and
-stamps `route.task.budget` on L_n, and the routes gate on it:
+firing entity, so the routes cannot read `task.spec.budget` (which lives on the
+run) directly — and the four routes fire on TWO loops: `06c`/`06d` on the
+developer loop L_n, `07b`/`07c` on Quinn's review loop. The budget therefore
+rides **both sanctioned route-mirror sites** (the one logical `route-mirror`
+writer that already stamps `route.attempt.*` on each): `checkfloors` reads
+`task.spec.budget` off the run and stamps `route.task.budget` on L_n, and
+`submit_review` does the same onto the review loop in its existing single pass,
+and the routes gate on it:
 
 - `06c-route-retry` / `07b-review-retry`: `route.attempt.instance length_lt
   $entity.triple.route.task.budget.value` (retry while count < B).
@@ -73,12 +76,15 @@ same rails (G2 rule-native routing preserved). The
 
 ## Impact
 
-- **Go** (one small extension to an existing sanctioned mirror — G1: the
-  pure-rule path does not exist, verified): `internal/tools/checkfloors` reads
-  `task.spec.budget` off the run and stamps `route.task.budget` on L_n via the
-  existing `route-mirror` writer (G5), alongside the `route.attempt.*` it already
-  mirrors. No new component/tool; no lifecycle transition (G2); a raw copy of the
-  harness-projected clamped budget, not a derived outcome (G3).
+- **Go** (two small extensions to the existing sanctioned route-mirror sites —
+  G1: the pure-rule path does not exist, verified): `internal/tools/checkfloors`
+  reads `task.spec.budget` off the run and stamps `route.task.budget` on L_n,
+  and `internal/tools/submitreview` stamps the same onto the review loop in its
+  existing single `ReplaceTriples` pass — both under the one logical
+  `route-mirror` writer (G5, the `route.attempt.instance` precedent). No new
+  component/tool; no lifecycle transition (G2); a raw copy of the
+  harness-projected clamped budget, not a derived outcome (G3). Absent budget →
+  loud per-site fault, nothing stamped (design D7 — never a silent default).
 - **Vocabulary**: one new predicate `route.task.budget` (writer `route-mirror`,
   G5/G9), declared in `internal/vocab` and the change's spec delta.
 - **Rules**: `configs/rules/dev-from-task/{06c,06d,07b,07c}.json` — the four
