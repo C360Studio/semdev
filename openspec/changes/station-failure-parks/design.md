@@ -38,8 +38,8 @@ Donor shape for the park action: `dev-from-task/06d-route-escalate.json`
 `station.dispatch.failed`, writer `station-harness` (the `internal/station`
 consumer — the component that ran the retries; vocab-registered under
 run-lifecycle). Object: `"<station-name>: <sanitized error>"`, error bounded
-(~512 runes, the semsource truncate posture) so a pathological error string
-cannot bloat the graph. Upsert via `ReplaceTriples` replace-by-predicate: a
+(512 bytes, cut rune-safe — the semsource truncate posture) so a pathological
+error string cannot bloat the graph. Upsert via `ReplaceTriples` replace-by-predicate: a
 crash-loop of repeated dispatches converges to one triple, never an append
 pile. The writer seam is DI: the station `Config` gains an `OwnedFactWriter`
 (exactly how station handlers already write their own facts); a nil writer =

@@ -102,10 +102,17 @@ type ruleFile struct {
 	ID         string          `json:"id"`
 	Type       string          `json:"type"`
 	Enabled    bool            `json:"enabled"`
+	Entity     ruleEntity      `json:"entity"`
 	Conditions []ruleCondition `json:"conditions"`
 	Logic      string          `json:"logic"`
 	OnEnter    []ruleAction    `json:"on_enter"`
 	OnExit     []ruleAction    `json:"on_exit"`
+}
+
+// ruleEntity is the rule's entity-state trigger scope (per-rule entity.pattern,
+// required to fire on the entity-state lane since beta.147).
+type ruleEntity struct {
+	Pattern string `json:"pattern"`
 }
 
 // loadRules parses every *.json rule under configs/rules/ (recursively) at the

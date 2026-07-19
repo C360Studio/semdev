@@ -47,11 +47,11 @@ type handler struct {
 
 // Handle records the delivery reference on the run. On a write fault it returns
 // the error and stamps NOTHING (fail-closed: never a false delivery) — the generic
-// base retries it (pr.ref is idempotent, latest-wins), and a persistent fault is
-// metered. At M0 the run does not auto-park on that persistent fault (the delivery
-// rule's marker is already set and rules are edge-triggered); the
-// routed-without-result reconciliation is R8/group 8. pr.ref is a run-level fact,
-// so req.EntityID (the firing run) is the whole target.
+// base retries it (pr.ref is idempotent, latest-wins), and a persistent fault
+// exhausts the base's retries, stamps station.dispatch.failed on the run, and the
+// run-fired park rule (run-lifecycle/05) parks it toward the human
+// (station-failure-parks; the restart half stays R8/group 8). pr.ref is a
+// run-level fact, so req.EntityID (the firing run) is the whole target.
 func (h *handler) Handle(ctx context.Context, req station.Request) error {
 	ref, err := openpr.Deliver(ctx, h.reader, h.writer, req.EntityID)
 	if err != nil {
@@ -80,9 +80,11 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "NATSClient required")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
+	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
+	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		reader: changefacts.NewNATSReader(deps.NATSClient),
-		writer: agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+		writer: writer,
 		logger: logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)

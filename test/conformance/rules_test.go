@@ -1061,19 +1061,22 @@ func TestValidationStationPublishWiring(t *testing.T) {
 	}
 }
 
-// TestDeliveryRoutedWithoutResultIsAKnownGap PINS the R6 station "routed-without-result"
-// wedge (G6 — pin the failure shape when a fix is deliberately deferred). The delivery route
-// (08a) stamps its self-extinguish delivery.routed marker BEFORE it publishes the
-// delivery-station component; if that component then fails persistently (after the base's
-// bounded retry), pr.ref never lands. Because the marker is set and rules are EDGE-triggered,
-// nothing re-triggers, and no rule reconciles "delivery.routed set ∧ pr.ref absent" into a
-// park (08b parks only on verify.result=fail) — the run does not auto-park at M0. This is a
-// deliberate deferral to R8/group 8 (restart-safe reconstruction + effect idempotency).
+// TestDeliveryRoutedWithoutResultIsAKnownGap PINS what remains of the R6 station
+// "routed-without-result" wedge (G6 — pin the failure shape when a fix is deliberately
+// deferred). The wedge NARROWED with station-failure-parks: a station that fails
+// PERSISTENTLY IN-PROCESS now stamps station.dispatch.failed on retries-exhausted and the
+// park rules (run-lifecycle/05/06) route the run to a human — that half is closed and
+// journey-pinned. What this tripwire still pins is the RESTART half: a crash in the
+// publish→handle window loses the in-flight dispatch — the marker is set, no failure fact
+// ever stamps (a dead process stamps nothing; a shutdown-aborted handler deliberately
+// stamps nothing), rules are EDGE-triggered, and no rule reconciles "delivery.routed set ∧
+// pr.ref absent" into a park after the restart. That reconciliation is R8/group 8
+// (upstream-blocked on on_recovery routing).
 //
-// TRIPWIRE: this asserts the gap STILL EXISTS. When group 8 adds the reconciliation rule (a
-// park gated on delivery.routed-present ∧ pr.ref-absent), this FAILS — prompting removal of
-// the tripwire and of the honest-gap comments in internal/station/station.go, 08a's metadata,
-// and internal/vocab/vocab.go.
+// TRIPWIRE: this asserts the restart gap STILL EXISTS. When group 8 adds the reconciliation
+// rule (a park gated on delivery.routed-present ∧ pr.ref-absent), this FAILS — prompting
+// removal of the tripwire and of the honest-gap comments in internal/station/station.go,
+// 08a's metadata, and internal/vocab/vocab.go.
 func TestDeliveryRoutedWithoutResultIsAKnownGap(t *testing.T) {
 	rules, err := loadRules(repoRoot(t))
 	if err != nil {
@@ -1237,6 +1240,8 @@ func TestOnlySanctionedParkWriters(t *testing.T) {
 		"dev_from_task_review_no_verdict":    true, // 07d — the reviewer produced no verdict
 		"dev_from_task_delivery_park":        true, // 08b — the delivery signals do not cohere
 		"dev_from_task_route_transient_park": true, // 06g — the transient-retry cap reached (adopt-reason-aware-escalate)
+		"run_park_station_failure_run":       true, // run-lifecycle/05 — a RUN-dispatched station exhausted its retries (station-failure-parks)
+		"run_park_station_failure_loop":      true, // run-lifecycle/06 — a LOOP-dispatched station exhausted its retries (station-failure-parks)
 	}
 	var writers []string
 	for _, r := range rules {
@@ -1251,6 +1256,92 @@ func TestOnlySanctionedParkWriters(t *testing.T) {
 		if !slices.Contains(writers, id) {
 			t.Errorf("sanctioned park writer %q does not stamp run.awaiting_human — a park path was silently dropped", id)
 		}
+	}
+}
+
+// The DISPATCH-ENTITY CENSUS (station-failure-parks task 2.1, D2): for every rule that
+// publishes a station dispatch (component.<station>.dispatch), pin which ENTITY KIND the
+// dispatch fires on — because that is where the harness stamps station.dispatch.failed on
+// retries-exhausted, and the two park rules (run-lifecycle/05 run-fired, /06 loop-fired)
+// partition exactly on it. The witness is LOAD-BEARING, not stylistic: a LOOP-fired
+// dispatch must thread the run anchor as a publish property substituted from the FIRING
+// entity's own triple (`run_entity_id: $entity.triple.agent.run.entity-id`) — which is
+// only possible when the firing entity carries agent.run.entity-id, i.e. it is a loop —
+// and that same triple is the binding the loop-fired park rule uses to reach the run. A
+// RUN-fired dispatch never threads it (the firing entity IS the run). NOTE the census
+// CORRECTED the design's expected table: validation is LOOP-fired (coordinator/03 fires
+// on the coordinator loop, `agent.loop.role eq coordinator`), not run-fired as D2's
+// pre-census sketch guessed — exactly why the design demanded verification from source.
+func TestStationDispatchEntityCensus(t *testing.T) {
+	rules, err := loadRules(repoRoot(t))
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	// The pinned split. A new station MUST be added here deliberately, deciding
+	// which park half covers it.
+	expected := map[string]string{
+		"projection-station": "run",  // dev-from-task/03 fires on the run
+		"provision-station":  "run",  // sandbox/01 fires on the run
+		"delivery-station":   "run",  // dev-from-task/08a fires on the run
+		"validation-station": "loop", // coordinator/03 fires on the coordinator loop
+		"floors-station":     "loop", // dev-from-task/05 fires on the developer loop
+		"verify-station":     "loop", // dev-from-task/07a fires on the review loop
+	}
+
+	const runAnchorSubstitution = "$entity.triple.agent.run.entity-id"
+	found := map[string]string{}
+	for _, r := range rules {
+		for _, a := range r.OnEnter {
+			if a.Type != "publish" || !strings.HasPrefix(a.Subject, "component.") {
+				continue
+			}
+			name := strings.TrimSuffix(strings.TrimPrefix(a.Subject, "component."), ".dispatch")
+			kind := "run"
+			if a.Properties["run_entity_id"] == runAnchorSubstitution {
+				kind = "loop"
+			}
+			if prev, dup := found[name]; dup && prev != kind {
+				t.Errorf("station %q is dispatched by rules with CONFLICTING firing-entity kinds (%s vs %s) — the park split cannot cover both from one fact location", name, prev, kind)
+			}
+			found[name] = kind
+		}
+	}
+
+	for name, wantKind := range expected {
+		gotKind, ok := found[name]
+		if !ok {
+			t.Errorf("no rule publishes component.%s.dispatch — a station lost its dispatch rule (or the census's subject parsing drifted)", name)
+			continue
+		}
+		if gotKind != wantKind {
+			t.Errorf("station %q dispatch fires on a %s entity, census pins %s — the D2 split moved; re-point the park rules (run-lifecycle/05 vs 06) and update this table deliberately", name, gotKind, wantKind)
+		}
+	}
+	for name := range found {
+		if _, ok := expected[name]; !ok {
+			t.Errorf("rule pack dispatches unknown station %q — add it to the dispatch-entity census (deciding which park half covers it) before it can strand a terminal failure", name)
+		}
+	}
+
+	// The park rules must partition the entity space along the SAME line the
+	// census pins: run-fired parks on the chain grammar, loop-fired on the
+	// agentic-loop grammar. This is what makes the two halves mutually
+	// exclusive by construction (no racy cross-entity discrimination).
+	wantPatterns := map[string]string{
+		"run_park_station_failure_run":  "*.*.agent.chain.execution.*",
+		"run_park_station_failure_loop": "*.*.agent.agentic-loop.execution.*",
+	}
+	for _, r := range rules {
+		if want, ok := wantPatterns[r.ID]; ok {
+			delete(wantPatterns, r.ID)
+			if r.Entity.Pattern != want {
+				t.Errorf("park rule %q entity pattern = %q, want %q — the pattern IS the run/loop discrimination; a wildcard would fire the run-fired half on loop entities (its absence guards pass vacuously there)", r.ID, r.Entity.Pattern, want)
+			}
+		}
+	}
+	for id := range wantPatterns {
+		t.Errorf("park rule %q not found in the rule packs", id)
 	}
 }
 

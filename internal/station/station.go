@@ -29,20 +29,23 @@
 // reconstruction of in-flight effects is design R8 (group 8), which rebuilds a
 // station's inputs from durable facts rather than relying on a queued message.
 //
-// FAILURE POSTURE (honest, M0): a station stamps NO success fact until its work
+// FAILURE POSTURE (honest): a station stamps NO success fact until its work
 // succeeds — so it never false-greens a run (fail-closed against a wrong outcome).
 // The generic base RETRIES a failing handler a bounded number of times (station
 // handlers are idempotent — the harness fact writers are replace-by-predicate /
 // exact-triple-deduped), which restores the transient-fault resilience the forced
 // coordinator loop had (its tool_choice=function loop re-called the tool on a tool
-// error). But a station rule stamps its self-extinguish marker BEFORE the publish
-// (restart dup-safety), and rules are EDGE-triggered on entity-state changes, so a
-// PERSISTENT handler fault that stamps nothing leaves the run with the marker set,
-// the success fact absent, and no triple change to re-trigger any rule: the run
-// does NOT auto-park at M0. Closing that "routed-without-result" wedge (reconcile
-// marker-set-∧-result-absent → park, plus effect idempotency on replay) is design
-// R8 / group 8, pinned as a known gap (test/conformance rules_test.go). This base
-// does not claim otherwise.
+// error). When the bounded retries EXHAUST live, the base stamps the harness-owned
+// station.dispatch.failed on the dispatched entity (station-failure-parks D1) and
+// the run-lifecycle park rules (05 run-fired / 06 loop-fired) record
+// run.awaiting.human from it — a terminal station failure PARKS the run toward
+// the human instead of the pre-M2 silent stall (real-LLM run 1's failure shape).
+// What remains R8/group 8 (upstream-blocked, tripwired in test/conformance
+// rules_test.go) is the RESTART half: a crash in the publish→handle window loses
+// the in-flight dispatch — a shutdown-aborted handler deliberately stamps
+// NOTHING (its retries were not exhausted; a park there would blame the station
+// for a process stop), so reconstruction after restart still needs the upstream
+// on_recovery routing. This base does not claim otherwise.
 package station
 
 import (
@@ -51,6 +54,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,8 +62,10 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
 	"github.com/c360studio/semstreams/pkg/errs"
+	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // SubjectPrefix is the NATS namespace every station dispatch rides. A rule
@@ -85,6 +91,31 @@ const maxHandleAttempts = 3
 // Kept short so a failing dispatch does not stall its subscription's serial
 // dispatcher for long; Stop's context-cancel breaks the wait immediately.
 const handleRetryBackoff = 200 * time.Millisecond
+
+// DispatchFailedPredicate is the harness-stamped TERMINAL dispatch outcome
+// (station-failure-parks D1): stamped on the DISPATCHED entity when a Handle
+// exhausts its bounded retries, so a park rule can route the run toward the
+// human instead of the pre-M2 silent stall. The SUCCESS path stamps nothing —
+// the harness never writes a success fact (fail-closed, G3).
+const DispatchFailedPredicate = "station.dispatch.failed"
+
+// DispatchFailedSource is the G5 single-writer Source the harness stamps on the
+// dispatch-outcome triple — the vocab census ties it to the station-harness
+// writer entry (test/conformance TestToolSourceMatchesVocabWriter).
+const DispatchFailedSource = "station-harness"
+
+// dispatchFailedErrLimit bounds the sanitized error carried in the fact's
+// object at 512 BYTES (the semsource truncate posture: cut on a rune boundary,
+// never mojibake — as few as ~170 runes for 3-byte scripts) so a pathological
+// handler error cannot bloat the graph.
+const dispatchFailedErrLimit = 512
+
+// dispatchFailedStampTimeout bounds the dispatch-outcome write. The stamp runs
+// under a DETACHED context (not the component-lifetime one): an exhaustion that
+// completes inside Stop's drain window must still land its park fact — the
+// shutdown-abort classification already happened at the moment the final
+// attempt failed (see runHandler's exhausted flag).
+const dispatchFailedStampTimeout = 10 * time.Second
 
 // Request is the decoded rule-`publish` dispatch envelope a Handler receives. It
 // is the whole channel from the rule to the station: the firing entity plus the
@@ -141,6 +172,16 @@ type dispatchEnvelope struct {
 // in-flight handler.
 type Config struct {
 	Ports *component.PortConfig `json:"ports,omitempty" schema:"type:ports,description:Port configuration. A station declares one nats input subscribing to component.<name>.> ,category:basic"`
+
+	// FactWriter is the harness's own owned-fact writer: the base uses it to
+	// stamp station.dispatch.failed on the dispatched entity when a Handle
+	// exhausts its bounded retries (station-failure-parks D1). DI-only — the
+	// json:"-" tag keeps it off the JSON config surface and out of the
+	// generated schema. New REJECTS a nil writer, so a registered station can
+	// never boot writer-less (the boot-wiring census, task 1.4); direct
+	// Component construction in unit tests may leave it nil (log-only, the
+	// pre-park behavior).
+	FactWriter agentictools.OwnedFactWriter `json:"-"`
 }
 
 // Validate requires at least one input port — a station with no subscription
@@ -165,6 +206,11 @@ type Component struct {
 	handler Handler
 	nats    *natsclient.Client
 	logger  *slog.Logger
+
+	// factWriter stamps the harness-owned dispatch-outcome fact (see
+	// Config.FactWriter). Nil only under direct test construction — New
+	// enforces it for every booted station.
+	factWriter agentictools.OwnedFactWriter
 
 	// One mutex guards the lifecycle flag + startTime + the base context so a
 	// concurrent Health/DataFlow read cannot see a torn read (mirrors the framework
@@ -210,6 +256,14 @@ func New(name string, config Config, handler Handler, nats *natsclient.Client, l
 	if handler == nil {
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, name, "New", "handler is required")
 	}
+	// The fact-writer check sits BEFORE the NATS check so its rejection is
+	// distinguishable in the unit pin (a nil client also fails, later). A
+	// writer-less station could run but would strand every terminal failure as
+	// the pre-M2 silent stall — the exact wedge station-failure-parks closes —
+	// so a future station cannot boot without one (the boot-wiring census).
+	if config.FactWriter == nil {
+		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, name, "New", "fact writer is required (stamps station.dispatch.failed on retries-exhausted; a writer-less station strands terminal failures)")
+	}
 	if nats == nil {
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, name, "New", "NATS client is required")
 	}
@@ -219,7 +273,7 @@ func New(name string, config Config, handler Handler, nats *natsclient.Client, l
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Component{name: name, config: config, handler: handler, nats: nats, logger: logger.With(slog.String("component", name))}, nil
+	return &Component{name: name, config: config, handler: handler, nats: nats, factWriter: config.FactWriter, logger: logger.With(slog.String("component", name))}, nil
 }
 
 // Initialize is part of the LifecycleComponent contract. A station has nothing to
@@ -327,16 +381,30 @@ func (c *Component) handleMessage(subject string, data []byte) {
 	}
 
 	req := Request{EntityID: env.EntityID, Properties: stringProps(env.Properties), Subject: subject}
-	if err := c.runHandler(req); err != nil {
-		// Fire-and-forget: the error cannot propagate to the publisher. After the
-		// bounded retries, log + meter it. The station stamped no success fact
-		// (fail-closed, never a false green) — but at M0 a persistent fault does
-		// NOT itself park the run (edge-triggered rules; the marker is already set):
-		// the routed-without-result reconciliation is R8/group 8 (see the package
-		// doc + the pinned known-gap test).
-		c.logger.Error("station handler failed after retries; run does not advance (no auto-park at M0 — R8/group 8 owns the routed-without-result reconciliation)",
-			slog.String("entity_id", env.EntityID), slog.String("subject", subject), slog.Any("error", err))
+	if exhausted, err := c.runHandler(req); err != nil {
+		// Fire-and-forget: the error cannot propagate to the publisher. The
+		// station stamped no success fact (fail-closed, never a false green).
 		atomic.AddInt64(&c.errors, 1)
+		if !exhausted {
+			// Stop drained the retry loop EARLY — the bounded retries were NOT
+			// exhausted, so this is a shutdown abort, not a terminal station
+			// failure: no dispatch-outcome fact (a park here would blame the
+			// station for a process stop). The flag was captured at the moment
+			// the attempt failed, so a Stop racing in AFTER a genuine final-
+			// attempt failure cannot misclassify it. The crash-in-flight half of
+			// the wedge is R8/group 8 restart recovery (upstream-blocked,
+			// tripwired).
+			c.logger.Error("station handler aborted by shutdown; no dispatch-outcome fact (retries not exhausted — restart recovery is R8/group 8)",
+				slog.String("entity_id", env.EntityID), slog.String("subject", subject), slog.Any("error", err))
+			return
+		}
+		// TERMINAL: the retries exhausted live. Stamp the harness-owned
+		// station.dispatch.failed on the dispatched entity so the run-lifecycle
+		// park rules record run.awaiting.human from it (station-failure-parks;
+		// the transition itself stays rule-owned, G2).
+		c.logger.Error("station handler failed after retries; stamping station.dispatch.failed so the park rules route the run to a human",
+			slog.String("entity_id", env.EntityID), slog.String("subject", subject), slog.Any("error", err))
+		c.stampDispatchFailed(env.EntityID, err)
 		return
 	}
 	c.logger.Debug("station handled dispatch", slog.String("entity_id", env.EntityID))
@@ -346,15 +414,20 @@ func (c *Component) handleMessage(subject string, data []byte) {
 // transient failure up to maxHandleAttempts (handlers are idempotent). It stops
 // early — without retrying — once the base context is cancelled (Stop in flight),
 // so a shutdown drains promptly rather than burning the retry budget.
-func (c *Component) runHandler(req Request) error {
+//
+// exhausted reports whether the failure is a GENUINE retries-exhausted terminal:
+// the final attempt failed while the context was still live. It is captured AT
+// THE MOMENT of that failure so a Stop racing in afterwards cannot reclassify a
+// real exhaustion as a shutdown abort (the stamp itself runs detached — see
+// stampDispatchFailed). Every early ctx-cancelled exit reports exhausted=false.
+func (c *Component) runHandler(req Request) (exhausted bool, err error) {
 	ctx := c.handlerCtx()
-	var err error
 	for attempt := 1; attempt <= maxHandleAttempts; attempt++ {
 		if err = c.handler.Handle(ctx, req); err == nil {
-			return nil
+			return false, nil
 		}
 		if ctx.Err() != nil {
-			return err // shutting down — do not retry
+			return false, err // shutting down — do not retry, not an exhaustion
 		}
 		if attempt < maxHandleAttempts {
 			c.logger.Warn("station handler failed; retrying (idempotent)",
@@ -362,11 +435,13 @@ func (c *Component) runHandler(req Request) error {
 			select {
 			case <-time.After(handleRetryBackoff * time.Duration(attempt)):
 			case <-ctx.Done():
-				return err
+				return false, err
 			}
 		}
 	}
-	return err
+	// The final attempt failed with the context live at the check above —
+	// bounded retries genuinely exhausted.
+	return true, err
 }
 
 // handlerCtx returns the component-lifetime context under a read lock (Stop swaps
@@ -391,6 +466,57 @@ func stringProps(in map[string]any) map[string]string {
 		}
 	}
 	return out
+}
+
+// stampDispatchFailed records the harness-owned TERMINAL dispatch outcome on
+// the dispatched entity after runHandler exhausted its bounded retries
+// (station-failure-parks D1). ReplaceTriples is replace-by-predicate, so a
+// crash-loop of repeated dispatches converges to ONE triple — never an append
+// pile. The write failing is logged + metered and nothing more: the dispatch
+// lane is fire-and-forget, and the run then honestly remains in the pre-park
+// stall (the log states it) rather than false-greening anything.
+func (c *Component) stampDispatchFailed(entityID string, handleErr error) {
+	if c.factWriter == nil {
+		// Direct test construction only — New rejects a nil writer for every
+		// booted station. Log-only preserves the pre-park behavior for unit
+		// tests of unrelated station mechanics.
+		return
+	}
+	// Handlers conventionally prefix their own errors with the station name
+	// ("projection-station: ..."); strip that one prefix before adding ours so
+	// the object reads "<station>: <error>" once, not stuttered.
+	errText := strings.TrimPrefix(handleErr.Error(), c.name+": ")
+	triple := message.Triple{
+		Subject:    entityID,
+		Predicate:  DispatchFailedPredicate,
+		Object:     c.name + ": " + truncateErr(errText),
+		Source:     DispatchFailedSource,
+		Timestamp:  time.Now().UTC(),
+		Confidence: 1.0,
+	}
+	// DETACHED bounded context, not the component-lifetime one: the exhaustion
+	// was already classified live (runHandler's exhausted flag), so a Stop
+	// arriving during the write must not turn a real terminal failure into a
+	// lost park.
+	ctx, cancel := context.WithTimeout(context.Background(), dispatchFailedStampTimeout)
+	defer cancel()
+	if err := c.factWriter.ReplaceTriples(ctx, entityID, []message.Triple{triple}, nil); err != nil {
+		atomic.AddInt64(&c.errors, 1)
+		c.logger.Error("station could not stamp station.dispatch.failed; the run will NOT park (dispatch-outcome write failed)",
+			slog.String("entity_id", entityID), slog.Any("write_error", err), slog.Any("handle_error", handleErr))
+	}
+}
+
+// truncateErr bounds a handler error for the fact object: sanitize to valid
+// UTF-8 on BOTH paths (a raw docker/exec byte can arrive un-truncated too),
+// then cut at dispatchFailedErrLimit bytes on a rune boundary with an ellipsis
+// marking the cut — the object never carries mojibake.
+func truncateErr(s string) string {
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) <= dispatchFailedErrLimit {
+		return s
+	}
+	return strings.ToValidUTF8(s[:dispatchFailedErrLimit], "") + "…"
 }
 
 // Stop drains in-flight handlers (bounded by timeout), unsubscribes, and flips

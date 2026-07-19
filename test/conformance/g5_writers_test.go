@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/experiment"
+	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
 	"github.com/c360studio/semdev/internal/tools/createchange"
@@ -82,6 +83,11 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"open_pr", openpr.Source, openpr.RefPredicate},
 		{"provision_sandbox", provisionsandbox.Source, provisionsandbox.ReadyPredicate},
 		{"apply_patch", applypatch.Source, applypatch.CommitPredicate},
+		// station.dispatch.failed: the generic station BASE (not a handler) stamps
+		// the terminal dispatch outcome under the station-harness writer
+		// (station-failure-parks D1) — the tie between the harness Source const
+		// and the vocab's single-writer entry.
+		{"station-harness", station.DispatchFailedSource, station.DispatchFailedPredicate},
 	}
 	for _, c := range cases {
 		writer, ok := vocab.WriterOf(c.predicate)

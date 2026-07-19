@@ -37,8 +37,9 @@
 // (the park rule routes it), exactly the forced tool's posture (a block was a success result,
 // not a loop error). Only a graph-WRITE fault (the block/ready fact could not be stamped)
 // returns an error, which the generic base retries (bounded, idempotent). A persistent
-// write fault leaves neither sandbox.ready nor sandbox.blocked and nothing re-triggers — the
-// general R6 no-auto-park gap at M0, deferred to R8/group 8. Never a false green.
+// write fault exhausts the base's retries → station.dispatch.failed on the run → the
+// run-fired park rule (run-lifecycle/05) parks it toward the human (station-failure-parks;
+// the restart half stays R8/group 8). Never a false green.
 package provision
 
 import (
@@ -69,8 +70,8 @@ type handler struct {
 // Handle provisions the run named by the dispatch's firing entity (the provision rule fires
 // on the RUN, so req.EntityID IS the run — no property). A BLOCK is stamped and returns nil
 // (the park rule routes sandbox.blocked); only a graph-WRITE fault returns an error so the
-// base retries. A persistent fault leaves neither readiness nor block and nothing
-// re-triggers — the R6 no-auto-park gap at M0 (R8/group 8). Never a false green.
+// base retries. A persistent fault exhausts the base's retries and parks the run via
+// station.dispatch.failed + run-lifecycle/05 (station-failure-parks). Never a false green.
 func (h *handler) Handle(ctx context.Context, req station.Request) error {
 	res, err := provisionsandbox.Provision(ctx, h.deps, req.EntityID)
 	if err != nil {
@@ -118,6 +119,8 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
 	factReader := changefacts.NewNATSReader(deps.NATSClient)
+	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
+	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		deps: provisionsandbox.ProvisionDeps{
 			Sources:     runspace.StaticSource{Dir: sourceDir},
@@ -127,7 +130,7 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 			Prover:      provisionsandbox.DefaultProver(),
 			Store:       nil, // M0: no governed secrets (SB2c)
 			Reader:      factReader,
-			Writer:      agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+			Writer:      writer,
 			DockerCheck: cleanroom.DockerAvailable,
 			Logger:      logger,
 		},

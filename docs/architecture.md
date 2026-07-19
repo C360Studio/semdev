@@ -21,6 +21,8 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `experiment.run.condition` | experiment-intake | semsource-ab |
 | `human.opt.signal` | comment-adapter | forge-io |
 | `run.awaiting.human` | park-rule | run-lifecycle |
+| `station.dispatch.failed` | station-harness | run-lifecycle |
+| `station.park.routed` | park-rule | run-lifecycle |
 | `run.dev.kickoff` | dev-rewake-rule | dev-from-task |
 | `run.projection.kickoff` | dev-projection-rule | dev-from-task |
 | `delivery.pr.ref` | open-pr | forge-io |

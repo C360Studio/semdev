@@ -47,10 +47,11 @@ type handler struct {
 
 // Handle freezes the change's tasks into task.spec on the run. A refusal (schema gap,
 // re-projection, unvalidated content, target_files contract) or a graph fault returns
-// an error: the base retries, and a persistent refusal stamps nothing (fail-closed).
-// At M0 a persistent projection refusal does NOT auto-park the run (the projection
-// marker is set, rules are edge-triggered) — the same known station gap delivery
-// carries, deferred to R8/group 8.
+// an error: the base retries, and a persistent refusal stamps no task.spec
+// (fail-closed) — the base then stamps station.dispatch.failed on the run and the
+// run-fired park rule (run-lifecycle/05) parks it toward the human, naming this
+// station and the refusal (station-failure-parks; real-LLM run 1's exact shape,
+// now journey-pinned). The restart half stays R8/group 8.
 func (h *handler) Handle(ctx context.Context, req station.Request) error {
 	slug := req.Prop(SlugProperty)
 	count, err := projecttasks.Project(ctx, h.reader, h.writer, h.logger, req.EntityID, slug)
@@ -79,9 +80,11 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "NATSClient required")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
+	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
+	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		reader: changefacts.NewNATSReader(deps.NATSClient),
-		writer: agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+		writer: writer,
 		logger: logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)

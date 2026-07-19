@@ -60,6 +60,11 @@ const reasonAware = "adopt-reason-aware-escalate"
 // harness-measured condition-labeled evidence (semdev computes no winner).
 const semsourceAB = "integrate-semsource-ab-harness"
 
+// parks is the change slug for the terminal-station-failure park (M2's first
+// unattended-safety floor): the station harness stamps its dispatch outcome on
+// retries-exhausted and a park rule records run.awaiting.human from it.
+const parks = "station-failure-parks"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -79,6 +84,24 @@ var Predicates = []Predicate{
 	{"experiment.run.condition", "experiment-intake", "semsource-ab", semsourceAB},
 	{"human.opt.signal", "comment-adapter", "forge-io", m0},
 	{"run.awaiting.human", "park-rule", "run-lifecycle", m0},
+	// station.dispatch.failed is the harness-stamped TERMINAL dispatch outcome
+	// (station-failure-parks D1): the generic station base (internal/station)
+	// stamps it on the DISPATCHED entity when a Handle exhausts its bounded
+	// retries — object "<station>: <sanitized error>" (bounded 512 BYTES, cut
+	// rune-safe), upsert via ReplaceTriples so a crash-loop converges to ONE
+	// triple. The harness that ran the retries is the single writer (G3/G5);
+	// the SUCCESS path stamps nothing (fail-closed — a fault can never read as
+	// completion).
+	{"station.dispatch.failed", "station-harness", "run-lifecycle", parks},
+	// station.park.routed is the park rules' fired-once self-extinguish marker
+	// (station-failure-parks D2), stamped on the FIRING entity by the run-fired
+	// and loop-fired park rules alongside the run.awaiting.human add + user-bus
+	// publish — same rule-owned marker pattern as route.attempt.routed. Rule
+	// add_triple stamps the engine's generic Source "rule_engine" (actions.go),
+	// so this park-rule entry is a SUBSYSTEM label, not a Source tie — the
+	// sanctioned-writer census (TestOnlySanctionedParkWriters family) is what
+	// keeps the realizations honest.
+	{"station.park.routed", "park-rule", "run-lifecycle", parks},
 	{"run.dev.kickoff", "dev-rewake-rule", "dev-from-task", m0},
 	{"run.projection.kickoff", "dev-projection-rule", "dev-from-task", m0},
 	// delivery.pr.ref is the delivered PR reference (was pr.ref). The DELIVERY-STATION

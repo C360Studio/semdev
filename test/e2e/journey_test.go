@@ -446,7 +446,8 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// it against the budget). Red-first: break the warm container (or measure over unpatched
 	// bytes) and passed comes back "false".
 	requireMeasurementPassed(ctx, t, runEntityID)
-	requireTriplePresent(ctx, t, runEntityID, "task.attempt.instance")
+	requireTriplePresent(ctx, t, runEntityID, "task.attempt.instance",
+		"dispatch-developer (dev-from-task/04) must append the per-task attempt counter AT SPAWN (R3 — the route counts it against the budget)")
 	t.Logf("station 11: task measured IN-LOOP, in-container — measurement.result.passed=true (the fix is REAL); attempt counted (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 12 — the structural floors run on the developer's REAL diff (R6: the floors
@@ -818,7 +819,8 @@ func TestBridgeProofTransientGraceRetries(t *testing.T) {
 	// The transient grace fired: a transient counter is stamped (the model_error re-dispatch) and
 	// the run RECOVERED — the retried loop measured green and delivered. requirePRDelivered fails
 	// loud if the run PARKED instead (a broken transient route that exhausted to 06g).
-	requireTriplePresent(ctx, t, runEntityID, "task.transient.instance")
+	requireTriplePresent(ctx, t, runEntityID, "task.transient.instance",
+		"the transient-retry route (dev-from-task/06f) must append the transient counter on its re-dispatch")
 	t.Logf("transient station: initial dispatch failed model_error → 06f transient-retry re-dispatched (task.transient.instance stamped) on run %s", runEntityID)
 
 	// Budget UNTOUCHED: exactly ONE convergence attempt (the initial dispatch appended #1 at spawn;
@@ -1565,7 +1567,7 @@ func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
 // requireTriplePresent polls until the run entity carries at least one triple for
 // predicate (any object). Used for appended multi-value predicates like
 // task.attempt.<i>, where the object (a loop instance) is not known up front.
-func requireTriplePresent(ctx context.Context, t *testing.T, runEntityID, predicate string) {
+func requireTriplePresent(ctx context.Context, t *testing.T, runEntityID, predicate, hint string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
@@ -1581,8 +1583,7 @@ func requireTriplePresent(ctx context.Context, t *testing.T, runEntityID, predic
 			}
 		}
 		return false
-	}, "run entity "+runEntityID+" never gained a "+predicate+" triple — dispatch-developer (dev-from-task/04) "+
-		"must append the per-task attempt counter AT SPAWN (R3 — the route counts it against the budget)")
+	}, "run entity "+runEntityID+" never gained a "+predicate+" triple — "+hint)
 }
 
 // requireRunAnchor polls until THIS wake's coordinator loop carries an

@@ -78,8 +78,17 @@ dispatches receive at brief assembly — exactly the durable-lesson class M1 run
 ever runs the lesson lifecycle rulepack, its bootstrap must mirror `lessonRecordProjectionContract`.
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
-(the real sandbox + cold clean-room verify), and `simplify-m0-execution-rail` (the
-rule-native execution rail). ARCHIVED (implemented + specs synced):
+(the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
+rule-native execution rail), and `station-failure-parks` (M2's first unattended-safety
+floor, IMPLEMENTED: the station harness stamps `station.dispatch.failed` on
+retries-exhausted [shutdown-abort deliberately unstamped — no false terminal], the two
+run-lifecycle park rules [05 run-fired on the chain grammar / 06 loop-fired on the
+agentic-loop grammar, split PINNED by the dispatch-entity census — validation turned out
+LOOP-fired, correcting D2's sketch] record `run.awaiting.human` naming the station + its
+refusal; graph `triple.add` pinned live as unconditional APPEND; run 1's projection-refusal
+shape is now the RED-first-verified journey `TestBridgeProofStationFailureParks` — the
+class that silently stalled run 1 now parks toward the human). ARCHIVED (implemented +
+specs synced):
 `migrate-semstreams-beta147`, `adopt-per-task-routing-budgets` (#568 per-task attempt
 budgets, shipped `79a884a`), `adopt-reason-aware-escalate` (#529/#569 transient grace
 via the atomic-mirror classification, shipped `56b30a4` — the rule-engine double-dispatch

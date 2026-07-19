@@ -99,6 +99,16 @@ message as an issue comment via the GitHub client, resolving the issue from
 `run.issue.ref`. No new predicate; posting failures log + retry bounded and
 NEVER block the park itself (the park fact is already durable).
 
+CARRY-FORWARD from station-failure-parks (named by its review): if/when this
+change (or a successor) adds a RESUME action for a parked run, the resume must
+clear the park's WHOLE fact set, not just the marker the pre-parks resume knew:
+`run.awaiting.human` AND `station.park.routed` AND `station.dispatch.failed`.
+`station.park.routed` never self-clears and (run-fired half) lives on the RUN,
+so a resumed run whose station fails terminally a SECOND time could never
+re-park — re-opening the silent-stall class station-failure-parks closed. All
+parks are terminal-until-resume today, so this is a resume-lane obligation,
+not a current defect.
+
 **D5 — Delivery: real API through the adapter seam, doubly idempotent.**
 `openpr` gains the adapter call path: push the run's committed attempt branch
 (`semdev/<run-suffix>`; the checkout's git objects exist at delivery time in

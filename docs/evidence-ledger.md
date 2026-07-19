@@ -134,7 +134,19 @@ evidence).
   schema's `target_files` description now names the includes-test contract
   and its consequence; the journey's projection station poll now dumps
   evidence and names the refusal class
-- M1 remains NOT CLAIMED.
+- **ADDENDUM (2026-07-19, station-failure-parks): this failure class now
+  PARKS.** The exact shape above — a station refusal exhausting the harness's
+  bounded retries — now stamps `station.dispatch.failed` on the dispatched
+  entity (writer `station-harness`) and the run-lifecycle park rules record
+  `run.awaiting.human` naming the failed station and its refusal. Reproduced
+  as the zero-token mock journey `TestBridgeProofStationFailureParks`
+  (`test/e2e/parks_journey_test.go`): RED-verified without the park rules
+  (the run stalled exactly as this entry records), GREEN with them (parked in
+  14.7s, no task.spec / no cold verify / no delivery — no false green,
+  exactly 3 model turns). An unattended M2 run hitting this class no longer
+  stalls silently.
+- M1 remains NOT CLAIMED as of this entry. (Claimed the same day by the
+  run-2 entry above.)
 
 ## Experiment conditions (semsource A/B — integrate-semsource-ab-harness)
 

@@ -91,10 +91,12 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "NATSClient required")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
+	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
+	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		reader: changefacts.NewNATSReader(deps.NATSClient),
 		runner: cliexec.OSRunner{},
-		writer: agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+		writer: writer,
 		logger: logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)

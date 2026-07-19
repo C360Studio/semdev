@@ -204,8 +204,10 @@ func TestRealLLMJourneyIssueToPR(t *testing.T) {
 	// This is a real content gate: project_tasks REFUSES a task whose
 	// target_files carry no *_test.go (the includes-test contract — run 1
 	// died exactly here when the schema had not told the model). A refusal
-	// logs loud at the station but does NOT auto-park at M0, so the window
-	// expiring with the dump IS the verdict shape for it.
+	// now PARKS the run (station-failure-parks: retries exhaust →
+	// station.dispatch.failed → run.awaiting.human naming projection), so the
+	// window expiring here dumps a run whose evidence SHOWS the park + refusal
+	// rather than a bare stall.
 	realEventually(ctx, t, client, 3*time.Minute, func(entities map[string]entityStateMap) bool {
 		e, ok := entities[runEntityID]
 		return ok && tripleString(e, "task.spec.test-command") != ""

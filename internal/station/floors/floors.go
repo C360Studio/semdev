@@ -127,10 +127,12 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
 	factReader := changefacts.NewNATSReader(deps.NATSClient)
+	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
+	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		attempts: runspace.NewAttempts(factReader, checkouts),
 		reader:   factReader,
-		writer:   agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+		writer:   writer,
 		logger:   logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)

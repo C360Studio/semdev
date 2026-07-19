@@ -30,9 +30,10 @@
 // terminal reject of a good artifact, SB5) is stamped as evidence but matches NEITHER
 // delivery route — so the Handle returns an error to trigger the base's bounded idempotent
 // retry (re-run the cold proof), preserving the forced verify loop's transient resilience.
-// A persistent retry (or any persistent fault) exhausts the base's budget and the run
-// stalls toward the human without a verify.result the delivery route can read — the general
-// R6 no-auto-park gap at M0, deferred to R8/group 8. Never a false green.
+// A persistent retry (or any persistent fault) exhausts the base's budget → the base stamps
+// station.dispatch.failed on the dispatched REVIEW LOOP (07a fires there, per the
+// dispatch-entity census) → the loop-fired park rule (run-lifecycle/06) parks the bound run
+// toward the human (station-failure-parks; restart half stays R8/group 8). Never a false green.
 package verify
 
 import (
@@ -74,11 +75,12 @@ type handler struct {
 // Handle clones the run's committed artifact, proves it COLD, and stamps verify.result on
 // the run named by the run_entity_id property. A pre-proof infra fault (clone/resolve/
 // prove-could-not-run) stamps nothing and returns an error (the base retries; a persistent
-// fault leaves verify.result absent so the delivery route never fires — the R6 no-auto-park
-// gap at M0, R8/group 8). A RETRY verdict is stamped (evidence) but also returns an error so
-// the base re-runs the cold proof (a transient flake must never park a good artifact, SB5;
-// a "retry" matches neither delivery route). A terminal pass/fail verdict is stamped and
-// Handle returns nil — the delivery route reads verify.result off the run.
+// fault exhausts the base's budget and parks the bound run via station.dispatch.failed on
+// the review loop + run-lifecycle/06 — station-failure-parks). A RETRY verdict is stamped
+// (evidence) but also returns an error so the base re-runs the cold proof (a transient flake
+// must never park a good artifact, SB5; a "retry" matches neither delivery route). A
+// terminal pass/fail verdict is stamped and Handle returns nil — the delivery route reads
+// verify.result off the run.
 func (h *handler) Handle(ctx context.Context, req station.Request) error {
 	runEntityID := req.Prop(RunEntityProperty)
 	if runEntityID == "" {
@@ -93,8 +95,8 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 		// retry is stamped as evidence, but it matches NEITHER delivery route (08a pass / 08b
 		// fail) — so return an error to trigger the base's bounded idempotent retry (re-run the
 		// cold proof), preserving the forced verify loop's transient resilience. A persistent
-		// retry exhausts the base budget and the run stalls toward the human (R6 no-auto-park
-		// gap, R8/group 8) — never a false green.
+		// retry exhausts the base budget → station.dispatch.failed on the review loop → the
+		// loop-fired park (run-lifecycle/06) routes the run to the human — never a false green.
 		return fmt.Errorf("verify-station: cold proof returned retry (transient infra fault) for %s — retrying", runEntityID)
 	}
 	h.logger.Info("verify station recorded clean-room verdict",
@@ -126,12 +128,14 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "shared run checkouts required (the cold verify clones the run's committed artifact off the run's checkout)")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
+	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
+	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		clones:    checkouts, // *runspace.Checkouts implements CloneForVerify (VerifyClones)
 		manifests: runspace.Manifests{},
 		prover:    verifyartifact.DefaultProver(),
 		store:     nil,
-		writer:    agentictools.NewNATSOwnedFactWriter(deps.NATSClient),
+		writer:    writer,
 		logger:    logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)
