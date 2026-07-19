@@ -23,25 +23,22 @@ context: |
   - Minimal vocabulary (G9): new predicates only via the change that needs
     them, named in its spec delta. Start from zero. Docs match reality (G10).
 
-  Stack: Go 1.26+, semstreams v1.0.0-beta.134+, NATS via docker compose
-  (never embedded). Conventional commits. Status: foundational — no product
-  code yet; the M0 walking-skeleton spine is the first change.
+  Stack: Go 1.26+ (go.mod declares 1.26.3), semstreams v1.0.0-beta.150 (canonical predicate/entity
+  contracts FAIL-CLOSED at graph-write; every rule needs entity.pattern),
+  NATS via docker compose (never embedded). Conventional commits.
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+  Status: M0 walking skeleton COMPLETE end-to-end (mock-LLM, real
+  containers) — see docs/evidence-ledger.md (G7: M0 claimed on bridge
+  proof; M1 real-LLM not claimed). openspec/specs/ holds the CANONICAL
+  synced capability specs; author deltas against them. Vocabulary is fully
+  canonical 3-seg lower-kebab, declared in internal/vocab (single writer
+  per predicate — check WriterOf before proposing a new fact).
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Keep the "## Why" section under 1000 characters (the CLI validator ERRORS above that)
+    - Name every new predicate in the spec delta with its single writer (G5/G9)
+  tasks:
+    - Every fix task lands with its red-first offline pin (G6)
+    - Evidence tasks name the exact test/journey that proves the behavior (G7)
+

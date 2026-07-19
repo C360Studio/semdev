@@ -39,13 +39,18 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.25+; semstreams current release (started at `v1.0.0-beta.134`); NATS
-  via docker compose (never embedded).
+- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.150` (canonical predicate/entity
+  contracts fail-closed at graph-write; every rule needs an `entity.pattern`);
+  NATS via docker compose (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
 
 ## Status
 
-Foundational. No product code yet — the M0 walking-skeleton spine is the
-first OpenSpec change. Donor checkouts for reference:
-`~/Code/c360/semteams` (shape), `~/Code/c360/semspec` (floors + audits).
+M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers) — the
+recorded evidence is [docs/evidence-ledger.md](docs/evidence-ledger.md) (G7:
+M0 claimed on bridge proof only; M1 real-LLM not claimed). Canonical synced
+capability specs live in `openspec/specs/`; active changes in
+`openspec/changes/`. See CLAUDE.md for the detailed current status. Donor
+checkouts for reference: `~/Code/c360/semteams` (shape), `~/Code/c360/semspec`
+(floors + audits).

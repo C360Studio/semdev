@@ -39,7 +39,7 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.25+; semstreams pinned at `v1.0.0-beta.150` (started at beta.134; beta.147
+- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.150` (started at beta.134; beta.147
   is the canonical-predicate + entity-ID breaking wave; beta.149 landed the #551
   per-loop executor tool-enforcement fix; beta.150 enforces the canonical predicate/entity
   contract FAIL-CLOSED at the graph-write boundary — semdev's vocab already conforms);
@@ -56,7 +56,12 @@ canonical contract fail-closed at graph-write — semdev's vocab already conform
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
 (the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
-rule-native execution rail), and `migrate-semstreams-beta147` (the beta.147 sweep).
+rule-native execution rail), and `adopt-per-task-routing-budgets` (designed, gated on
+semstreams #568); `migrate-semstreams-beta147` (the beta.147 sweep) is archived.
+`openspec/specs/` now holds the CANONICAL synced capability specs (the stacked
+implemented deltas merged, oldest→newest — the unimplemented routing-budgets delta
+deliberately NOT synced); the recorded evidence ledger is `docs/evidence-ledger.md`
+(G7 — M0 claimed on named bridge proof, M1 not claimed).
 The full arc runs against real docker: front door → issue_intake → create_change
 → validate → **human approval** → project task.spec → provision + prove-cold
 sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → structural
