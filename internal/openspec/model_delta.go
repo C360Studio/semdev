@@ -2,7 +2,7 @@ package openspec
 
 // Delta is a change's delta spec for one capability — the content of
 // changes/<slug>/specs/<capability>/spec.md. It groups requirement changes by
-// operation (openspec.change.<slug>.delta.<cap>.<rid>.{op,...}). The three
+// operation. The three
 // slices map to OpenSpec's "## ADDED / MODIFIED / REMOVED Requirements"
 // sections; render always emits them in that canonical order, so the round-trip
 // is stable regardless of the input's section ordering.

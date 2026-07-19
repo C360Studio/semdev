@@ -10,10 +10,10 @@ import "strings"
 // readable doc (vs. WriteChange's multi-file folder on disk).
 //
 // Pure + dep-free (composes the per-artifact renderers); stays in this package
-// alongside them so the format layer remains extraction-ready. Cosmetic "# Title" headings are NOT modeled by the
-// graph (facts_change.go), so an artifact reconstructed via ChangeFromFacts has
-// an empty Title; this fills a sensible default on a LOCAL copy (never mutates
-// the caller's Change).
+// alongside them so the format layer remains extraction-ready. create_change
+// authors artifacts with no cosmetic "# Title" heading, so a blob-hydrated
+// Change arrives Title-less; this fills a sensible default on a LOCAL copy
+// (never mutates the caller's Change).
 func RenderChangeFolder(c *Change) string {
 	var b strings.Builder
 	b.WriteString("# OpenSpec change: ")

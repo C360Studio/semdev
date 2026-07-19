@@ -1,14 +1,16 @@
 // Package openspec parses and renders the OpenSpec spec-driven-development
 // markdown format (https://github.com/Fission-AI/OpenSpec) to and from a Go
-// model, and projects that model to and from graph facts. It is the bidirectional
-// OpenSpec seam: artifacts are hydrated from facts on the way out and ingested to
-// facts on the way in (semdev's openspec-io capability). Ported from semteams'
-// dep-free format engine and re-vocabularied to semdev's openspec.* predicates.
+// model. It is the FORMAT ENGINE of semdev's openspec-io capability, ported
+// from semteams' dep-free engine. The graph seam lives elsewhere: the whole
+// change travels as ONE canonical document blob (openspec.change.document /
+// openspec.spec.document — internal/changefacts and internal/specfacts), which
+// JSON-serializes this package's model verbatim; the earlier fine-grained
+// per-field Facts projection was retired with that flatten.
 //
 // OpenSpec requirements are RFC-2119 "The system SHALL ..." statements paired
 // with Given/When/Then scenarios. The round-trip contract is *semantic*
 // stability, not byte stability: parse(render(parse(x))) equals parse(x) on the
-// modeled fields, and Facts∘FromFacts is likewise stable.
+// modeled fields.
 //
 // The model is split across files by artifact: this file holds the capability
 // spec types; model_delta.go the change-delta types; model_change.go the
@@ -16,13 +18,12 @@
 //
 // The whole package is dependency-free (stdlib only) by design: the format layer
 // (model*.go, parse.go, render.go, change.go) implements the external OpenSpec
-// standard, and the graph adapter (facts.go, facts_change.go) emits subject-less
-// Facts that a graph-writing caller turns into triples — so the mapping stays
-// independent of NATS and of entity identity.
+// standard independent of NATS and of entity identity.
 package openspec
 
 // Spec is a capability's living specification — the content of one
-// openspec/specs/<capability>/spec.md file (openspec.spec.<cap>.*).
+// openspec/specs/<capability>/spec.md file (stored on the graph as the
+// openspec.spec.document blob, internal/specfacts).
 type Spec struct {
 	// Capability is the specs/<capability>/ folder name. It is not part of
 	// the markdown body; callers parsing a file set it from the path.
@@ -46,10 +47,10 @@ type Spec struct {
 // Requirement is one "### Requirement: <Name>" block: an RFC-2119 statement
 // plus its Given/When/Then scenarios.
 type Requirement struct {
-	// Name is the text after "### Requirement:". The graph layer derives the
-	// <rid> predicate key by slugifying Name (see facts.go's slugify); the
-	// original Name is always stored so the inverse recovers it from the fact,
-	// never by un-slugifying the rid.
+	// Name is the text after "### Requirement:". The graph layer stores the
+	// whole change as one canonical document blob (internal/changefacts), so
+	// the original Name always survives the round-trip verbatim — nothing
+	// derives or reverses a slug from it.
 	Name string
 	// Statement is the RFC-2119 body, e.g. "The system SHALL ...".
 	Statement string

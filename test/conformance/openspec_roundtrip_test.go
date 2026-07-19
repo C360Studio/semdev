@@ -4,24 +4,28 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 // 4.7 — round-trip fidelity is the OpenSpec compatibility test, and semdev's own
 // m0 change is the first fixture. The graph-authoritative content — the spec
-// deltas (requirements + scenarios) and the tasks — must survive Facts∘FromFacts
-// unchanged, so a change hydrated from graph facts reproduces what was ingested.
+// deltas (requirements + scenarios) and the tasks — must survive projection to
+// the graph and hydration back unchanged, so what render_openspec shows a human
+// is what create_change ingested.
 //
-// Boundary (documented, not a bug): the engine projects the graph-authoritative
-// SPEC content (proposal intent/scope, specs, tasks) to facts; freeform proposal/
-// design prose under non-canonical headings lands in ExtraSections, which are not
-// fact-projected. semdev's own proposal.md/design.md use narrative headings
-// ("## Why", "## Decisions"), so this test asserts the specs+tasks round-trip —
-// the content the graph owns. semdev-GENERATED changes emit the canonical modeled
-// fields by construction (create_change), so they round-trip fully; the donor
-// add-mfa fixture proves that full-content path in internal/openspec.
+// The projection under test is the CANONICAL one: the whole change as ONE
+// openspec.change.document blob (beta.147 D3, internal/changefacts) — the shape
+// create_change writes and Hydrate reads. The earlier fine-grained
+// Facts/ChangeFromFacts triple-tree adapter was retired with the blob flatten
+// (it had no product caller; two projections of one artifact is drift surface),
+// so this pin rides Marshal∘Unmarshal of the real document. The blob carries
+// the WHOLE change — proposal and design included, not just the spec deltas the
+// old fine-grained projection modeled — so the comparison is the full Change,
+// strict, no ignored fields. (The all-fields schema pin, covering Modified/
+// Removed/Design shapes the m0 fixture doesn't exercise, lives in
+// internal/changefacts's document round-trip test.)
 func TestM0ChangeSpecContentRoundTrips(t *testing.T) {
 	changeDir := filepath.Join(repoRoot(t), "openspec", "changes", activeChangeSlug)
 
@@ -36,19 +40,22 @@ func TestM0ChangeSpecContentRoundTrips(t *testing.T) {
 		t.Fatal("m0 change parsed no tasks; the round-trip pin would pass vacuously")
 	}
 
-	facts := c1.Facts()
-	c2 := openspec.ChangeFromFacts(activeChangeSlug, facts)
-
-	// Deltas: requirements + scenarios must be identical (Title/Warnings are not
-	// fact-modeled and are expected to differ).
-	if diff := cmp.Diff(c1.Deltas, c2.Deltas,
-		cmpopts.IgnoreFields(openspec.Delta{}, "Title", "Warnings")); diff != "" {
-		t.Errorf("spec deltas did not round-trip through facts (-ingested +hydrated):\n%s", diff)
+	blob, err := changefacts.MarshalDocument(changefacts.ChangeDocument{Change: c1})
+	if err != nil {
+		t.Fatalf("marshal change document: %v", err)
+	}
+	doc, err := changefacts.UnmarshalDocument(blob)
+	if err != nil {
+		t.Fatalf("unmarshal change document: %v", err)
+	}
+	c2 := doc.Change
+	if c2 == nil {
+		t.Fatal("hydrated document carries no change")
 	}
 
-	// Tasks: sections, numbers, text, done state must be identical.
-	if diff := cmp.Diff(c1.Tasks, c2.Tasks,
-		cmpopts.IgnoreFields(openspec.Tasks{}, "Title")); diff != "" {
-		t.Errorf("tasks did not round-trip through facts (-ingested +hydrated):\n%s", diff)
+	// The FULL change — slug, proposal, design, deltas, tasks — must be
+	// identical after the round-trip.
+	if diff := cmp.Diff(c1, c2); diff != "" {
+		t.Errorf("change did not round-trip through the document blob (-ingested +hydrated):\n%s", diff)
 	}
 }

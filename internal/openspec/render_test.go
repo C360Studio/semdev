@@ -7,12 +7,11 @@ import (
 
 // TestRenderChangeFolder_ComposesArtifactsWithMarkers verifies the single-doc
 // projection: each present artifact appears under its openspec/changes/<slug>/
-// file marker, and a Change reconstructed via ChangeFromFacts (which does not
-// model the cosmetic "# Title" headings) renders with synthesized titles rather
-// than an empty "# " line.
+// file marker, and a Title-less Change (the real render_openspec input shape —
+// a blob-hydrated model whose artifacts carry no cosmetic "# Title" headings)
+// renders with synthesized titles rather than an empty "# " line.
 func TestRenderChangeFolder_ComposesArtifactsWithMarkers(t *testing.T) {
-	// Round-trip through facts so the artifacts come back Title-less, exercising
-	// the title-synthesis path (the real render_openspec input shape).
+	// Artifacts are constructed Title-less, exercising the title-synthesis path.
 	src := &Change{
 		Slug: "add-mfa",
 		Proposal: &Proposal{
@@ -36,7 +35,7 @@ func TestRenderChangeFolder_ComposesArtifactsWithMarkers(t *testing.T) {
 			{Number: "1.1", Text: "add totp"},
 		}}}},
 	}
-	got := RenderChangeFolder(ChangeFromFacts("add-mfa", src.Facts()))
+	got := RenderChangeFolder(src)
 
 	for _, want := range []string{
 		"# OpenSpec change: add-mfa",

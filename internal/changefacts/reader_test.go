@@ -24,7 +24,7 @@ type fakeReader struct {
 
 // ReadFacts honors the prefix via the production filterByPrefix, exactly as the
 // NATS reader does — so a test that relies on scoping proves the scoping, not
-// ChangeFromFacts's downstream slug filter.
+// the downstream document decode.
 func (f *fakeReader) ReadFacts(_ context.Context, _ string, prefix string) ([]message.Triple, error) {
 	f.gotPrefix = prefix
 	if f.err != nil {
@@ -145,7 +145,7 @@ func TestReadErrorKindClassifies(t *testing.T) {
 
 // filterByPrefix is the load-bearing scope on the real NATS path: the entity
 // query returns EVERY owner's triples, so a foreign predicate must be dropped
-// before ChangeFromFacts sees it. A regression here (e.g. HasPrefix→Contains, or
+// before the document decode sees it. A regression here (e.g. HasPrefix→Contains, or
 // dropping the filter) would leak a sibling change's facts into the render.
 func TestFilterByPrefixDropsForeignOwners(t *testing.T) {
 	const prefix = "openspec.change.fix-null-deref."
@@ -168,7 +168,7 @@ func TestFilterByPrefixDropsForeignOwners(t *testing.T) {
 }
 
 // objectString renders a non-string object rather than dropping it, so a
-// hand-written or legacy numeric/bool fact still reaches ChangeFromFacts.
+// hand-written or legacy numeric/bool fact still reaches the document decode.
 func TestObjectStringHandlesNonStrings(t *testing.T) {
 	cases := map[any]string{"prose": "prose", true: "true", 42: "42", nil: ""}
 	for in, want := range cases {

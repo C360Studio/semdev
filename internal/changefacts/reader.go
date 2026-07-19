@@ -33,7 +33,8 @@ import (
 
 // Reader reads the full triples currently on an already-born entity whose
 // predicate begins with prefix. prefix MUST be non-empty and scope the read to
-// the caller's fact package (e.g. "openspec.change.<slug>."); an empty prefix is
+// the caller's fact package (e.g. "openspec.change.document" — production
+// callers pass the exact predicate); an empty prefix is
 // rejected, mirroring OwnedFactWriter.ReadOwnedPredicates — an unscoped read on a
 // shared entity would pull every owner's facts.
 //

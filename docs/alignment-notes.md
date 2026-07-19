@@ -88,12 +88,12 @@ Template:
   and `publish`es a rendered document to an `output/file` component (the D1
   "rule→publish→output/file" hydrate path).
 - **Why it cannot express this:** rendering a change means reconstructing the
-  nested OpenSpec model (proposal, per-capability deltas, ordered tasks) from a
-  flat fact set and re-serializing it to canonical markdown — the inverse of the
-  format engine's `Facts()` (`ChangeFromFacts` + `RenderChangeFolder`). A rule's
+  nested OpenSpec model (proposal, per-capability deltas, ordered tasks) from the
+  stored `openspec.change.document` blob and re-serializing it to canonical
+  markdown (`changefacts.Hydrate` + `RenderChangeFolder`). A rule's
   `$`-templating substitutes single predicate values into a fixed string; it
-  cannot re-group deltas by capability, order tasks by index, or JSON-decode the
-  scenario arrays. That reconstruction is deterministic Go in `internal/openspec`;
+  cannot JSON-decode the document, re-group deltas by capability, or order tasks
+  by index. That reconstruction is deterministic Go in `internal/openspec`;
   the tool is the thin read adapter (a `changefacts.Reader`, query-only) that
   hands the run's facts to it. Read-only: it stamps no facts (no G5 writer) and
   its schema takes only the change slug (G3, trivially).
@@ -106,7 +106,7 @@ Template:
   and `publish`es to an `output/file` component to drop the change folder on disk.
 - **Why it cannot express this:** materializing an OpenSpec change is a multi-file
   filesystem write — `proposal.md`, `tasks.md`, and one `specs/<capability>/spec.md`
-  per delta — reconstructed from the flat fact set (`ChangeFromFacts`) and
+  per delta — hydrated from the `openspec.change.document` blob and
   serialized by the format engine's `WriteChange`, which also prunes stale managed
   files. A rule's single-value `publish` cannot re-group deltas by capability, walk
   a variable set of capability files, or drive the authoritative directory

@@ -7,7 +7,7 @@ package openspec
 // non-checkbox task bullet — and authored output is gated by create_change's
 // create_change author tool, not by ingest.
 
-// Proposal is a change's proposal.md (openspec.change.<slug>.proposal.*):
+// Proposal is a change's proposal.md:
 // the "why" and shape of a change, before specs/design/tasks.
 type Proposal struct {
 	// Title is the "# <Title>" heading (e.g. "Proposal: Add Dark Mode").
@@ -26,7 +26,7 @@ type Proposal struct {
 	ExtraSections []MarkdownSection
 }
 
-// Design is a change's design.md (openspec.change.<slug>.design.*): the
+// Design is a change's design.md: the
 // technical approach, architecture decisions, data flow, and file changes.
 type Design struct {
 	// Title is the "# <Title>" heading (e.g. "Design: Add Dark Mode").
@@ -67,7 +67,7 @@ type FileChange struct {
 	Kind string
 }
 
-// Tasks is a change's tasks.md (openspec.change.<slug>.task.*). OpenSpec
+// Tasks is a change's tasks.md. OpenSpec
 // tasks.md is THIN — checkboxes grouped by section. The execution-rich fields
 // (target_files, test_command, …) that dev-from-task needs are graph-only,
 // authored by create_change, and are NOT represented here.
