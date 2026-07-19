@@ -4,16 +4,20 @@
 
 ### Requirement: Real-model configuration is honest about the wire it speaks
 
-A real-LLM run SHALL configure the model registry against an endpoint the
-pinned framework actually implements. On semstreams beta.153 the model-call
-path speaks the OpenAI chat-completions wire only (no native Anthropic
-adapter), so an Anthropic run SHALL use Anthropic's OpenAI-compatible endpoint
-with `provider: "openai"`, `tool_format: "openai"`, and the API key resolved at
-runtime from a named environment variable (`api_key_env`) — never a key in a
-config file. The endpoint config SHALL carry the model's real per-1M-token
-prices so the framework stamps true `agent.loop.cost-usd` facts (the ledger's
-cost record derives from them, G3/G7: costs are harness-stamped, never
-model-reported), and SHALL set an output-token ceiling and a request timeout.
+A real-LLM run SHALL configure the model registry against an endpoint and
+provider the pinned framework actually implements, with the API key resolved
+at runtime from a named environment variable (`api_key_env`) — never a key in
+a config file. The run-1 provider is Gemini (the framework's first-class
+route): `provider: "gemini"` with `wire_backend: "wire"` over Google's
+OpenAI-compatible endpoint — both required together for Gemini 3.x preview
+models' thought-signature contract — matching the framework's own example
+registry. An Anthropic run SHALL use Anthropic's OpenAI-compatible endpoint
+with `provider: "openai"` (semstreams beta.153 has no native Anthropic
+adapter; `provider: "anthropic"` validates but is unimplemented). The
+endpoint config SHALL carry the model's real per-1M-token prices so the
+framework stamps true `agent.loop.cost-usd` facts (the ledger's cost record
+derives from them, G3/G7: costs are harness-stamped, never model-reported),
+and SHALL set an output-token ceiling and a request timeout.
 
 #### Scenario: The registry resolves the key from the environment
 - **WHEN** the real-LLM config is loaded with `api_key_env` naming a variable

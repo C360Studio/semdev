@@ -11,43 +11,58 @@ evidence the ledger cannot accept (G7).
    `task e2e` (a cached `ok` is not a run — use `go test -race -tags=e2e
    -count=1 ./test/e2e/...` after `task nats:reset` if in doubt). All seven
    bridge-proof journeys pass before the first paid token.
-2. **Key present**: `export ANTHROPIC_API_KEY=...` in the launching shell. The
+2. **Key present**: `export GEMINI_API_KEY=...` in the launching shell. The
    journey reads it via the registry's `api_key_env` — it never appears in a
    config file. A declared run (`SEMDEV_REAL_LLM=1`) with the key missing
    FAILS immediately by design; do not "fix" that by weakening the gate.
 3. **Docker up**, NATS compose reachable (the journey resets it itself).
 4. **Abort criteria written down** (§3) before launch, not improvised after.
 
-## 1. The model config (and why it looks like OpenAI)
+## 1. The model config (Gemini — the framework's first-class route)
 
-The journey (`test/e2e/realllm_journey_test.go`, `realLLMConfigPath`) patches
-the bootstrap config to a single endpoint:
+The paid provider is Gemini (operator constraint: Anthropic API rates are
+unaffordable for this project). The journey
+(`test/e2e/realllm_journey_test.go`, `realLLMConfigPath`) patches the
+bootstrap config to a single endpoint copying the framework's OWN
+`configs/gemini-example.json` shape:
 
 ```json
-"anthropic": {
-  "provider": "openai",
-  "url": "https://api.anthropic.com/v1",
-  "model": "claude-opus-4-8",
+"gemini": {
+  "provider": "gemini",
+  "url": "https://generativelanguage.googleapis.com/v1beta/openai",
+  "model": "gemini-3.1-pro-preview",
+  "api_key_env": "GEMINI_API_KEY",
+  "max_tokens": 1048576,
   "supports_tools": true,
   "tool_format": "openai",
-  "api_key_env": "ANTHROPIC_API_KEY",
+  "stream": false,
+  "reasoning_effort": "medium",
+  "wire_backend": "wire",
   "max_output_tokens": 8192,
   "request_timeout": "300s",
-  "input_price_per_1m_tokens": 5.00,
-  "output_price_per_1m_tokens": 25.00
+  "input_price_per_1m_tokens": 2.00,
+  "output_price_per_1m_tokens": 12.00
 }
 ```
 
-`provider: "openai"` is deliberate and verified: semstreams (beta.153) has NO
-native Anthropic adapter — its model-call path speaks the OpenAI
-chat-completions wire with Bearer auth (`AdapterFor`: gemini/openai/ollama +
-generic fallback). Anthropic's OpenAI-compatible endpoint at
-`https://api.anthropic.com/v1` accepts exactly that. The registry VALIDATES
-`provider: "anthropic"` but nothing implements it; with no URL, go-openai
-would default to api.openai.com. Do not switch this to `provider:
-"anthropic"` until a native adapter lands upstream. The price fields make the
-framework's `agent.loop.cost-usd` stamps real — they are the ledger's cost
-record (G3: harness-stamped, never model-reported).
+Why this exact shape (all framework-verified, beta.153): Gemini rides
+Google's OpenAI-compatible endpoint; `provider: "gemini"` engages the native
+`GeminiAdapter` and `wire_backend: "wire"` the framework-owned wire client —
+BOTH are REQUIRED for the Gemini 3.x preview per-tool_call
+`thought_signature` contract (ADR-037 chunk 8; the framework's live test
+drives exactly this endpoint+model with tools). Gemini 2.5-stable models can
+instead use the plain `provider: "openai"` umbrella (see the example config's
+`gemini-flash` entry — the cheaper fallback tier if run costs need to drop
+further). The PREVIEW SLUG ROTATES — update the model id and prices together
+when Google publishes the stable id. The price fields make the framework's
+`agent.loop.cost-usd` stamps real — they are the ledger's cost record (G3:
+harness-stamped, never model-reported).
+
+(Alternative providers, verified this change: Anthropic has NO native adapter
+in beta.153 — an Anthropic run must use its OpenAI-compat endpoint
+`https://api.anthropic.com/v1` with `provider: "openai"`; the registry
+accepts `provider: "anthropic"` but nothing implements it, and with no URL
+go-openai dials api.openai.com. Recorded so nobody configures it that way.)
 
 ## 2. Smoke probe before the journey (one cheap turn)
 
@@ -55,24 +70,21 @@ Prove auth + endpoint + model id + tool calling with a single bounded request
 before booting anything:
 
 ```sh
-curl -sS https://api.anthropic.com/v1/chat/completions \
-  -H "Authorization: Bearer $ANTHROPIC_API_KEY" \
-  -H "content-type: application/json" \
-  -d '{
-    "model": "claude-opus-4-8",
-    "max_tokens": 64,
-    "messages": [{"role": "user", "content": "Call the ping tool."}],
-    "tools": [{"type": "function", "function": {"name": "ping", "description": "reply check", "parameters": {"type": "object", "properties": {}}}}],
-    "tool_choice": "required"
-  }' | head -c 2000; echo
+task realllm:probe
 ```
+
+(the task wraps one curl against
+`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
+with a single forced `ping` tool call — the exact wire + auth the runtime
+will speak.)
 
 Expected: an assistant message whose `tool_calls` names `ping`. Anything else
 (401, model not found, no tool_calls) — stop; the journey would fail the same
 way for real money. Also confirm on run day that the configured prices
-(5.00/25.00 per 1M for claude-opus-4-8) still match the published pricing —
-the cost stamps inherit them, and token counts are the recomputable ground
-truth if they drift.
+(2.00/12.00 per 1M for gemini-3.1-pro-preview, ≤200K-token prompts) still
+match the published pricing — the preview slug AND its prices rotate; the
+cost stamps inherit them, and token counts are the recomputable ground truth
+if they drift.
 
 ## 3. Abort criteria (write these into the launch note)
 
@@ -84,7 +96,8 @@ Abort = kill the `go test` process, then `task nats:reset` and remove any
   ≈ 2–3 min, dev loop turn ≈ 2–4 min incl. in-container measure, review ≈ 2
   min, verify ≈ 3 min) AND the journey has not failed on its own window.
 - **Cost runaway**: summed `agent.loop.cost-usd` across run-bound loops
-  exceeds $10 (run 1's arc should land well under $5 at opus-4-8 prices), or
+  exceeds $5 (run 1's arc should land WELL under $1 at gemini-3.1-pro
+  prices), or
   more attempt/loop entities appear than the budget admits (> 5 attempts =
   the clamp failed — abort AND file the pin).
 - **Thrash**: the same station fails → retries more than the transient grace
@@ -95,11 +108,12 @@ Abort = kill the `go test` process, then `task nats:reset` and remove any
 ## 4. Launch
 
 ```sh
-task nats:reset
-SEMDEV_REAL_LLM=1 go test -tags=e2e -count=1 -timeout 80m \
-  -run 'TestRealLLMJourneyIssueToPR$' -v ./test/e2e/ \
-  > /tmp/realllm-run.log 2>&1 &
+task realllm:launch
 ```
+
+(resets NATS, gates on `GEMINI_API_KEY`, runs the journey with the
+LOAD-BEARING `-count=1 -timeout 80m`, and tees to `/tmp/realllm-run.log` for
+the sidecar. Run it in one shell; the sidecar in another.)
 
 The journey logs a `real-llm station:`/`real-llm milestone:` line as each
 station lands, an `EVIDENCE` dump on any failure, and `LEDGER` lines (per-loop
@@ -107,11 +121,12 @@ tokens + cost and the sum) at the terminal.
 
 ## 5. The watch sidecar (active, not passive)
 
-Poll every 30–60s from a second shell. Silence is not success — sanity-check
-every filter against the mock dry-run output BEFORE arming it (a grep that
-matches nothing on a healthy log is a broken filter, not a quiet system).
-These shapes were proven against a live mock journey (`sidecar dry-run`,
-first-real-llm-journey task 3.2):
+Run `task realllm:status` every 30–60s from a second shell (it bundles the
+narration grep, an error-shape grep, and the authoritative run-entity
+listing). Silence is not success — every filter below was sanity-checked
+against a live mock journey BEFORE arming (a grep that matches nothing on a
+healthy log is a broken filter, not a quiet system; `sidecar dry-run`,
+first-real-llm-journey task 3.2). The raw shapes, for drill-down:
 
 ```sh
 # (a) Station/milestone progress — the journey's own narration:
@@ -145,8 +160,9 @@ entry:
 ### <date> — first real-LLM journey (M1 easy tier)   [kind: real-llm]
 
 - Status: converged | parked(<message>) | aborted(<criterion>)
-- Command: SEMDEV_REAL_LLM=1 go test -tags=e2e -run TestRealLLMJourneyIssueToPR ...
-- Model: claude-opus-4-8 via api.anthropic.com/v1 (OpenAI-compat), all roles
+- Command: task realllm:launch
+- Model: gemini-3.1-pro-preview via generativelanguage.googleapis.com
+  (provider gemini + wire backend, framework-native route), all roles
 - Cost record (harness-stamped): <the LEDGER lines — per-loop tokens-in/out,
   cost-usd, and the sum>
 - Attempts: <n> of budget <B>; transient retries: <n>

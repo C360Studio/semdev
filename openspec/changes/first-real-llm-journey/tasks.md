@@ -29,8 +29,14 @@
 - [x] 4.2 Adversarial review (go-reviewer + semstreams-reviewer) of the diff — standing directive; apply findings
 - [x] 4.3 `openspec validate --strict` green for this change
 
-## 5. The paid run itself (operator-gated — blocked on ANTHROPIC_API_KEY)
+## 5. The paid run itself (operator-gated — blocked on GEMINI_API_KEY in the launch shell)
 
-- [ ] 5.1 Operator exports `ANTHROPIC_API_KEY`; curl smoke probe per runbook passes
-- [ ] 5.2 First paid run per the runbook §4 command: `SEMDEV_REAL_LLM=1 go test -tags=e2e -count=1 -timeout 80m -run 'TestRealLLMJourneyIssueToPR$' -v ./test/e2e/` (NEVER without `-timeout` — go test's default 10m would panic-kill the paid run mid-arc) with the sidecar armed and abort criteria in hand
+- [ ] 5.1 Operator exports `GEMINI_API_KEY`; `task realllm:probe` passes (one forced ping tool call against the real endpoint)
+- [ ] 5.2 First paid run: `task realllm:launch` (wraps the LOAD-BEARING `-count=1 -timeout 80m` — go test's default 10m would panic-kill the paid run mid-arc — plus the NATS reset and the log tee) with `task realllm:status` armed in a second shell and abort criteria in hand
 - [ ] 5.3 Ledger entry (kind `real-llm`) with cost + sidecar records; M1 rung claimed ONLY on that named evidence (G7)
+
+## 6. Provider re-target: Gemini (operator constraint, post-review)
+
+- [x] 6.1 Swap the journey to the framework's first-class Gemini route (provider `gemini` + `wire_backend: wire`, `GEMINI_API_KEY`, `gemini-3.1-pro-preview`, prices 2.00/12.00 per 1M) copying `configs/gemini-example.json` from the beta.153 module — the Anthropic-compat route stays documented as the verified alternative
+- [x] 6.2 Operator lane in the Taskfile (house convention): `realllm:probe` / `realllm:launch` / `realllm:status`; runbook §2/§4/§5 reference the tasks
+- [x] 6.3 Gates re-proven after the swap: vet + gate-path tests (skip / malformed / keyless) + `task check`

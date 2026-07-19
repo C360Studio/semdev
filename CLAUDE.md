@@ -80,11 +80,15 @@ launch surface: the issue-content lane (wake carries the admitted issue's author
 text; persona contract makes create_change reasons preserve the ask — the mock had
 papered over the model never seeing the issue), the env-gated real-LLM journey
 (`test/e2e/realllm_journey_test.go`, `SEMDEV_REAL_LLM=1`; keyless/malformed
-declarations fail loud) against Anthropic's OpenAI-compatible endpoint (VERIFIED:
-beta.153 has NO native anthropic adapter — the model path is OpenAI-wire only; do
-not config `provider:"anthropic"`), and `docs/real-llm-runbook.md` (sidecar
-commands dry-run-proven). Group 5 — the paid run + ledger entry — waits on the
-operator's `ANTHROPIC_API_KEY`; M1 stays NOT CLAIMED.
+declarations fail loud) against the framework's FIRST-CLASS Gemini route
+(operator constraint: Anthropic rates unaffordable; provider `gemini` +
+`wire_backend: wire`, `gemini-3.1-pro-preview`, `GEMINI_API_KEY` — the
+`configs/gemini-example.json` shape; NOTE beta.153 has NO native anthropic
+adapter — an Anthropic run would need its OpenAI-compat endpoint, never
+`provider:"anthropic"`), `docs/real-llm-runbook.md` (sidecar commands
+dry-run-proven), and the Taskfile operator lane `realllm:probe`/`launch`/
+`status`. Group 5 — the paid run + ledger entry — waits on the operator's
+`GEMINI_API_KEY`; M1 stays NOT CLAIMED.
 The full arc runs against real docker: front door → issue_intake → create_change
 → validate → **human approval** → project task.spec → provision + prove-cold
 sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → structural

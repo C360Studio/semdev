@@ -66,3 +66,56 @@ tasks:
       - task: build
       - task: lint
       - task: test
+
+  realllm:probe:
+    desc: >-
+      One cheap smoke turn against the real Gemini endpoint BEFORE any journey:
+      proves auth + model id + tool calling for the exact wire the runtime will
+      speak. Expected output: an assistant message whose tool_calls names
+      `ping`. Anything else — stop; the journey would fail the same way for
+      real money. See docs/real-llm-runbook.md §2.
+    preconditions:
+      - sh: test -n "$GEMINI_API_KEY"
+        msg: "GEMINI_API_KEY is unset — export it in this shell first (runbook §0)."
+    cmds:
+      - >-
+        curl -sS https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+        -H "Authorization: Bearer $GEMINI_API_KEY"
+        -H "content-type: application/json"
+        -d '{"model": "gemini-3.1-pro-preview", "max_tokens": 64,
+             "messages": [{"role": "user", "content": "Call the ping tool."}],
+             "tools": [{"type": "function", "function": {"name": "ping", "description": "reply check", "parameters": {"type": "object", "properties": {}}}}],
+             "tool_choice": "required"}' | head -c 2000; echo
+
+  realllm:launch:
+    desc: >-
+      THE PAID RUN (docs/real-llm-runbook.md is law): the real-LLM journey over
+      the fixture arc — real Gemini turns, real docker cold proofs, bounded by
+      the arc's own budgets. Preconditions: mock ladder green FIRST in this
+      session (task check + task e2e, uncached), `task realllm:probe` green,
+      sidecar armed in a second shell (task realllm:status), abort criteria
+      written down (runbook §3). Logs tee to /tmp/realllm-run.log for the
+      sidecar. -timeout 80m is LOAD-BEARING (go test's default 10m would
+      panic-kill the paid run mid-arc).
+    deps: [nats:reset]
+    preconditions:
+      - sh: test -n "$GEMINI_API_KEY"
+        msg: "GEMINI_API_KEY is unset — export it in this shell first (runbook §0)."
+    cmds:
+      - >-
+        SEMDEV_REAL_LLM=1 go test -tags=e2e -count=1 -timeout 80m
+        -run 'TestRealLLMJourneyIssueToPR$' -v ./test/e2e/ 2>&1
+        | tee /tmp/realllm-run.log
+
+  realllm:status:
+    desc: >-
+      One sidecar poll (run every 30–60s in a second shell while realllm:launch
+      is in flight — runbook §5): the journey's own narration from the log plus
+      the AUTHORITATIVE fact-store state via nats-box (the NATS image ships no
+      nats CLI; both shapes dry-run-proven 2026-07-19). Wallclock rule: any
+      station with no new fact for >2× its expected step time is wedged — apply
+      the runbook §3 abort, do not wait for the backstop.
+    cmds:
+      - grep -E "real-llm (station|milestone|TERMINAL)|EVIDENCE|LEDGER|--- (PASS|FAIL|SKIP)" /tmp/realllm-run.log | tail -5 || true
+      - grep -iE "error|failed|panic" /tmp/realllm-run.log | tail -3 || true
+      - docker run --rm --network compose_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"

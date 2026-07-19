@@ -54,24 +54,33 @@ tier: the `go-health-class` fixture). Recon established, against the tree at
 
 ## Decisions
 
-**D1 — Anthropic via the OpenAI-compatible endpoint, not `provider:
-"anthropic"`.** The framework's model-call path is OpenAI-wire-only (verified
-in the module cache; see Context). Anthropic ships an OpenAI-compatible
-chat-completions surface at `https://api.anthropic.com/v1` that accepts the
-API key as a Bearer token and supports tools + `tool_choice`
-(`auto`/`required`/named function) — exactly the shapes the framework emits
-(`client.go` marshals `ToolChoice.Mode`; temperature is omitted unless > 0 and
-semdev never sets it). Alternative considered: filing an upstream ask for a
-native anthropic adapter — right long-term, wrong gate for run 1; the compat
-endpoint is production-real and zero framework delta. The endpoint entry is
-named `anthropic` with `provider: "openai"` and a comment-free config (JSON),
-so the journey helper documents the why.
+**D1 (RE-TARGETED to Gemini — operator constraint: Anthropic API rates are
+unaffordable; Gemini is the paid provider in use).** Gemini is the
+framework's FIRST-CLASS route: beta.153 ships a native `GeminiAdapter`
+(provider `"gemini"`) over Google's OpenAI-compatible endpoint, and the
+module's own `configs/gemini-example.json` + live Gemini test define the
+authoritative shape this change copies verbatim: `provider: "gemini"` AND
+`wire_backend: "wire"` (BOTH required for the Gemini 3.x preview
+per-tool_call `thought_signature` contract, ADR-037 chunk 8),
+`url: https://generativelanguage.googleapis.com/v1beta/openai`,
+`api_key_env: GEMINI_API_KEY`, `tool_format: "openai"`, `stream: false`,
+`reasoning_effort: "medium"`. Gemini 2.5-stable tiers can ride the plain
+`provider: "openai"` umbrella instead (the example's `gemini-flash` entry —
+the cheaper fallback if run costs must drop further). Original D1 finding
+kept for the record: Anthropic has NO native adapter — an Anthropic run must
+use its OpenAI-compat endpoint (`provider: "openai"`, url
+`https://api.anthropic.com/v1`); `provider: "anthropic"` validates but
+nothing implements it, and with no URL go-openai dials api.openai.com.
 
-**D2 — Model `claude-opus-4-8`, all three roles, real prices 5.00/25.00 per
-1M.** One model for coordinator/developer/reviewer keeps run 1's variables
-minimal; the arc is bounded (attempt budget from the authored change clamped
-[1,5], iteration cap 8, transient grace 2), so worst-case spend is small.
-Per-role cheaper models are a tuning follow-up, not a launch precondition.
+**D2 — Model `gemini-3.1-pro-preview`, all three roles, real prices
+2.00/12.00 per 1M (≤200K-token prompts).** The framework example + live-test
+default, so run 1 rides the exact endpoint+model the framework itself tests;
+the preview slug and prices rotate together — confirm on run day. One model
+for coordinator/developer/reviewer keeps run 1's variables minimal; the arc
+is bounded (attempt budget clamped [1,5], iteration cap 8, transient grace
+2), so worst-case spend is small (well under $1 expected). Per-role
+cheaper-tier models (2.5/3 Flash) are a tuning follow-up, not a launch
+precondition.
 
 **D3 — Content lane = wake prompt + persona reason contract (donor pattern),
 no new facts, no rule edits.** `CoordinatorTask` gains the bounded authored

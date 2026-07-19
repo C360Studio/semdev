@@ -11,18 +11,25 @@
 // GATING (real money — fail loud, never silently skip a declared run):
 //   - SEMDEV_REAL_LLM unset → t.Skip before any boot; zero cost. Any value
 //     other than "1" FAILS loud (declared-but-malformed intent).
-//   - SEMDEV_REAL_LLM=1 with ANTHROPIC_API_KEY unset/empty → immediate t.Fatal
+//   - SEMDEV_REAL_LLM=1 with GEMINI_API_KEY unset/empty → immediate t.Fatal
 //     naming the variable (the D4 posture: declared intent never degrades).
 //
-// MODEL CONFIG (design D1): semstreams beta.153 has NO native Anthropic adapter —
-// AdapterFor knows gemini/openai/ollama + a generic fallback, auth is
-// `Authorization: Bearer`, and both clients speak the OpenAI chat-completions
-// wire. Anthropic's OpenAI-compatible endpoint (https://api.anthropic.com/v1)
-// accepts the API key as a Bearer token and supports tools + tool_choice, so the
-// endpoint entry is provider "openai" pointed there. The registry's
-// provider:"anthropic" value VALIDATES but nothing implements it (and with no
-// URL, go-openai would default to api.openai.com) — do not "fix" this config to
-// provider anthropic without a framework adapter landing first.
+// MODEL CONFIG (design D1, re-targeted to Gemini — operator constraint:
+// Anthropic API rates are unaffordable for this project; Gemini is the paid
+// provider in use). Gemini is the framework's FIRST-CLASS route: semstreams
+// beta.153 ships a native GeminiAdapter (provider "gemini") over Google's
+// OpenAI-compatible endpoint, and configs/gemini-example.json in the module is
+// the authoritative shape this config copies — for Gemini 3.x previews the
+// per-tool_call thought_signature flow REQUIRES provider "gemini" AND
+// wire_backend "wire" (ADR-037 chunk 8; the framework's own live test drives
+// exactly this endpoint+model with tools). The preview model slug rotates —
+// update realLLMModelID (and its prices) when Google publishes the stable id.
+//
+// (Alternative providers, verified this change: Anthropic has NO native
+// adapter in beta.153 — an Anthropic run must use its OpenAI-compat endpoint,
+// provider "openai" + url https://api.anthropic.com/v1; provider "anthropic"
+// validates but nothing implements it, and with no URL go-openai would dial
+// api.openai.com. Kept here so nobody "fixes" a future config that way.)
 //
 // Run per docs/real-llm-runbook.md: mock ladder green first, sidecar armed,
 // abort criteria written down BEFORE launch.
@@ -56,15 +63,21 @@ const (
 	realLLMGateEnv = "SEMDEV_REAL_LLM"
 	// realLLMKeyEnv is the env var the model registry resolves the API key from
 	// (api_key_env — the key never appears in a config file or test source).
-	realLLMKeyEnv = "ANTHROPIC_API_KEY"
+	// GEMINI_API_KEY is the framework's own convention (gemini-example.json +
+	// its live Gemini test).
+	realLLMKeyEnv = "GEMINI_API_KEY"
 	// realLLMModelID is the model for all three roles on run 1 (one variable at
-	// a time; per-role cheaper models are a tuning follow-up).
-	realLLMModelID = "claude-opus-4-8"
-	// realLLMInputPricePer1M / realLLMOutputPricePer1M are claude-opus-4-8's real
-	// prices so the framework stamps true agent.loop.cost-usd facts (G3/G7: the
-	// ledger's cost record is harness-stamped, never model-reported).
-	realLLMInputPricePer1M  = 5.00
-	realLLMOutputPricePer1M = 25.00
+	// a time; per-role/cheaper-tier models are a tuning follow-up). This is the
+	// framework example + live-test default; the PREVIEW SLUG ROTATES — update
+	// it and the prices together when the stable id lands.
+	realLLMModelID = "gemini-3.1-pro-preview"
+	// realLLMInputPricePer1M / realLLMOutputPricePer1M are gemini-3.1-pro-preview's
+	// published prices (≤200K-token prompts — this arc's prompts are tiny) so the
+	// framework stamps true agent.loop.cost-usd facts (G3/G7: the ledger's cost
+	// record is harness-stamped, never model-reported). Confirm on run day
+	// (runbook §2).
+	realLLMInputPricePer1M  = 2.00
+	realLLMOutputPricePer1M = 12.00
 )
 
 // realLLMIssueRef is the host-neutral ref of the fixture issue this journey
@@ -116,7 +129,7 @@ func TestRealLLMJourneyIssueToPR(t *testing.T) {
 
 	startRealLLMRuntime(ctx, t)
 	taskID := publishRealCoordinatorWake(ctx, t)
-	t.Logf("real-llm: wake published (task=%s, model endpoint=anthropic/%s) — first paid turn is in flight", taskID, realLLMModelID)
+	t.Logf("real-llm: wake published (task=%s, model endpoint=gemini/%s) — first paid turn is in flight", taskID, realLLMModelID)
 
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
@@ -294,11 +307,12 @@ func startRealLLMRuntime(ctx context.Context, t *testing.T) {
 }
 
 // realLLMConfigPath writes a copy of the bootstrap config with the model
-// registry REPLACED by the single real endpoint (design D1): Anthropic's
-// OpenAI-compatible surface, key resolved at runtime via api_key_env, real
-// prices so cost facts are true, bounded output and a hang-proof request
-// timeout. The dead mock endpoint is REMOVED so any stale preference fails
-// loud at registry validation instead of dialing a mock that is not there.
+// registry REPLACED by the single real endpoint (design D1): the framework's
+// native Gemini route over Google's OpenAI-compatible surface, key resolved
+// at runtime via api_key_env, real prices so cost facts are true, bounded
+// output and a hang-proof request timeout. The dead mock endpoint is REMOVED
+// so any stale preference fails loud at registry validation instead of
+// dialing a mock that is not there.
 // Rule paths are rewritten absolute exactly as journeyConfigPath does.
 func realLLMConfigPath(t *testing.T) string {
 	t.Helper()
@@ -312,15 +326,23 @@ func realLLMConfigPath(t *testing.T) string {
 		t.Fatalf("decode bootstrap config: %v", err)
 	}
 
+	// The endpoint copies the framework's own configs/gemini-example.json
+	// gemini-3-pro-preview shape: provider "gemini" engages the native
+	// GeminiAdapter and wire_backend "wire" the framework-owned wire client —
+	// BOTH required for the 3.x preview thought_signature contract.
 	cfg["model_registry"] = map[string]any{
 		"endpoints": map[string]any{
-			"anthropic": map[string]any{
-				"provider":                   "openai",
-				"url":                        "https://api.anthropic.com/v1",
+			"gemini": map[string]any{
+				"provider":                   "gemini",
+				"url":                        "https://generativelanguage.googleapis.com/v1beta/openai",
 				"model":                      realLLMModelID,
+				"api_key_env":                realLLMKeyEnv,
+				"max_tokens":                 1048576,
 				"supports_tools":             true,
 				"tool_format":                "openai",
-				"api_key_env":                realLLMKeyEnv,
+				"stream":                     false,
+				"reasoning_effort":           "medium",
+				"wire_backend":               "wire",
 				"max_output_tokens":          8192,
 				"request_timeout":            "300s",
 				"input_price_per_1m_tokens":  realLLMInputPricePer1M,
@@ -328,11 +350,11 @@ func realLLMConfigPath(t *testing.T) string {
 			},
 		},
 		"capabilities": map[string]any{
-			"coordinator": map[string]any{"preferred": []any{"anthropic"}, "requires_tools": true},
-			"developer":   map[string]any{"preferred": []any{"anthropic"}, "requires_tools": true},
-			"reviewer":    map[string]any{"preferred": []any{"anthropic"}, "requires_tools": true},
+			"coordinator": map[string]any{"preferred": []any{"gemini"}, "requires_tools": true},
+			"developer":   map[string]any{"preferred": []any{"gemini"}, "requires_tools": true},
+			"reviewer":    map[string]any{"preferred": []any{"gemini"}, "requires_tools": true},
 		},
-		"defaults": map[string]any{"model": "anthropic"},
+		"defaults": map[string]any{"model": "gemini"},
 	}
 
 	ruleCfg := mustMap(t, mustMap(t, mustMap(t, cfg, "components"), "rule"), "config")
@@ -363,7 +385,7 @@ func publishRealCoordinatorWake(ctx context.Context, t *testing.T) string {
 
 	in := intake.Intake{Relevant: true, IssueRef: realLLMIssueRef}
 	in.Event.AuthoredText = realLLMIssueBody
-	task, err := intake.CoordinatorTask(in, "anthropic")
+	task, err := intake.CoordinatorTask(in, "gemini")
 	if err != nil {
 		t.Fatalf("build real coordinator wake: %v", err)
 	}
