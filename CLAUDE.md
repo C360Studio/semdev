@@ -75,6 +75,16 @@ against a live semsource — both reviewers approve; the M1 real driver must min
 implemented deltas merged, oldest→newest, INCLUDING routing-budgets + reason-aware +
 semsource-ab — now 9 caps); the recorded evidence ledger is `docs/evidence-ledger.md`
 (G7 — M0 claimed on named bridge proof, M1 not claimed).
+The **first-real-llm-journey** change (OPEN, groups 1–4 done) landed the real-LLM
+launch surface: the issue-content lane (wake carries the admitted issue's authored
+text; persona contract makes create_change reasons preserve the ask — the mock had
+papered over the model never seeing the issue), the env-gated real-LLM journey
+(`test/e2e/realllm_journey_test.go`, `SEMDEV_REAL_LLM=1`; keyless/malformed
+declarations fail loud) against Anthropic's OpenAI-compatible endpoint (VERIFIED:
+beta.153 has NO native anthropic adapter — the model path is OpenAI-wire only; do
+not config `provider:"anthropic"`), and `docs/real-llm-runbook.md` (sidecar
+commands dry-run-proven). Group 5 — the paid run + ledger entry — waits on the
+operator's `ANTHROPIC_API_KEY`; M1 stays NOT CLAIMED.
 The full arc runs against real docker: front door → issue_intake → create_change
 → validate → **human approval** → project task.spec → provision + prove-cold
 sandbox → dispatch (Amelia) → apply_patch → measure IN-CONTAINER → structural
