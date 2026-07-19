@@ -67,6 +67,10 @@ park is the posture), no parallel execution.
 
 **Status: NOT CLAIMED.** No real-LLM entry exists. The first `real-llm` entry
 lands here with its watch-sidecar and cost record when the rung is attempted.
+The attempt procedure and the entry template are `docs/real-llm-runbook.md`
+(first-real-llm-journey): mock ladder green first, the smoke probe, the armed
+sidecar with pre-written abort criteria, then the entry — converged, parked,
+and aborted runs all get one (honest failures are evidence).
 
 ## Experiment conditions (semsource A/B — integrate-semsource-ab-harness)
 

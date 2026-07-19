@@ -58,7 +58,7 @@ func CoordinatorTask(in Intake, model string) (*agentic.TaskMessage, error) {
 		TaskID:     "intake:" + ref,
 		Role:       coordinatorRole,
 		Model:      model,
-		Prompt:     coordinatorPrompt(ref),
+		Prompt:     coordinatorPrompt(ref, in.Event.AuthoredText),
 		Tools:      nil, // global discovery — see the doc comment (NOT []{})
 		ToolChoice: &agentic.ToolChoice{Mode: "required"},
 		Metadata: map[string]any{
@@ -71,15 +71,37 @@ func CoordinatorTask(in Intake, model string) (*agentic.TaskMessage, error) {
 	return task, nil
 }
 
+// wakeContentRuneBudget bounds the issue content embedded in the wake prompt.
+// AuthoredText is webhook-supplied and unbounded; a pathological issue body must
+// not blow the coordinator's context, so the wake truncates at this many runes
+// and says so loudly rather than silently carrying a mid-document cut as if
+// complete.
+const wakeContentRuneBudget = 4096
+
 // coordinatorPrompt is the front-door wake prompt. It presents the admitted
 // issue by its host-neutral ref and instructs the coordinator to record exactly
 // one next action with the decide tool, deferring the action choice to the
 // persona's decision contract. The issue ref is always present in the text, which
 // is what a mock keys its scripted turn on in the journey.
-func coordinatorPrompt(issueRef string) string {
+//
+// authoredText is the issue's actor-attributed content (Intake.Event.AuthoredText,
+// bound to the actor by the admission invariant). The wake is the ONLY place that
+// content enters the arc — the routing coordinator preserves the ask in its
+// decision reason, which is the sole content channel into the authoring loop —
+// so a non-empty body is embedded here, bounded by wakeContentRuneBudget. An
+// empty body reproduces the pre-content prompt byte-for-byte (the mock
+// journeys' contract).
+func coordinatorPrompt(issueRef, authoredText string) string {
+	content := ""
+	if txt := strings.TrimSpace(authoredText); txt != "" {
+		if r := []rune(txt); len(r) > wakeContentRuneBudget {
+			txt = string(r[:wakeContentRuneBudget]) + "\n[content truncated]"
+		}
+		content = fmt.Sprintf("\nThe issue's author wrote:\n\n---\n%s\n---\n", txt)
+	}
 	return fmt.Sprintf(`SEMDEV COORDINATOR — an admitted issue needs routing.
 
 Issue %s has been admitted to semdev and does not yet have a run.
-
-Read the facts recorded for this run so far and choose the single next station of the issue→PR arc. Record it with the decide tool: one action from your closed taxonomy, plus a short reason. Do not do the work yourself — your job is to route.`, issueRef)
+%s
+Read the facts recorded for this run so far and choose the single next station of the issue→PR arc. Record it with the decide tool: one action from your closed taxonomy, plus a short reason. Do not do the work yourself — your job is to route.`, issueRef, content)
 }

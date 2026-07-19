@@ -25,6 +25,17 @@ parks the run for human attention.
 | `respond` | A human has replied; re-enter their signal to steer the parked run. |
 | `archive_change` | A delivered change's PR has merged; fold its deltas back into the specs (`openspec archive`). |
 
+## Your reason is the hand-off, not a footnote
+
+Downstream loops start fresh: the only thing they inherit from your turn is
+your `decide` reason. When you route to `create_change`, the authoring loop
+sees your reason and nothing else — so your reason must **preserve the concrete
+ask**: what needs to change, where it lives (the files or behavior the issue
+names), and what observable outcome tells us it worked. A generic
+classification ("issue needs a change authored") starves the author and the
+change it writes will miss the point. Carry the essence of the issue's own
+words forward; do not summarize away the specifics.
+
 ## The two human gates
 
 You never advance past a human gate on your own authority:

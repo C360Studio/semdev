@@ -81,6 +81,69 @@ func TestCoordinatorTaskAllowlistCoversEveryAction(t *testing.T) {
 	}
 }
 
+// TestCoordinatorTaskWakeCarriesAuthoredContent pins the issue-content lane
+// (first-real-llm-journey): the wake is the ONLY place the admitted issue's
+// actor-attributed authored text enters the arc, so a real model can know what
+// the issue asks. Three shapes are load-bearing: content present → embedded
+// with the ref still verbatim (mock markers key on the ref); content absent →
+// today's prompt byte-for-byte (the mock journeys' contract); content oversized
+// → truncated at the rune budget with a loud marker, never an unbounded prompt.
+func TestCoordinatorTaskWakeCarriesAuthoredContent(t *testing.T) {
+	const ref = "octo/widget#42"
+
+	t.Run("content embedded, ref verbatim", func(t *testing.T) {
+		body := "Classify(cpu, mem) reports Healthy when pressure equals the warning threshold; operators expect Degraded at the boundary."
+		in := Intake{Relevant: true, IssueRef: ref}
+		in.Event.AuthoredText = body
+
+		task, err := CoordinatorTask(in, "mock")
+		if err != nil {
+			t.Fatalf("CoordinatorTask: %v", err)
+		}
+		if !strings.Contains(task.Prompt, body) {
+			t.Errorf("prompt does not carry the issue's authored text; the authoring lane is starved")
+		}
+		if !strings.Contains(task.Prompt, ref) {
+			t.Errorf("prompt lost the issue ref %q; mock markers and routing context key on it", ref)
+		}
+	})
+
+	t.Run("empty content reproduces today's prompt", func(t *testing.T) {
+		task, err := CoordinatorTask(Intake{Relevant: true, IssueRef: ref}, "mock")
+		if err != nil {
+			t.Fatalf("CoordinatorTask: %v", err)
+		}
+		want := `SEMDEV COORDINATOR — an admitted issue needs routing.
+
+Issue ` + ref + ` has been admitted to semdev and does not yet have a run.
+
+Read the facts recorded for this run so far and choose the single next station of the issue→PR arc. Record it with the decide tool: one action from your closed taxonomy, plus a short reason. Do not do the work yourself — your job is to route.`
+		if task.Prompt != want {
+			t.Errorf("empty-content prompt drifted from the pinned shape:\ngot:  %q\nwant: %q", task.Prompt, want)
+		}
+	})
+
+	t.Run("oversized content truncates at the rune budget with a loud marker", func(t *testing.T) {
+		huge := strings.Repeat("界", wakeContentRuneBudget+500)
+		in := Intake{Relevant: true, IssueRef: ref}
+		in.Event.AuthoredText = huge
+
+		task, err := CoordinatorTask(in, "mock")
+		if err != nil {
+			t.Fatalf("CoordinatorTask: %v", err)
+		}
+		if !strings.Contains(task.Prompt, "[content truncated]") {
+			t.Errorf("oversized content was not marked truncated")
+		}
+		if got := len([]rune(task.Prompt)); got > wakeContentRuneBudget+600 {
+			t.Errorf("prompt is %d runes; the wake must stay bounded (budget %d + fixed scaffolding)", got, wakeContentRuneBudget)
+		}
+		if strings.Contains(task.Prompt, huge) {
+			t.Errorf("the full oversized body reached the prompt; truncation did not happen")
+		}
+	})
+}
+
 // TestCoordinatorTaskRejectsEmptyInputs fails closed: no issue ref or no model
 // means the caller has nothing routable, so building a wake is an error rather
 // than a task that spawns a loop with a blank prompt or an unresolvable model.
