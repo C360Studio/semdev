@@ -3,6 +3,7 @@ package conversation
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,23 +53,81 @@ func TestMessageCarriesNoHostShape(t *testing.T) {
 	}
 }
 
-// Channel is deliberately the two-verb surface (Post, ResolveThread) — NO Read yet
-// (that is pull-first-transport's, and adding it now is latent code).
-func TestConversationChannelHasNoReadVerb(t *testing.T) {
+// Channel is now the THREE-verb surface (Post, ResolveThread, Read) — the poll
+// transport (pull-first-transport) gave Read a caller, so it is no longer latent.
+// The signature must stay host-neutral: no githubwebhook type on any verb, or the
+// GitHub shape re-leaks into the arc/component boundary the port dissolves.
+func TestChannelReadVerb(t *testing.T) {
 	ty := reflect.TypeOf((*Channel)(nil)).Elem()
-	want := []string{"Post", "ResolveThread"}
-	wantSet := map[string]bool{"Post": true, "ResolveThread": true}
-	if ty.NumMethod() != len(want) {
+	wantSet := map[string]bool{"Post": true, "ResolveThread": true, "Read": true}
+	if ty.NumMethod() != len(wantSet) {
 		var got []string
 		for i := 0; i < ty.NumMethod(); i++ {
 			got = append(got, ty.Method(i).Name)
 		}
-		t.Fatalf("Channel has methods %v, want exactly %v (no Read until pull-first-transport)", got, want)
+		t.Fatalf("Channel has methods %v, want exactly {Post, ResolveThread, Read}", got)
 	}
 	for i := 0; i < ty.NumMethod(); i++ {
 		if name := ty.Method(i).Name; !wantSet[name] {
-			t.Errorf("Channel names an unexpected verb %q (a Read verb here would be latent code)", name)
+			t.Errorf("Channel names an unexpected verb %q", name)
 		}
+	}
+
+	// Read(ctx, ThreadRef, Cursor) ([]Message, Cursor, error).
+	read, ok := ty.MethodByName("Read")
+	if !ok {
+		t.Fatal("Channel has no Read verb — pull-first-transport's poll transport needs it")
+	}
+	rt := read.Type
+	// Interface method type has no receiver: In(0)=ctx, In(1)=ThreadRef, In(2)=Cursor.
+	if rt.NumIn() != 3 || rt.NumOut() != 3 {
+		t.Fatalf("Read signature = %v, want (context.Context, ThreadRef, Cursor) ([]Message, Cursor, error)", rt)
+	}
+	if rt.In(1) != reflect.TypeOf(ThreadRef("")) {
+		t.Errorf("Read's thread arg is %v, want conversation.ThreadRef", rt.In(1))
+	}
+	if rt.In(2) != reflect.TypeOf(Cursor("")) {
+		t.Errorf("Read's cursor arg is %v, want conversation.Cursor", rt.In(2))
+	}
+	if rt.Out(0) != reflect.TypeOf([]Message(nil)) {
+		t.Errorf("Read's first result is %v, want []conversation.Message", rt.Out(0))
+	}
+	if rt.Out(1) != reflect.TypeOf(Cursor("")) {
+		t.Errorf("Read's second result is %v, want conversation.Cursor (the next cursor)", rt.Out(1))
+	}
+
+	// Host-neutrality: no verb's signature may name a type from EITHER host adapter
+	// package — internal/forge/github (the REST client: github.Comment, …) or
+	// internal/forge/githubwebhook (the webhook shapes). Both share the
+	// "internal/forge/github" path prefix and neither is the port's own package
+	// (internal/forge/conversation), so one substring check catches both leaks. Walk
+	// every in/out type of every method, unwrapping ptr/slice.
+	for i := 0; i < ty.NumMethod(); i++ {
+		mt := ty.Method(i).Type
+		types := make([]reflect.Type, 0, mt.NumIn()+mt.NumOut())
+		for j := 0; j < mt.NumIn(); j++ {
+			types = append(types, mt.In(j))
+		}
+		for j := 0; j < mt.NumOut(); j++ {
+			types = append(types, mt.Out(j))
+		}
+		for _, tt := range types {
+			el := tt
+			for el.Kind() == reflect.Ptr || el.Kind() == reflect.Slice {
+				el = el.Elem()
+			}
+			if strings.Contains(el.PkgPath(), "internal/forge/github") {
+				t.Errorf("Channel.%s signature names host-adapter type %v — the port must stay host-neutral", ty.Method(i).Name, tt)
+			}
+		}
+	}
+}
+
+// Cursor is an opaque string — the poller stores and passes it back, never parses
+// it. Only the impl encodes/decodes it (a comment ID for GitHub v1).
+func TestCursorIsOpaqueString(t *testing.T) {
+	if k := reflect.TypeOf(Cursor("")).Kind(); k != reflect.String {
+		t.Fatalf("Cursor underlying kind = %v, want string (an opaque impl-defined read position)", k)
 	}
 }
 

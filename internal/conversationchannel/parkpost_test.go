@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +23,14 @@ type fakeChannel struct {
 	posts      []postedMsg
 	postErr    error
 	resolveErr error
+
+	// reads drives Read per-thread (the poll transport, grp3): the full comment set
+	// on each thread. Read applies the SAME numeric-cursor contract as the GitHub
+	// impl (keep id > cursor; empty result keeps the input cursor). readErr fails a
+	// read (the transport-error-is-not-empty pin); readLog records each Read's thread.
+	reads   map[conversation.ThreadRef][]conversation.Message
+	readErr error
+	readLog []conversation.ThreadRef
 }
 
 func (f *fakeChannel) ResolveThread(_ context.Context, workRef string) (conversation.ThreadRef, error) {
@@ -37,6 +46,35 @@ func (f *fakeChannel) Post(_ context.Context, thread conversation.ThreadRef, bod
 	}
 	f.posts = append(f.posts, postedMsg{thread: thread, body: body})
 	return nil
+}
+
+func (f *fakeChannel) Read(_ context.Context, thread conversation.ThreadRef, cursor conversation.Cursor) ([]conversation.Message, conversation.Cursor, error) {
+	f.readLog = append(f.readLog, thread)
+	if f.readErr != nil {
+		return nil, cursor, f.readErr
+	}
+	var cursorInt int64
+	if cursor != "" {
+		if n, err := strconv.ParseInt(string(cursor), 10, 64); err == nil {
+			cursorInt = n
+		}
+	}
+	maxID := cursorInt
+	var out []conversation.Message
+	for _, m := range f.reads[thread] {
+		id, _ := strconv.ParseInt(m.ID, 10, 64)
+		if id <= cursorInt {
+			continue
+		}
+		out = append(out, m)
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if len(out) == 0 {
+		return nil, cursor, nil // empty read keeps the input cursor (M2)
+	}
+	return out, conversation.Cursor(strconv.FormatInt(maxID, 10)), nil
 }
 
 type fakeFetcher struct {

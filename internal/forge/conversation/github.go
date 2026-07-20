@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
 	"github.com/c360studio/semdev/internal/intake/admission"
 )
@@ -28,30 +31,32 @@ import (
 // SplitRef lives in the shared internal/intake/admission core (the front-door
 // coordinate parser both components + the launch driver use).
 
-// commenter is the narrow posting surface Post needs — github.Client satisfies it
-// (the same CreateComment the park lane used before the carve).
-type commenter interface {
+// conversationClient is the narrow forge surface the GitHub channel needs:
+// CreateComment (Post) and ListComments (Read). github.Client satisfies it — the
+// same client the park lane posts through and the poll transport reads through.
+type conversationClient interface {
 	CreateComment(ctx context.Context, owner, repo string, number int, body string) error
+	ListComments(ctx context.Context, owner, repo string, number int) ([]github.Comment, error)
 }
 
 // GitHubChannel is the GitHub issue/PR-comment implementation of Channel. It is
 // the SOLE v1 conversation impl; a second channel (Slack, …) is a new type behind
 // the same port, not a change to any caller.
 type GitHubChannel struct {
-	commenter commenter
+	client conversationClient
 }
 
 var _ Channel = (*GitHubChannel)(nil)
 
-// NewGitHubChannel builds the GitHub conversation channel over a posting client
+// NewGitHubChannel builds the GitHub conversation channel over a forge client
 // (github.Client). The no-forge-token deployment (allowlist-only boots, e2e
 // journeys) decides the graph-only degrade at the CONSUMER — exactly as park-post
 // does today: it skips the post and leaves the durable fact graph-only. It must NOT
-// construct a channel with a nil client and expect Post to swallow the message. A
-// nil commenter reaching Post is therefore a WIRING error, guarded defensively
+// construct a channel with a nil client and expect Post/Read to swallow the call. A
+// nil client reaching Post/Read is therefore a WIRING error, guarded defensively
 // below, not a runtime deployment path.
-func NewGitHubChannel(c commenter) *GitHubChannel {
-	return &GitHubChannel{commenter: c}
+func NewGitHubChannel(c conversationClient) *GitHubChannel {
+	return &GitHubChannel{client: c}
 }
 
 // ResolveThread maps a host-neutral work reference to its ThreadRef. For GitHub v1
@@ -68,16 +73,90 @@ func (c *GitHubChannel) ResolveThread(_ context.Context, workRef string) (Thread
 // bounded and treats a permanent condition (a malformed ref) as a definitive
 // graph-only skip; it must not redeliver a permanent failure to exhaustion.
 func (c *GitHubChannel) Post(ctx context.Context, thread ThreadRef, body string) error {
-	if c.commenter == nil {
+	if c.client == nil {
 		// Wiring error, not a deployment path: the no-token graph-only degrade is
 		// the consumer's to make (it skips Post), never a nil client swallowed here.
-		return fmt.Errorf("conversation: github channel has no posting client; cannot post to %q (wiring error)", string(thread))
+		return fmt.Errorf("conversation: github channel has no forge client; cannot post to %q (wiring error)", string(thread))
 	}
 	owner, repo, number, err := admission.SplitRef(string(thread))
 	if err != nil {
 		return fmt.Errorf("conversation: resolve thread %q: %w", string(thread), err)
 	}
-	return c.commenter.CreateComment(ctx, owner, repo, number, body)
+	return c.client.CreateComment(ctx, owner, repo, number, body)
+}
+
+// Read returns the thread's comments AFTER cursor, mapped to neutral Messages,
+// plus the cursor to pass next time (pull-first-transport D7). The GitHub cursor is
+// the last-seen comment ID: it lists all comments (ListComments follows pagination)
+// and keeps those with id > cursor.
+//
+// The comparison is NUMERIC, never lexical (review M1): the cursor parses to an
+// int64 (empty = 0 = read all) and comments are kept when their id exceeds it — a
+// string compare would break at a digit-width boundary ("9" > "10") and still ship
+// green on small-id unit tests. When the filtered set is EMPTY, Read returns the
+// INPUT cursor unchanged, NOT max-of-empty (review M2): resetting to the top would
+// make a still-gated thread (one that never leaves the poller's enumeration) re-read
+// and re-authorize its whole history every tick. It fails closed — a wiring error, a
+// malformed thread, or a ListComments transport blip returns the INPUT cursor and
+// the error, so the poller retries next tick without losing its place. No
+// attribution guard: a polled comment has exactly one author (unlike a webhook's
+// sender/author pair), so every Message is attributable to its Author.
+func (c *GitHubChannel) Read(ctx context.Context, thread ThreadRef, cursor Cursor) ([]Message, Cursor, error) {
+	if c.client == nil {
+		return nil, cursor, fmt.Errorf("conversation: github channel has no forge client; cannot read %q (wiring error)", string(thread))
+	}
+	owner, repo, number, err := admission.SplitRef(string(thread))
+	if err != nil {
+		return nil, cursor, fmt.Errorf("conversation: resolve thread %q: %w", string(thread), err)
+	}
+	comments, err := c.client.ListComments(ctx, owner, repo, number)
+	if err != nil {
+		return nil, cursor, fmt.Errorf("conversation: read thread %q: %w", string(thread), err)
+	}
+
+	// Numeric cursor (M1). A malformed cursor is never minted by this impl; if one
+	// ever arrived, treating it as 0 (read all) is the safe, idempotent choice.
+	var cursorInt int64
+	if cursor != "" {
+		if n, perr := strconv.ParseInt(string(cursor), 10, 64); perr == nil {
+			cursorInt = n
+		}
+	}
+	maxID := cursorInt
+	var msgs []Message
+	for _, cm := range comments {
+		if cm.ID <= cursorInt {
+			continue
+		}
+		msgs = append(msgs, Message{
+			ID:     strconv.FormatInt(cm.ID, 10),
+			Author: cm.Author,
+			Body:   cm.Body,
+			At:     parseCommentTime(cm.CreatedAt),
+		})
+		if cm.ID > maxID {
+			maxID = cm.ID
+		}
+	}
+	if len(msgs) == 0 {
+		// No new comments: keep the INPUT cursor (M2 — no re-read storm).
+		return nil, cursor, nil
+	}
+	return msgs, Cursor(strconv.FormatInt(maxID, 10)), nil
+}
+
+// parseCommentTime parses a github.Comment.CreatedAt (RFC3339) best-effort; a
+// zero time on an unparseable/absent value is acceptable (At is not load-bearing —
+// the dedup key is Message.ID, the comment id).
+func parseCommentTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // NormalizeInboundComment decodes one flattened github.event.comment payload into a

@@ -50,13 +50,19 @@ type Message struct {
 	At time.Time
 }
 
+// Cursor is an opaque, impl-defined read position on a thread. "" reads from the
+// top (the first poll / a restart). Only the Channel impl encodes and parses it —
+// the poller stores the returned Cursor and passes it back next time, never
+// inspecting it. For GitHub v1 it is the last-seen comment ID (comment IDs are
+// monotonic), so it is deliberately opaque to keep that host detail off the caller.
+type Cursor string
+
 // Channel is the channel-neutral conversation seam (the ConversationChannel port
-// of the design): post a message to a thread, and resolve a host-neutral work
-// reference to its thread. It is deliberately the TWO-verb surface this carve
-// needs — there is NO Read verb yet, because the current transport is push-fed
-// (the webhook receiver delivers messages; nothing calls Read). The
-// pull-first-transport follow-on adds Read(thread, cursor) → []Message plus the
-// poller; adding it now would be latent, never-called code (G1 minimality).
+// of the design): post a message to a thread, resolve a host-neutral work
+// reference to its thread, and read a thread's messages after a cursor. Read is the
+// third verb the conversation-channel-seam carve deferred and pull-first-transport
+// gave a caller (the poller): a webhook-unreachable deployment drives the approval
+// gate by polling each active thread instead of consuming pushed comment events.
 type Channel interface {
 	// Post publishes body to thread. It fails closed — a transport blip returns an
 	// error the caller retries bounded, and NEVER blocks a durable fact (the
@@ -66,4 +72,10 @@ type Channel interface {
 	// ThreadRef its conversation lives on. For GitHub v1 this is identity (comments
 	// live on the work object).
 	ResolveThread(ctx context.Context, workRef string) (ThreadRef, error)
+	// Read returns the messages on thread AFTER cursor (in channel-native order),
+	// plus the cursor to pass next time. An empty cursor reads the whole thread. It
+	// fails closed (returns err) — the poller retries next interval and never blocks;
+	// on an error, and on an empty successful read, it returns the INPUT cursor
+	// unchanged (no re-read storm), so the caller keeps its place.
+	Read(ctx context.Context, thread ThreadRef, cursor Cursor) (msgs []Message, next Cursor, err error)
 }
