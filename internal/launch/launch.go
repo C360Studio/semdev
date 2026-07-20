@@ -26,6 +26,7 @@ import (
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/intake"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -43,7 +44,7 @@ type Publisher interface {
 	PublishToStream(ctx context.Context, subject string, data []byte) error
 }
 
-// RunSetResolver lists every run entity ID carrying run.issue.ref == ref — intake.NewRunResolver
+// RunSetResolver lists every run entity ID carrying run.issue.ref == ref — admission.NewRunResolver
 // satisfies it. The driver diffs this set across its publish to bind the run it minted.
 type RunSetResolver interface {
 	ResolveRunIDsByRef(ctx context.Context, ref string) ([]string, error)
@@ -84,7 +85,7 @@ func Launch(ctx context.Context, d Deps, p Params) (string, error) {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	owner, repo, number, err := intake.SplitRef(p.IssueRef)
+	owner, repo, number, err := admission.SplitRef(p.IssueRef)
 	if err != nil {
 		return "", fmt.Errorf("launch: %w", err)
 	}

@@ -160,6 +160,26 @@ new component (the half-wired-in-one-binary class).
    (G10). No new journey is needed (no new behavior).
 Rollback: a refactor behind stable facts; revert restores the pre-carve structure.
 
+## Operational notes (from the group-4 adversarial review)
+
+- **Paired admission config (both reviewers, MEDIUM M1)**: the carve splits the
+  admission knobs (`allowlist`, `repo`, `opt_in_command`) across `issue-intake` and
+  `conversation-channel`. They MUST stay in sync — if `issue-intake` admits an actor
+  the `conversation-channel` allowlist omits (allowlist-only mode), the run mints,
+  parks at the approval gate, and `/semdev approve` is rejected → the run parks
+  forever. Mitigated for commit by a loud PAIRED-INVARIANT note in both components'
+  config `_comment` fields (and the e2e `patchIntakeJourneyConfig` patches both).
+  **Named follow-on**: a boot-time cross-component consistency check that warns when
+  the two components' admission knobs diverge (or a shared config fragment both
+  reference). Not done here — it is net-new boot behavior, out of the pure carve.
+- **Durable cutover on a long-lived deployment (LOW)**: `issue-intake`'s
+  `github_events` consumer narrows its FilterSubject `github.event.>` →
+  `github.event.issue`, and the `user_responses` consumer moves to
+  `conversation-channel`. JetStream forbids changing a durable's FilterSubject in
+  place, so on an UPGRADE over a persistent GITHUB/USER stream the old durables must
+  be deleted (or the KV/streams reset) — `Start` fails LOUD otherwise (fail-closed,
+  never silent). Moot for the journeys + live runs (they `task nats:reset`).
+
 ## Open Questions (RESOLVED)
 
 - **OQ1 — component split → EXTRACT** (user): a dedicated `conversation-channel`

@@ -1,26 +1,30 @@
-// Package intake is the deterministic, zero-token admission gate at semdev's front
-// door: it decides whether a code-host event is allowed to create a run and spend
-// budget, BEFORE any run exists and before any paid LLM token is spent. An event
-// is admitted only if its actor is AUTHORIZED (a repo collaborator who can push,
-// or a member of an explicit allowlist) AND the work is explicitly OPTED IN (a
-// `semdev` label or a `/semdev` command). Everything else is rejected
-// deterministically and, by default, silently — the non-adversarial-posture door
-// the sandbox threat model assumes (design D10).
+// Package admission is semdev's deterministic, zero-token admission core — the
+// SHARED front-door surface both the issue-intake and conversation-channel
+// components import (conversation-channel-seam D8). It decides whether a code-host
+// actor is allowed to drive semdev BEFORE any run exists and before any paid LLM
+// token is spent: an event is admitted only if its actor is AUTHORIZED (a repo
+// collaborator who can push, or a member of an explicit allowlist) AND — for the
+// intake gate — the work is explicitly OPTED IN (a `semdev` label or a `/semdev`
+// command). Everything else is rejected deterministically and, by default, silently
+// — the non-adversarial-posture door the sandbox threat model assumes.
 //
-// The gate is host-NEUTRAL: it decides over a normalized Event that the host
-// adapter fills from the webhook payload, so no host-specific field reaches this
-// logic. It spends ZERO LLM tokens and makes AT MOST ONE GitHub API call (the
-// collaborator permission check) — skipped entirely for an allowlisted actor, so
-// the common allowlist path is also zero-network. The check FAILS CLOSED: a
-// permission-lookup error yields "not admitted" AND surfaces the error, so a
-// transient host outage neither admits an unauthorized actor nor permanently
-// rejects an authorized one (the caller retries).
+// The gate is host-NEUTRAL: it decides over a normalized Event that a host adapter
+// fills from the webhook payload, so no host-specific field reaches this logic. It
+// spends ZERO LLM tokens and makes AT MOST ONE GitHub API call (the collaborator
+// permission check) — skipped entirely for an allowlisted actor, so the common
+// allowlist path is also zero-network. The check FAILS CLOSED: a permission-lookup
+// error yields "not admitted" AND surfaces the error, so a transient host outage
+// neither admits an unauthorized actor nor permanently rejects an authorized one
+// (the caller retries).
 //
-// This is the pure decision core (like internal/openspec / internal/changefacts):
-// it stamps no facts. The intake adapter COMPONENT (which subscribes to the
-// webhook events, normalizes them, calls this, and stamps intake.actor /
-// intake.admitted) is the registered, host-aware surface built on top.
-package intake
+// Beyond the decision core this package holds the shared host-neutral plumbing both
+// front-door components need: SplitRef (the "owner/repo#number" parser), the
+// flattened github.event.* subject constants, the ref→run RunResolver, and the
+// single-entity graph fetcher. It is the pure decision + shared-read core (like
+// internal/openspec / internal/changefacts): it stamps no facts. The intake and
+// conversation-channel COMPONENTS are the registered, host-aware surfaces built on
+// top (they subscribe, normalize, call this, and stamp).
+package admission
 
 import (
 	"context"
@@ -135,6 +139,18 @@ func Decide(ctx context.Context, cfg Config, ev Event, checker PermissionChecker
 	return d, nil
 }
 
+// Authorize is the exported authorization half of the admission gate (the
+// approval lane runs authorization WITHOUT the opt-in half — approving is a
+// signal on already-admitted work, not an opt-in). Same fail-closed contract
+// as Decide: a lookup error returns (false, err) and the caller retries.
+func Authorize(ctx context.Context, cfg Config, ev Event, checker PermissionChecker) (bool, error) {
+	ev.Actor = strings.TrimSpace(ev.Actor)
+	if ev.Actor == "" {
+		return false, nil
+	}
+	return authorize(ctx, cfg, ev, checker)
+}
+
 // authorize reports whether the actor may drive semdev. An allowlisted actor is
 // authorized WITHOUT a permission call (zero network); otherwise the actor must
 // hold a push-capable repository permission. A checker error propagates (fail
@@ -151,6 +167,18 @@ func authorize(ctx context.Context, cfg Config, ev Event, checker PermissionChec
 		return false, err
 	}
 	return authorizedLevels[strings.ToLower(strings.TrimSpace(level))], nil
+}
+
+// AllowlistOnlyChecker is the deliberate no-token deployment shape: every
+// permission lookup answers "none" (definitive), so authorization reduces to the
+// allowlist. Distinct from a NIL checker, which authorize() treats as an
+// unavailable dependency (fail-closed WITH retry). Both front-door components use
+// it when no forge token is configured.
+type AllowlistOnlyChecker struct{}
+
+// Permission always answers "none" — see AllowlistOnlyChecker.
+func (AllowlistOnlyChecker) Permission(context.Context, string, string, string) (string, error) {
+	return "none", nil
 }
 
 // allowlisted reports whether actor is in the allowlist (case-insensitive login

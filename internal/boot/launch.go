@@ -9,7 +9,7 @@ import (
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/semsource"
-	"github.com/c360studio/semdev/internal/intake"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/launch"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
@@ -63,7 +63,7 @@ func RunLaunch(ctx context.Context, opts RunOptions, params launch.Params) (stri
 	d := launch.Deps{
 		Issues:   github.NewClient(opts.GitHubToken),
 		Pub:      natsClient,
-		Resolver: intake.NewRunResolver(natsClient, platform.Org, platform.Platform),
+		Resolver: admission.NewRunResolver(natsClient, platform.Org, platform.Platform),
 		Writer:   agentictools.NewNATSOwnedFactWriter(natsClient),
 		Probe:    probe,
 		Logger:   logger,

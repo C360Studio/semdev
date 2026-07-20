@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
+	"github.com/c360studio/semdev/internal/intake/admission"
 )
 
 func issuePayload(action, sender string, labels []string, body string, num int) []byte {
@@ -26,7 +27,7 @@ func issuePayload(action, sender string, labels []string, body string, num int) 
 // the initial labels + body are their attributable opt-in signal, and IssueRef is
 // the "owner/repo#number" reference.
 func TestNormalizeIssueOpened(t *testing.T) {
-	in, err := Normalize(SubjectIssue, issuePayload("opened", "alice", []string{"bug", "semdev"}, "please /semdev", 7))
+	in, err := Normalize(admission.SubjectIssue, issuePayload("opened", "alice", []string{"bug", "semdev"}, "please /semdev", 7))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestNormalizeIssueOpened(t *testing.T) {
 func TestNormalizeLabeledDoesNotInheritForeignOptIn(t *testing.T) {
 	// An authorized actor triggers a `labeled` event on an issue already bearing
 	// the semdev label (aggregate). No opt-in signal should be attributed to them.
-	in, err := Normalize(SubjectIssue, issuePayload("labeled", "authorized-dev", []string{"semdev", "bug"}, "unrelated body", 7))
+	in, err := Normalize(admission.SubjectIssue, issuePayload("labeled", "authorized-dev", []string{"semdev", "bug"}, "unrelated body", 7))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestNormalizeLabeledDoesNotInheritForeignOptIn(t *testing.T) {
 		t.Fatalf("a labeled event surfaced an unattributable opt-in signal: %+v", in.Event)
 	}
 	// End to end: an authorized actor + that non-attributable event is NOT admitted.
-	d, _ := Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "admin"})
+	d, _ := admission.Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "admin"})
 	if d.Admitted {
 		t.Fatalf("privilege confusion: an authorized actor's labeled event inherited a foreign opt-in and was admitted: %+v", d)
 	}
@@ -77,11 +78,11 @@ func TestNormalizeOpenedSenderMustBeAuthor(t *testing.T) {
 		Issue:        githubwebhook.IssuePayload{Number: 3, Body: "/semdev", Labels: []string{"semdev"}, Author: "someone-else"},
 	}
 	b, _ := json.Marshal(e)
-	in, _ := Normalize(SubjectIssue, b)
+	in, _ := Normalize(admission.SubjectIssue, b)
 	if len(in.Event.AppliedLabels) != 0 || in.Event.AuthoredText != "" {
 		t.Fatalf("sender!=author surfaced an unattributable opt-in signal: %+v", in.Event)
 	}
-	d, _ := Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "admin"})
+	d, _ := admission.Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "admin"})
 	if d.Admitted {
 		t.Errorf("an authorized sender on another author's opt-in content was admitted: %+v", d)
 	}
@@ -91,13 +92,13 @@ func TestNormalizeOpenedSenderMustBeAuthor(t *testing.T) {
 // semdev label is admitted; an unauthorized opener with the same label is not.
 func TestNormalizeThenDecideOpenedPath(t *testing.T) {
 	payload := issuePayload("opened", "alice", []string{"semdev"}, "", 1)
-	in, _ := Normalize(SubjectIssue, payload)
+	in, _ := Normalize(admission.SubjectIssue, payload)
 
-	admitted, _ := Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "write"})
+	admitted, _ := admission.Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "write"})
 	if !admitted.Admitted {
 		t.Error("authorized opener with the semdev label should be admitted")
 	}
-	rejected, _ := Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "none"})
+	rejected, _ := admission.Decide(context.Background(), cfg(), in.Event, &fakeChecker{level: "none"})
 	if rejected.Admitted {
 		t.Error("unauthorized opener with the semdev label must be rejected (zero-cost)")
 	}
@@ -106,7 +107,7 @@ func TestNormalizeThenDecideOpenedPath(t *testing.T) {
 // Comment, PR, and review events are not M0 intake triggers (deferred pending the
 // upstream payload fields), so they normalize to a skip.
 func TestNormalizeNonIssueEventsAreSkipped(t *testing.T) {
-	for _, subject := range []string{SubjectComment, SubjectPR, SubjectReview, "github.event.unknown"} {
+	for _, subject := range []string{admission.SubjectComment, admission.SubjectPR, admission.SubjectReview, "github.event.unknown"} {
 		in, err := Normalize(subject, []byte(`{}`))
 		if err != nil {
 			t.Fatalf("normalize %s: %v", subject, err)
@@ -119,7 +120,7 @@ func TestNormalizeNonIssueEventsAreSkipped(t *testing.T) {
 
 // Malformed issue JSON is a loud error, not a silent skip.
 func TestNormalizeMalformedIssueErrors(t *testing.T) {
-	if _, err := Normalize(SubjectIssue, []byte(`{not json`)); err == nil {
+	if _, err := Normalize(admission.SubjectIssue, []byte(`{not json`)); err == nil {
 		t.Error("expected an error decoding malformed issue JSON")
 	}
 }

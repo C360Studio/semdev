@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
-	"github.com/c360studio/semdev/internal/intake"
+	"github.com/c360studio/semdev/internal/intake/admission"
 )
 
 // This file is the GitHub v1 implementation of the channel-neutral Channel port
@@ -25,8 +25,8 @@ import (
 //     contained here). NormalizeInboundComment is the []byte boundary the
 //     conversation component calls, so a CommentEvent never reaches it.
 //
-// SplitRef lives in internal/intake today; the admission carve (group 4) relocates
-// it to internal/intake/admission and this import repoints with it.
+// SplitRef lives in the shared internal/intake/admission core (the front-door
+// coordinate parser both components + the launch driver use).
 
 // commenter is the narrow posting surface Post needs — github.Client satisfies it
 // (the same CreateComment the park lane used before the carve).
@@ -73,7 +73,7 @@ func (c *GitHubChannel) Post(ctx context.Context, thread ThreadRef, body string)
 		// the consumer's to make (it skips Post), never a nil client swallowed here.
 		return fmt.Errorf("conversation: github channel has no posting client; cannot post to %q (wiring error)", string(thread))
 	}
-	owner, repo, number, err := intake.SplitRef(string(thread))
+	owner, repo, number, err := admission.SplitRef(string(thread))
 	if err != nil {
 		return fmt.Errorf("conversation: resolve thread %q: %w", string(thread), err)
 	}

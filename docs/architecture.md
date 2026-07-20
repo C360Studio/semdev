@@ -91,6 +91,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `verify-station` | component | clean-room-verify | `deterministic-station-component` |
 | `provision-station` | component | sandbox | `deterministic-station-component` |
 | `issue-intake` | component | forge-io | `issue-intake-component` |
+| `conversation-channel` | component | conversation-channel | `conversation-channel-component` |
 | `create_change` | tool | openspec-io | `create-change-author-tool` |
 | `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
 | `write_change` | tool | openspec-io | `write-change-workspace-tool` |

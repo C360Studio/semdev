@@ -74,7 +74,7 @@ type permissionResponse struct {
 
 // Permission returns actor's permission level on owner/repo — one of
 // "admin" | "maintain" | "write" | "triage" | "read" | "none". It implements
-// intake.PermissionChecker. A user who is not a collaborator resolves to "none"
+// admission.PermissionChecker. A user who is not a collaborator resolves to "none"
 // (a 404 or an explicit none), NOT an error, so the gate rejects them cleanly; a
 // transport/5xx/auth failure returns an error so the gate fails closed and retries.
 func (c *Client) Permission(ctx context.Context, owner, repo, actor string) (string, error) {

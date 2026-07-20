@@ -9,9 +9,9 @@ import (
 )
 
 // The client implements the admission gate's PermissionChecker so it drops
-// straight into intake.Decide — the compile-time assertion lives IN intake
-// (component.go), which imports this package; asserting it here would be an
-// import cycle now that the intake component constructs the client.
+// straight into admission.Decide — the compile-time assertions live in the intake
+// and conversation-channel components (which import this package); asserting it
+// here would be an import cycle now that those components construct the client.
 
 // A 200 returns the granular role_name in preference to the coarse permission,
 // and sends the expected auth headers to the collaborators/permission endpoint.

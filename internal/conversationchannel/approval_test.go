@@ -1,15 +1,15 @@
-package intake
+package conversationchannel
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -43,7 +43,7 @@ func (f *fakeWriter) ReadOwnedPredicates(context.Context, string, string) ([]str
 	return nil, nil
 }
 
-func newTestApproval(resolver RunResolver, writer *fakeWriter, checker PermissionChecker) *approvalAdapter {
+func newTestApproval(resolver admission.RunResolver, writer *fakeWriter, checker admission.PermissionChecker) *approvalAdapter {
 	cfg := ComponentConfig{Repo: "c360studio/semdev-fixture", Allowlist: []string{"cglusky"}}
 	applyConfigDefaults(&cfg)
 	return &approvalAdapter{cfg: cfg, checker: checker, resolver: resolver, writer: writer, logger: slog.Default()}
@@ -69,12 +69,15 @@ func flattenedComment(t *testing.T, sender, author, body string) []byte {
 	return data
 }
 
-// --- the approval pins (task 3.1) ---
+// --- the approval pins (conversation-channel-seam 4.3) ---
 
-// TestAuthorizedApprovalReleasesTheGate pins the whole authorized path: the
-// command lands run.change.approved="true" (Source approval-adapter) on the
-// resolved run — byte-for-byte the stand-in fact the resume rule consumes.
-func TestAuthorizedApprovalReleasesTheGate(t *testing.T) {
+// TestApprovalReadsNeutralMessage pins the carve: the approval adapter authorizes
+// and releases the gate from a NEUTRAL Message (via conversation.NormalizeInboundComment)
+// — NOT a githubwebhook.CommentEvent/CommentSignal — and lands run.change.approved="true"
+// (Source approval-adapter) on the resolved run, byte-for-byte the stand-in fact the
+// resume rule consumes. The admission Event it authorizes is rebuilt from Message.Author
+// + SplitRef(thread), so Authorize is unchanged.
+func TestApprovalReadsNeutralMessage(t *testing.T) {
 	writer := &fakeWriter{}
 	a := newTestApproval(&fakeResolver{runID: "c360.semdev-001.agent.chain.execution.r1"}, writer, nil)
 
@@ -92,9 +95,9 @@ func TestAuthorizedApprovalReleasesTheGate(t *testing.T) {
 		t.Fatalf("add = %d triples, want 1", len(call.add))
 	}
 	tr := call.add[0]
-	if tr.Predicate != ApprovedPredicate || tr.Object != "true" || tr.Source != ApprovedSource {
+	if tr.Predicate != admission.ApprovedPredicate || tr.Object != "true" || tr.Source != ApprovedSource {
 		t.Errorf("triple = %s=%v (Source %s), want %s=true (Source %s) — the exact resume-rule condition",
-			tr.Predicate, tr.Object, tr.Source, ApprovedPredicate, ApprovedSource)
+			tr.Predicate, tr.Object, tr.Source, admission.ApprovedPredicate, ApprovedSource)
 	}
 }
 
@@ -102,7 +105,7 @@ func TestAuthorizedApprovalReleasesTheGate(t *testing.T) {
 // no write, definitive ack.
 func TestUnauthorizedApprovalIsIgnored(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, allowlistOnlyChecker{})
+	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, admission.AllowlistOnlyChecker{})
 	if err := a.handleCommentEvent(context.Background(), flattenedComment(t, "mallory", "mallory", "/semdev approve")); err != nil {
 		t.Fatalf("unauthorized is definitive: %v", err)
 	}
@@ -111,10 +114,9 @@ func TestUnauthorizedApprovalIsIgnored(t *testing.T) {
 	}
 }
 
-// TestUnattributableCommandIsNoSignal — sender ≠ comment author means the
-// body is NOT the sender's words; the command must not count (privilege
-// confusion otherwise: an authorized actor's unrelated event inheriting a
-// foreign command).
+// TestUnattributableCommandIsNoSignal — sender ≠ comment author means the body is
+// NOT the sender's words; the neutral normalize drops it (ok == false), so the
+// command never counts (privilege confusion otherwise).
 func TestUnattributableCommandIsNoSignal(t *testing.T) {
 	writer := &fakeWriter{}
 	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, nil)
@@ -126,8 +128,8 @@ func TestUnattributableCommandIsNoSignal(t *testing.T) {
 	}
 }
 
-// TestApprovalReplayIsIdempotent — an already-approved run gets no second
-// write (and no error: the replay acks).
+// TestApprovalReplayIsIdempotent — an already-approved run gets no second write
+// (and no error: the replay acks).
 func TestApprovalReplayIsIdempotent(t *testing.T) {
 	writer := &fakeWriter{}
 	a := newTestApproval(&fakeResolver{runID: "run-x", approved: true}, writer, nil)
@@ -140,8 +142,7 @@ func TestApprovalReplayIsIdempotent(t *testing.T) {
 }
 
 // TestApprovalBeforeRunExistsRedelivers — the approval racing the mint is a
-// TRANSIENT state: the handler errors so the consumer redelivers (bounded),
-// instead of silently dropping an authorized human's approval.
+// TRANSIENT state: the handler errors so the consumer redelivers (bounded).
 func TestApprovalBeforeRunExistsRedelivers(t *testing.T) {
 	a := newTestApproval(&fakeResolver{runID: ""}, &fakeWriter{}, nil)
 	if err := a.handleCommentEvent(context.Background(), flattenedComment(t, "cglusky", "cglusky", "/semdev approve")); err == nil {
@@ -157,8 +158,21 @@ func TestApprovalResolverFaultRedelivers(t *testing.T) {
 	}
 }
 
-// TestNonCommandCommentsAreIgnored — ordinary conversation on the issue never
-// touches the graph.
+// TestDecodeErrorIsDefinitiveAck — a malformed payload is logged + ACKED, never
+// redelivered (grp2-review carry-forward b: the receiver only publishes shapes it
+// flattened itself).
+func TestDecodeErrorIsDefinitiveAck(t *testing.T) {
+	writer := &fakeWriter{}
+	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, nil)
+	if err := a.handleCommentEvent(context.Background(), []byte(`{not json`)); err != nil {
+		t.Fatalf("a decode error must ack (nil), got %v", err)
+	}
+	if len(writer.calls) != 0 {
+		t.Errorf("a malformed payload wrote %d facts, want 0", len(writer.calls))
+	}
+}
+
+// TestNonCommandCommentsAreIgnored — ordinary conversation never touches the graph.
 func TestNonCommandCommentsAreIgnored(t *testing.T) {
 	writer := &fakeWriter{}
 	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, nil)
@@ -197,39 +211,5 @@ func TestHasApprovalCommandTokenizing(t *testing.T) {
 		if got := hasApprovalCommand("/semdev", c.text); got != c.want {
 			t.Errorf("hasApprovalCommand(%q) = %v, want %v", c.text, got, c.want)
 		}
-	}
-}
-
-// TestNormalizeCommentShapes pins the comment normalization: created+attributable
-// carries the body; edited/deleted are irrelevant; sender≠author strips the text.
-func TestNormalizeCommentShapes(t *testing.T) {
-	attributable := flattenedComment(t, "cglusky", "cglusky", "/semdev approve")
-	sig, err := NormalizeComment(attributable)
-	if err != nil || !sig.Relevant || !sig.Attributable {
-		t.Fatalf("attributable created comment: sig=%+v err=%v", sig, err)
-	}
-	if sig.IssueRef != "c360studio/semdev-fixture#7" {
-		t.Errorf("IssueRef = %q — the parent-issue binding (the closed gap)", sig.IssueRef)
-	}
-	if !strings.Contains(sig.Event.AuthoredText, "approve") {
-		t.Errorf("attributable comment must carry the body")
-	}
-
-	foreign := flattenedComment(t, "cglusky", "mallory", "/semdev approve")
-	sig, err = NormalizeComment(foreign)
-	if err != nil || !sig.Relevant {
-		t.Fatalf("foreign-author comment stays relevant: %v", err)
-	}
-	if sig.Attributable || sig.Event.AuthoredText != "" {
-		t.Errorf("foreign-author comment must be unattributable with NO text, got %+v", sig)
-	}
-
-	var edited githubwebhook.CommentEvent
-	_ = json.Unmarshal(flattenedComment(t, "cglusky", "cglusky", "x"), &edited)
-	edited.Action = "edited"
-	editedData, _ := json.Marshal(edited)
-	sig, err = NormalizeComment(editedData)
-	if err != nil || sig.Relevant {
-		t.Errorf("an edited comment is not a signal, got %+v (%v)", sig, err)
 	}
 }

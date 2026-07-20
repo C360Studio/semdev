@@ -56,13 +56,13 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
 
 ## 4. Extract the admission surface + the conversation-channel component (design D8; M-4)
 
-- [ ] 4.1 Extract `internal/intake/admission` (the shared surface both components need):
+- [x] 4.1 Extract `internal/intake/admission` (the shared surface both components need):
   `Authorize`, `Config`, `PermissionChecker`, `SplitRef`, `RunResolver`/`ResolveRunByRef`,
   `natsEntityFetcher`, the `Event` type. Update `internal/launch` imports (`SplitRef`,
   `CoordinatorTask`, `NewRunResolver`, `FrontDoorSubject`, `Intake`) to their new homes.
   RED-first: a parity pin proves `internal/launch` still builds + the single `boot.Run`
   path is intact.
-- [ ] 4.2 RED: `TestParkPostPostsViaPort` — `parkpost` posts the `run.awaiting.human`
+- [x] 4.2 RED: `TestParkPostPostsViaPort` — `parkpost` posts the `run.awaiting.human`
   message through `Channel.Post` (not `Commenter.CreateComment`); the bounded-retry /
   never-block-the-park contract is preserved. GRP2-REVIEW CARRY-FORWARDS (the consumer
   owns the definitive-skip — `Channel.Post` fails closed on ALL error classes, so the
@@ -71,7 +71,7 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
   built with a nil commenter in allowlist-only/journey boots; the consumer skips `Post`
   or maps its wiring error to a definitive ack); (b) unparseable `run.issue.ref` →
   graph-only skip + ack (today's `parkpost.go:97-102`), not a `Post`-error redeliver.
-- [ ] 4.3 RED: `TestApprovalReadsNeutralMessage` — the approval adapter authorizes +
+- [x] 4.3 RED: `TestApprovalReadsNeutralMessage` — the approval adapter authorizes +
   releases the gate from a neutral `Message` (not a `CommentSignal`); the `/semdev
   approve` exact-command match is UNCHANGED; `run.change.approved` (writer
   `approval-adapter`) is untouched. GRP2-REVIEW CARRY-FORWARDS: (a) the admission
@@ -81,16 +81,16 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
   DECODE failure from `NormalizeInboundComment` (err != nil) must be logged + ACKED, not
   redelivered (today's `approval.go:85-88` definitive skip — the receiver only publishes
   shapes it flattened itself).
-- [ ] 4.4 Extract the `conversation-channel` component: it owns comment `Post`,
+- [x] 4.4 Extract the `conversation-channel` component: it owns comment `Post`,
   approval-from-`Message`, park-post, and the `user.response.>` USER-stream consumer;
   it consumes `github.event.comment` from the (unchanged) webhook-fed GITHUB stream and
   shares the `admission` core with `issue-intake`. `issue-intake` NARROWS to the
   code-host issue front door (`github.event.issue` → run mint) + the webhook receiver
   (which still flattens BOTH event types — B-1: comment events keep reaching the
   conversation component's consumer, unchanged).
-- [ ] 4.5 Boot/DI wiring: BOTH binaries register the `conversation-channel` component
+- [x] 4.5 Boot/DI wiring: BOTH binaries register the `conversation-channel` component
   (the half-wired-in-one-binary class); the G1 census updated; parity-scan-safe.
-- [ ] 4.6 GUARD: the full `internal/...` unit layer + `test/conformance` green
+- [x] 4.6 GUARD: the full `internal/...` unit layer + `test/conformance` green
   UNCHANGED — the arc reads the same facts, the transport is the same webhook path;
   only the code structure beneath moved.
 

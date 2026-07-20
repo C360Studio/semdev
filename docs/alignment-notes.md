@@ -82,13 +82,35 @@ Template:
   build a prompt-bearing coordinator wake. The component owns both halves of
   the lane: the receiver (HMAC → filter → flatten → publish onto the
   semdev-declared GITHUB stream, delivery-GUID msg-id dedup) and the durable
-  consumer (Normalize → the existing `intake.Decide` gate → admission record →
-  `intake.CoordinatorTask` wake; comment events → the approval adapter). It
-  adds NO admission logic of its own, stamps no lifecycle fact (G2 — the wake
-  is the host-way front door; the mint rule fires the transition), and records
-  only what the gate itself derived (G3).
+  consumer (Normalize → the shared `admission.Decide` gate → admission record →
+  `intake.CoordinatorTask` wake). NARROWED by conversation-channel-seam to the
+  ISSUE lane: the receiver still flattens comment events (GitHub delivers all
+  event types to one URL), but the comment-approval + park-post lanes moved to
+  the conversation-channel component. It adds NO admission logic of its own,
+  stamps no lifecycle fact (G2 — the wake is the host-way front door; the mint
+  rule fires the transition), and records only what the gate itself derived (G3).
 - **Registry entry:** `issue-intake` (`component`)
-- **Change:** forge-io-real-lanes
+- **Change:** forge-io-real-lanes (narrowed by conversation-channel-seam)
+
+## conversation-channel-component
+
+- **Primitive considered:** keeping the human approval + park-post lanes inside
+  issue-intake, or expressing them as rules over the GITHUB/USER streams.
+- **Why it cannot express this:** the conversation half is a code-host adapter
+  concern (post a message to a thread, normalize an inbound comment, run the
+  collaborator-permission network call the approval authorize requires) that a
+  rule cannot perform — the same reasons issue-intake exists. Carving it into a
+  dedicated component (conversation-channel-seam D8) puts it behind the
+  channel-neutral `Channel` port so a second channel composes without touching
+  the arc: it owns the comment-approval consumer (github.event.comment → neutral
+  Message → `admission.Authorize` → the stand-in `run.change.approved` fact the
+  resume rule reads) and the park-post consumer (user.response.> → `Channel.Post`).
+  It shares the `admission` decision + resolver core with issue-intake (a pure
+  reference, not a second writer — G5), fires no lifecycle transition (G2 — the
+  resume rule owns the transition), and stamps only what the human's authorized
+  command derived (G3).
+- **Registry entry:** `conversation-channel` (`component`)
+- **Change:** conversation-channel-seam
 
 ## create-change-author-tool
 

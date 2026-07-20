@@ -1,35 +1,33 @@
-// The issue-intake COMPONENT (forge-io-real-lanes D1 as-built) — the registered
-// runtime surface that makes semdev's front door real. (The admission-gate
-// package doc lives in admission.go; this file documents the component.) It
-// owns BOTH halves of the webhook lane, because the framework retired its
-// github-webhook input in the beta.147 boundary wave and the cutover checklist
-// transferred the receiver to semdev:
+// Package intake is semdev's code-host issue front door — the issue-intake
+// COMPONENT (forge-io-real-lanes D1; NARROWED by conversation-channel-seam D8 to
+// the issue lane). It owns BOTH halves of the webhook ISSUE lane, because the
+// framework retired its github-webhook input in the beta.147 boundary wave and the
+// cutover checklist transferred the receiver to semdev:
 //
-//   - RECEIVER (optional, http_port > 0): a minimal HTTP listener that
-//     validates the GitHub HMAC (X-Hub-Signature-256, secret via env — never in
-//     config), filters to the issues/issue_comment events the lanes consume,
-//     FLATTENS the raw payload (internal/forge/githubwebhook — semdev owns the
-//     shapes AND the mapping now), and publishes the flattened JSON onto the
-//     durable GITHUB stream keyed by the delivery GUID (JetStream msg-id dedup
-//     absorbs GitHub redeliveries at the stream layer).
+//   - RECEIVER (optional, http_port > 0): a minimal HTTP listener that validates
+//     the GitHub HMAC (X-Hub-Signature-256, secret via env — never in config),
+//     filters to the issues/issue_comment events the lanes consume, FLATTENS the
+//     raw payload (internal/forge/githubwebhook — semdev owns the shapes AND the
+//     mapping now), and publishes the flattened JSON onto the durable GITHUB
+//     stream keyed by the delivery GUID (JetStream msg-id dedup absorbs GitHub
+//     redeliveries at the stream layer). The receiver flattens BOTH event types —
+//     GitHub delivers all events to one URL — so a comment event still reaches the
+//     conversation-channel component's consumer (conversation-channel-seam B-1).
 //
-//   - CONSUMER: a durable JetStream consumer on github.event.> that drives the
-//     two lanes: an ISSUE event runs Normalize → the admission gate (Decide —
-//     authorized, opted-in, zero tokens for rejects) → births the admission
-//     record (the spec's intake.actor.admitted, content-derived ID = the
-//     idempotency backstop) → publishes the coordinator wake via
-//     CoordinatorTask + PublishToStream (the journey-proven byte shape). A
-//     COMMENT event feeds the approval lane (NormalizeComment → the approval
-//     adapter).
+//   - CONSUMER: a durable JetStream consumer on github.event.issue that runs
+//     Normalize → the admission gate (Decide — authorized, opted-in, zero tokens
+//     for rejects) → births the admission record (the spec's intake.actor.admitted,
+//     content-derived ID = the idempotency backstop) → publishes the coordinator
+//     wake via CoordinatorTask + PublishToStream (the journey-proven byte shape).
+//     The COMMENT + park-post lanes moved to the conversation-channel component.
 //
-// G1 (framework-alignment note): a rule cannot consume a raw webhook stream,
-// decode a host payload, run a network permission check, or build a prompt —
-// this is component-shaped work exactly like the six deterministic stations.
-// G2: publishing the wake is NOT a lifecycle transition (the mint rule fires it
-// off the coordinator's decide); the component fires no transition. G3: the
-// admission record stamps only what the gate itself derived. The component adds
-// NO admission logic of its own — Decide is the one gate.
-
+// G1 (framework-alignment note): a rule cannot consume a raw webhook stream, decode
+// a host payload, run a network permission check, or build a prompt — this is
+// component-shaped work exactly like the six deterministic stations. G2: publishing
+// the wake is NOT a lifecycle transition (the mint rule fires it off the
+// coordinator's decide); the component fires no transition. G3: the admission
+// record stamps only what the gate itself derived. The admission decision core is
+// the shared internal/intake/admission package — Decide is the one gate.
 package intake
 
 import (
@@ -54,6 +52,7 @@ import (
 
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
@@ -75,7 +74,7 @@ const maxWebhookBody = 1 << 20 // 1 MiB
 // ComponentConfig is the issue-intake config surface (bootstrap `components`
 // block). Secrets travel by ENV NAME only (the dotenv lane), never by value.
 type ComponentConfig struct {
-	Ports *component.PortConfig `json:"ports,omitempty" schema:"type:ports,description:One jetstream input consuming github.event.> from the GITHUB stream.,category:basic"`
+	Ports *component.PortConfig `json:"ports,omitempty" schema:"type:ports,description:One jetstream input consuming github.event.issue from the GITHUB stream.,category:basic"`
 
 	// HTTPPort is the receiver's listen port; 0 DISABLES the receiver (the
 	// consumer still runs — e2e journeys publish flattened events straight
@@ -92,7 +91,7 @@ type ComponentConfig struct {
 	Repo string `json:"repo,omitempty" schema:"type:string,description:The owner/name repository this intake lane serves; other repos are skipped.,category:basic"`
 
 	// Allowlist, OptInLabel, OptInCommand are the admission knobs (see
-	// intake.Config — the spec'd gate).
+	// admission.Config — the spec'd gate).
 	Allowlist    []string `json:"allowlist,omitempty" schema:"type:array,description:Actors always authorized (no permission call).,category:basic"`
 	OptInLabel   string   `json:"opt_in_label,omitempty" schema:"type:string,description:Label that opts an issue in (default semdev).,category:basic"`
 	OptInCommand string   `json:"opt_in_command,omitempty" schema:"type:string,description:Slash command that opts an issue in (default /semdev).,category:basic"`
@@ -118,24 +117,18 @@ func (c *ComponentConfig) Validate() error {
 // Schema is the generated config schema for registration.
 var Schema = component.GenerateConfigSchema(reflect.TypeOf(ComponentConfig{}))
 
-// DefaultPorts declares the two consumer lanes: the webhook events (GITHUB
-// stream) and the park-lane publishes (USER stream — the D4 comment poster).
+// DefaultPorts declares the issue consumer lane (github.event.issue on the GITHUB
+// stream). The comment + park-post lanes moved to the conversation-channel
+// component; the receiver still flattens BOTH event types onto the stream.
 func DefaultPorts() *component.PortConfig {
 	return &component.PortConfig{
 		Inputs: []component.PortDefinition{{
 			Name:        "github_events",
 			Type:        "jetstream",
-			Subject:     "github.event.>",
+			Subject:     admission.SubjectIssue,
 			StreamName:  GithubStreamName,
 			Required:    true,
-			Description: "Flattened webhook events (semdev's receiver or an e2e journey publishes them).",
-		}, {
-			Name:        "user_responses",
-			Type:        "jetstream",
-			Subject:     UserResponseSubject,
-			StreamName:  "USER",
-			Required:    false,
-			Description: "The park rules' user.response publishes — posted as issue comments (forge-io-real-lanes D4).",
+			Description: "Flattened issue events (semdev's receiver or an e2e journey publishes them).",
 		}},
 		Outputs: []component.PortDefinition{},
 	}
@@ -154,9 +147,8 @@ type Component struct {
 	nats     *natsclient.Client
 	pub      StreamPublisher
 	creator  EntityCreator
-	checker  PermissionChecker
-	approv   *approvalAdapter
-	parkpost *parkPoster
+	checker  admission.PermissionChecker
+	resolver admission.RunResolver
 	platform component.PlatformMeta
 	logger   *slog.Logger
 
@@ -203,7 +195,7 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 	// collaborator check; without one, ONLY allowlisted actors can be
 	// authorized (Decide fails closed for everyone else) — a legitimate
 	// allowlist-only deployment shape, stated loud at boot.
-	var checker PermissionChecker
+	var checker admission.PermissionChecker
 	if token := strings.TrimSpace(os.Getenv(cfg.TokenEnv)); token != "" {
 		checker = github.NewClient(token).WithLogger(logger)
 	} else {
@@ -211,7 +203,7 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		// non-allowlisted actor is then a DEFINITIVE reject — not the
 		// fail-closed-retry an unavailable checker would produce (retrying can
 		// never change the answer when there is no checker to recover).
-		checker = allowlistOnlyChecker{}
+		checker = admission.AllowlistOnlyChecker{}
 		logger.Warn("no forge token in env; admission runs allowlist-only (collaborator checks unavailable — non-allowlisted actors are definitively rejected)",
 			slog.String("token_env", cfg.TokenEnv))
 	}
@@ -222,20 +214,9 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		pub:      deps.NATSClient,
 		creator:  &natsEntityCreator{client: deps.NATSClient},
 		checker:  checker,
+		resolver: admission.NewRunResolver(deps.NATSClient, deps.Platform.Org, deps.Platform.Platform),
 		platform: deps.Platform,
 		logger:   logger,
-	}
-	c.approv = newApprovalAdapter(deps.NATSClient, cfg, checker, deps.Platform, logger)
-	// The park-comment lane (D4): posts only with a real forge client; without
-	// a token the park stays graph-only (stated in the poster's log).
-	var commenter Commenter
-	if forgeClient, ok := checker.(*github.Client); ok {
-		commenter = forgeClient
-	}
-	c.parkpost = &parkPoster{
-		commenter: commenter,
-		fetcher:   &natsEntityFetcher{client: deps.NATSClient},
-		logger:    logger,
 	}
 	return c, nil
 }
@@ -268,7 +249,7 @@ func Register(reg *component.Registry) error {
 		Type:        "processor",
 		Domain:      "forge-io",
 		Protocol:    "webhook",
-		Description: "Issue-intake front door: webhook receiver + durable admission consumer; admitted issues wake the coordinator (forge-io-real-lanes).",
+		Description: "Issue-intake front door: webhook receiver + durable issue-admission consumer; admitted issues wake the coordinator (forge-io-real-lanes).",
 		Version:     "0.1.0",
 	})
 }
@@ -335,12 +316,12 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 	}
 	consumerCfg := component.GetConsumerConfigFromDefinition(port)
 	// max_deliver is set DELIBERATELY (review finding): the framework default
-	// of 3 gives the approval-races-mint case only ~2 retries before a human's
-	// /semdev approve is silently dropped. ConsumeWithHeartbeat naks with a
-	// fixed 30s delay (its own contract — a BackOff list here would be dead
-	// config), so 10 deliveries ≈ 4.5 minutes of retry budget. MessageTimeout
-	// bounds one handler run ABOVE the worst case (the run resolver's bounded
-	// pagination); the 20s heartbeat keeps a slow handler acked-in-progress.
+	// of 3 gives the intake retry case only ~2 retries. ConsumeWithHeartbeat
+	// naks with a fixed 30s delay (its own contract — a BackOff list here would
+	// be dead config), so 10 deliveries ≈ 4.5 minutes of retry budget.
+	// MessageTimeout bounds one handler run ABOVE the worst case (the run
+	// resolver's bounded pagination); the 20s heartbeat keeps a slow handler
+	// acked-in-progress.
 	maxDeliver := consumerCfg.MaxDeliver
 	if maxDeliver == 0 || maxDeliver == 3 {
 		maxDeliver = 10
@@ -370,30 +351,23 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 	return nil
 }
 
-// handleEvent dispatches one flattened event to its lane. A nil return ACKS
-// (definitive outcome — admitted, rejected, skipped, malformed); an error
-// return NAKS for bounded redelivery (transient faults only: a permission
-// lookup that failed, a graph/publish blip — the fail-closed retry the
-// admission spec demands).
+// handleEvent dispatches one flattened event to the issue lane. A nil return ACKS
+// (definitive outcome — admitted, rejected, skipped, malformed); an error return
+// NAKS for bounded redelivery (transient faults only: a permission lookup that
+// failed, a graph/publish blip — the fail-closed retry the admission spec demands).
 func (c *Component) handleEvent(ctx context.Context, subject string, payload []byte) error {
 	atomic.AddInt64(&c.eventsConsumed, 1)
 	c.lastActivity.Store(time.Now())
-	switch {
-	case subject == SubjectIssue:
+	if subject == admission.SubjectIssue {
 		return c.handleIssueEvent(ctx, payload)
-	case subject == SubjectComment:
-		return c.approv.handleCommentEvent(ctx, payload)
-	case strings.HasPrefix(subject, "user.response."):
-		return c.parkpost.handleUserResponse(ctx, payload)
-	default:
-		c.logger.Debug("intake: irrelevant event subject; skipping", slog.String("subject", subject))
-		return nil
 	}
+	c.logger.Debug("intake: irrelevant event subject; skipping", slog.String("subject", subject))
+	return nil
 }
 
 // handleIssueEvent runs the intake lane: Normalize → gate → record → wake.
 func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error {
-	in, err := Normalize(SubjectIssue, payload)
+	in, err := Normalize(admission.SubjectIssue, payload)
 	if err != nil {
 		// Malformed payloads are logged and ACKED — redelivering garbage
 		// forever is a poison loop, and the receiver only publishes shapes it
@@ -410,7 +384,7 @@ func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error 
 		return nil
 	}
 
-	decision, err := Decide(ctx, c.admissionConfig(), in.Event, c.checker)
+	decision, err := admission.Decide(ctx, c.admissionConfig(), in.Event, c.checker)
 	if err != nil {
 		// Fail closed AND retry: a transient permission-lookup fault must not
 		// admit, and must not permanently reject an authorized actor.
@@ -438,7 +412,7 @@ func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error 
 	recordID := AdmissionRecordEntityID(c.platform.Org, c.platform.Platform, in.IssueRef, deliveryID)
 	if err := RecordAdmission(ctx, c.creator, recordID, decision.Actor, in.IssueRef); err != nil {
 		if err == ErrAlreadyRecorded {
-			runID, _, rerr := c.approv.resolver.ResolveRunByRef(ctx, in.IssueRef)
+			runID, _, rerr := c.resolver.ResolveRunByRef(ctx, in.IssueRef)
 			if rerr != nil {
 				atomic.AddInt64(&c.errors, 1)
 				return fmt.Errorf("intake: recorded admission but could not check for the run: %w", rerr) // redeliver
@@ -485,8 +459,8 @@ func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error 
 	return nil
 }
 
-func (c *Component) admissionConfig() Config {
-	return Config{
+func (c *Component) admissionConfig() admission.Config {
+	return admission.Config{
 		Allowlist:    c.config.Allowlist,
 		OptInLabel:   c.config.OptInLabel,
 		OptInCommand: c.config.OptInCommand,
@@ -513,17 +487,7 @@ func eventDeliveryID(payload []byte) string {
 
 // The github client satisfies the admission gate's checker contract — asserted
 // here (not in the github package: that direction would be an import cycle).
-var _ PermissionChecker = (*github.Client)(nil)
-
-// allowlistOnlyChecker is the deliberate no-token deployment shape: every
-// permission lookup answers "none" (definitive), so authorization reduces to
-// the allowlist. Distinct from a NIL checker, which authorize() treats as an
-// unavailable dependency (fail-closed WITH retry).
-type allowlistOnlyChecker struct{}
-
-func (allowlistOnlyChecker) Permission(context.Context, string, string, string) (string, error) {
-	return "none", nil
-}
+var _ admission.PermissionChecker = (*github.Client)(nil)
 
 // natsEntityCreator is the classified create_with_triples adapter. It exists
 // (rather than reusing agentictools.NewNATSTriplePublisher) because the
@@ -580,7 +544,10 @@ func (c *Component) startReceiver() {
 		slog.Bool("hmac", c.webhookSecret != ""))
 }
 
-// handleWebhook is the receiver: validate → filter → flatten → publish.
+// handleWebhook is the receiver: validate → filter → flatten → publish. It flattens
+// BOTH issues and issue_comment events (GitHub delivers all event types to one URL,
+// conversation-channel-seam B-1) — a comment event still reaches the
+// conversation-channel component's own consumer on the GITHUB stream.
 func (c *Component) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -619,7 +586,7 @@ func (c *Component) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad payload", http.StatusBadRequest)
 			return
 		}
-		subject, flattened = SubjectIssue, ev
+		subject, flattened = admission.SubjectIssue, ev
 	case "issue_comment":
 		ev, ferr := githubwebhook.FlattenCommentEvent(body, deliveryID, now)
 		if ferr != nil {
@@ -627,7 +594,7 @@ func (c *Component) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad payload", http.StatusBadRequest)
 			return
 		}
-		subject, flattened = SubjectComment, ev
+		subject, flattened = admission.SubjectComment, ev
 	default:
 		// Not a lane we consume (ping, stars, …) — accepted and dropped.
 		w.WriteHeader(http.StatusAccepted)
@@ -686,7 +653,7 @@ func (c *Component) Stop(timeout time.Duration) error {
 
 // Meta implements Discoverable.
 func (c *Component) Meta() component.Metadata {
-	return component.Metadata{Name: ComponentName, Type: "processor", Description: "semdev issue-intake front door (webhook receiver + admission consumer)", Version: "0.1.0"}
+	return component.Metadata{Name: ComponentName, Type: "processor", Description: "semdev issue-intake front door (webhook receiver + issue-admission consumer)", Version: "0.1.0"}
 }
 
 // InputPorts implements Discoverable.

@@ -23,6 +23,7 @@ import (
 	"github.com/c360studio/semdev/internal/boot"
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
 	"github.com/c360studio/semdev/internal/intake"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/mockllm"
 )
 
@@ -34,9 +35,12 @@ const webhookJourneyActor = "journey-human"
 // mock fixtures key on the same ref.
 const webhookJourneyRepo = "c360studio/semdev-journey"
 
-// patchIntakeJourneyConfig patches the issue-intake admission knobs (allowlist
-// + repo binding) into the journey's temp bootstrap — the operator's exact
-// config surface, so the boot path under test is the real one.
+// patchIntakeJourneyConfig patches the admission knobs (allowlist + repo binding)
+// into BOTH front-door components — issue-intake (the issue lane) and
+// conversation-channel (the /semdev approve comment lane) — in the journey's temp
+// bootstrap, the operator's exact config surface, so the boot path under test is
+// the real one. The comment-approval half now lives in conversation-channel, so it
+// needs the same allowlist/repo or the '/semdev approve' comment is rejected.
 func patchIntakeJourneyConfig(t *testing.T, configPath string) string {
 	t.Helper()
 	raw, err := os.ReadFile(configPath)
@@ -47,9 +51,12 @@ func patchIntakeJourneyConfig(t *testing.T, configPath string) string {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("decode journey config: %v", err)
 	}
-	intakeCfg := mustMap(t, mustMap(t, mustMap(t, cfg, "components"), "issue-intake"), "config")
-	intakeCfg["allowlist"] = []any{webhookJourneyActor}
-	intakeCfg["repo"] = webhookJourneyRepo
+	components := mustMap(t, cfg, "components")
+	for _, name := range []string{"issue-intake", "conversation-channel"} {
+		compCfg := mustMap(t, mustMap(t, components, name), "config")
+		compCfg["allowlist"] = []any{webhookJourneyActor}
+		compCfg["repo"] = webhookJourneyRepo
+	}
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatalf("re-encode journey config: %v", err)
@@ -119,7 +126,7 @@ func publishFlattenedIssueEvent(ctx context.Context, t *testing.T) {
 	}
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
-	if err := client.PublishToStream(ctx, intake.SubjectIssue, data); err != nil {
+	if err := client.PublishToStream(ctx, admission.SubjectIssue, data); err != nil {
 		t.Fatalf("publish issue event: %v", err)
 	}
 }
@@ -146,7 +153,7 @@ func publishFlattenedApprovalComment(ctx context.Context, t *testing.T) {
 	}
 	client := connectFrontDoor(ctx, t)
 	defer func() { _ = client.Close(context.Background()) }()
-	if err := client.PublishToStream(ctx, intake.SubjectComment, data); err != nil {
+	if err := client.PublishToStream(ctx, admission.SubjectComment, data); err != nil {
 		t.Fatalf("publish comment event: %v", err)
 	}
 }

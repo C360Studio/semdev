@@ -1,6 +1,10 @@
 package intake
 
-import "context"
+import (
+	"context"
+
+	"github.com/c360studio/semdev/internal/intake/admission"
+)
 
 // Outcome is the full result of assessing one code-host event: the normalized
 // intake and the admission decision. The adapter component acts on it with two
@@ -10,7 +14,7 @@ import "context"
 // run and spends no token (the zero-cost rejection, G6).
 type Outcome struct {
 	Intake   *Intake
-	Decision Decision
+	Decision admission.Decision
 	// Admitted is the single gate the adapter acts on: true → stamp + spawn;
 	// false → drop (a non-relevant event is never admitted).
 	Admitted bool
@@ -27,7 +31,7 @@ type Outcome struct {
 // No LLM token is ever spent here: normalization is pure and the decision makes at
 // most one GitHub permission call (skipped for an allowlisted actor). An
 // unauthorized or un-opted-in event is rejected before any run or model exists.
-func Assess(ctx context.Context, cfg Config, subject string, payload []byte, checker PermissionChecker) (*Outcome, error) {
+func Assess(ctx context.Context, cfg admission.Config, subject string, payload []byte, checker admission.PermissionChecker) (*Outcome, error) {
 	in, err := Normalize(subject, payload)
 	if err != nil {
 		return nil, err
@@ -36,7 +40,7 @@ func Assess(ctx context.Context, cfg Config, subject string, payload []byte, che
 		// Not an M0 intake trigger — no decision, no effect.
 		return &Outcome{Intake: in}, nil
 	}
-	d, err := Decide(ctx, cfg, in.Event, checker)
+	d, err := admission.Decide(ctx, cfg, in.Event, checker)
 	if err != nil {
 		// Fail closed and retryable: do not admit, surface for redelivery.
 		return &Outcome{Intake: in, Decision: d}, err

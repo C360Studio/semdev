@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/graph"
@@ -74,11 +75,11 @@ func (f *fakeCreator) CreateEntityWithTriples(_ context.Context, entityID string
 // newTestComponent builds a direct-constructed Component with fakes — the
 // booted shape minus NATS (handleIssueEvent never touches the client).
 // existingRun seeds the redelivery discriminator's resolver ("" = no run yet).
-func newTestIntake(pub *fakePublisher, creator EntityCreator, checker PermissionChecker) *Component {
+func newTestIntake(pub *fakePublisher, creator EntityCreator, checker admission.PermissionChecker) *Component {
 	return newTestIntakeWithRun(pub, creator, checker, "")
 }
 
-func newTestIntakeWithRun(pub *fakePublisher, creator EntityCreator, checker PermissionChecker, existingRun string) *Component {
+func newTestIntakeWithRun(pub *fakePublisher, creator EntityCreator, checker admission.PermissionChecker, existingRun string) *Component {
 	cfg := ComponentConfig{
 		Ports:     DefaultPorts(),
 		Repo:      "c360studio/semdev-fixture",
@@ -90,7 +91,7 @@ func newTestIntakeWithRun(pub *fakePublisher, creator EntityCreator, checker Per
 		pub:      pub,
 		creator:  creator,
 		checker:  checker,
-		approv:   &approvalAdapter{cfg: cfg, resolver: &fakeResolver{runID: existingRun}, logger: slog.Default()},
+		resolver: &fakeResolver{runID: existingRun},
 		platform: component.PlatformMeta{Org: "c360", Platform: "semdev-001"},
 		logger:   slog.Default(),
 	}
@@ -201,7 +202,7 @@ func TestAdmittedIssuePublishesExactlyOneWake(t *testing.T) {
 func TestRejectedActorPublishesNothing(t *testing.T) {
 	pub := &fakePublisher{}
 	creator := &fakeCreator{}
-	c := newTestIntake(pub, creator, allowlistOnlyChecker{})
+	c := newTestIntake(pub, creator, admission.AllowlistOnlyChecker{})
 
 	payload := flattenedIssue(t, "opened", "mallory", "mallory", "/semdev do things", []string{"semdev"})
 	if err := c.handleIssueEvent(context.Background(), payload); err != nil {
@@ -333,8 +334,8 @@ func TestWebhookReceiverFlattensAndPublishes(t *testing.T) {
 		t.Fatalf("published = %d, want 1", len(pub.published))
 	}
 	got := pub.published[0]
-	if got.subject != SubjectIssue {
-		t.Errorf("subject = %q, want %q", got.subject, SubjectIssue)
+	if got.subject != admission.SubjectIssue {
+		t.Errorf("subject = %q, want %q", got.subject, admission.SubjectIssue)
 	}
 	if got.msgID != "guid-42" {
 		t.Errorf("msg-id = %q, want the delivery GUID (stream-layer redelivery dedup)", got.msgID)

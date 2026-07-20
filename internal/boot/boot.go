@@ -19,6 +19,7 @@ import (
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/conversationchannel"
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/semsource"
@@ -103,6 +104,12 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	// token env) build at construction.
 	if err := intake.Register(reg); err != nil {
 		return fmt.Errorf("register issue-intake component: %w", err)
+	}
+	// The conversation-channel front door (conversation-channel-seam): the human
+	// approval + park-post lanes behind the channel-neutral Channel port. Both
+	// binaries register it through this one seam (the half-wired-in-one-binary class).
+	if err := conversationchannel.Register(reg); err != nil {
+		return fmt.Errorf("register conversation-channel component: %w", err)
 	}
 	return nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/c360studio/semdev/internal/intake/admission"
 )
 
 // G6 (5.4) — the zero-cost rejection, end to end: an unauthorized actor's admitted
@@ -14,7 +16,7 @@ func TestAssessUnauthorizedCreatesNoRun(t *testing.T) {
 	payload := issuePayload("opened", "rando", []string{"semdev"}, "/semdev go", 9)
 	chk := &fakeChecker{level: "none"} // not a collaborator
 
-	out, err := Assess(context.Background(), cfg(), SubjectIssue, payload, chk)
+	out, err := Assess(context.Background(), cfg(), admission.SubjectIssue, payload, chk)
 	if err != nil {
 		t.Fatalf("assess: %v", err)
 	}
@@ -30,7 +32,7 @@ func TestAssessUnauthorizedCreatesNoRun(t *testing.T) {
 // stamp and spawn.
 func TestAssessAuthorizedAdmits(t *testing.T) {
 	payload := issuePayload("opened", "alice", []string{"semdev"}, "", 9)
-	out, err := Assess(context.Background(), cfg(), SubjectIssue, payload, &fakeChecker{level: "write"})
+	out, err := Assess(context.Background(), cfg(), admission.SubjectIssue, payload, &fakeChecker{level: "write"})
 	if err != nil {
 		t.Fatalf("assess: %v", err)
 	}
@@ -46,7 +48,7 @@ func TestAssessAuthorizedAdmits(t *testing.T) {
 // effect, and the permission checker is never consulted.
 func TestAssessNonIntakeEventDrops(t *testing.T) {
 	chk := &fakeChecker{level: "admin"}
-	out, err := Assess(context.Background(), cfg(), SubjectComment, []byte(`{}`), chk)
+	out, err := Assess(context.Background(), cfg(), admission.SubjectComment, []byte(`{}`), chk)
 	if err != nil {
 		t.Fatalf("assess: %v", err)
 	}
@@ -62,7 +64,7 @@ func TestAssessNonIntakeEventDrops(t *testing.T) {
 // admitted, and the caller must redeliver rather than treat it as a rejection.
 func TestAssessPermissionErrorIsRetryable(t *testing.T) {
 	payload := issuePayload("opened", "alice", []string{"semdev"}, "", 9)
-	out, err := Assess(context.Background(), cfg(), SubjectIssue, payload, &fakeChecker{err: errors.New("502")})
+	out, err := Assess(context.Background(), cfg(), admission.SubjectIssue, payload, &fakeChecker{err: errors.New("502")})
 	if err == nil {
 		t.Fatal("expected a retryable error to surface")
 	}
@@ -73,7 +75,7 @@ func TestAssessPermissionErrorIsRetryable(t *testing.T) {
 
 // Malformed payload is a loud error, not a silent admit/drop.
 func TestAssessMalformedErrors(t *testing.T) {
-	if _, err := Assess(context.Background(), cfg(), SubjectIssue, []byte(`{bad`), &fakeChecker{}); err == nil {
+	if _, err := Assess(context.Background(), cfg(), admission.SubjectIssue, []byte(`{bad`), &fakeChecker{}); err == nil {
 		t.Error("expected an error on malformed payload")
 	}
 }
