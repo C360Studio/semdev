@@ -35,6 +35,14 @@ const (
 	harnessGitEmail = "harness@semdev.local"
 )
 
+// baseRef is the custom in-repo ref that records a run's DIFF BASE — the prepare-time tip
+// (the fixture's pristine baseline commit, or a forge clone's default-branch tip). Diff
+// reads `refs/semdev/base..HEAD`. It is written with `git update-ref` (NOT a tag, which
+// would land under refs/tags/ and not resolve as refs/semdev/base) and lives inside the
+// checkout, so it is exactly as durable as the checkout dir — Diff holds no in-memory base
+// map, and restart reconstruction stays the pre-existing gap (design D2 / task 2.6).
+const baseRef = "refs/semdev/base"
+
 // Checkouts materializes and tracks per-run target-repo checkouts. It implements the
 // Workspace seam (Root) that measure_task and verify_artifact resolve the checkout root
 // through. Each checkout is a real git repository (git-init at materialize, one commit per
@@ -106,18 +114,37 @@ func (c *Checkouts) gitStatusPorcelain(ctx context.Context, dir string) ([]strin
 	return dirty, nil
 }
 
-// initCommit turns a freshly-copied checkout dir into a git repository with the harness
-// identity and one base commit of the pristine source, so every later attempt commit has a
-// parent and `git diff base..HEAD` is the cumulative authored change. It is the immutable-
-// snapshot foundation: what verify clones is a commit, not a mutable tree.
-func (c *Checkouts) initCommit(ctx context.Context, dir string) error {
-	if _, err := c.git(ctx, dir, "init", "-q"); err != nil {
-		return err
-	}
+// configHarnessIdentity sets the repo-local harness author on dir's checkout. Repo-local
+// (not global) so the run path never depends on the operator's git config; required on BOTH
+// the git-init path AND the clone path — `git clone` copies no identity and CI machines have
+// no global one, so omitting it fails apply_patch's commit with "Author identity unknown".
+func (c *Checkouts) configHarnessIdentity(ctx context.Context, dir string) error {
 	if _, err := c.git(ctx, dir, "config", "user.email", harnessGitEmail); err != nil {
 		return err
 	}
 	if _, err := c.git(ctx, dir, "config", "user.name", harnessGitName); err != nil {
+		return err
+	}
+	return nil
+}
+
+// recordBase writes baseRef at dir's current HEAD — the run's diff base (the prepare-time
+// tip). See baseRef's doc for why it is a custom ref rather than a tag or an in-memory map.
+func (c *Checkouts) recordBase(ctx context.Context, dir string) error {
+	_, err := c.git(ctx, dir, "update-ref", baseRef, "HEAD")
+	return err
+}
+
+// initCommit turns a freshly-copied (non-git) checkout dir into a git repository with the
+// harness identity and one base commit of the pristine source, so every later attempt commit
+// has a parent and `git diff refs/semdev/base..HEAD` is the cumulative authored change. It is
+// the immutable-snapshot foundation: what verify clones is a commit, not a mutable tree. The
+// fixture path; a source that already carries history takes cloneCheckout instead.
+func (c *Checkouts) initCommit(ctx context.Context, dir string) error {
+	if _, err := c.git(ctx, dir, "init", "-q"); err != nil {
+		return err
+	}
+	if err := c.configHarnessIdentity(ctx, dir); err != nil {
 		return err
 	}
 	if _, err := c.git(ctx, dir, "add", "-A"); err != nil {
@@ -128,7 +155,41 @@ func (c *Checkouts) initCommit(ctx context.Context, dir string) error {
 	if _, err := c.git(ctx, dir, "commit", "-q", "--no-gpg-sign", "-m", "base: pristine checkout"); err != nil {
 		return err
 	}
-	return nil
+	// The pristine base commit IS the diff base for the fixture path.
+	return c.recordBase(ctx, dir)
+}
+
+// cloneCheckout materializes a forge-clone source into dest by git-cloning it, PRESERVING
+// its history — so the run develops the REAL target and delivery's PR diffs cleanly against
+// the target's base (design D2). --no-hardlinks keeps dest's object store independent of the
+// per-run source clone (which is reaped). The harness identity is re-configured (clone copies
+// none — the H2 fix) and refs/semdev/base pins the cloned tip as the diff base. The run stays
+// on the cloned default branch: delivery pushes the recorded attempt sha to its OWN remote
+// head (delivery.BranchPrefix + runSuffix), so the local branch name is irrelevant.
+func (c *Checkouts) cloneCheckout(ctx context.Context, absSource, dest string) error {
+	// dest is a fresh empty dir (MkdirTemp); git clone accepts an existing empty target.
+	if _, err := c.git(ctx, "", "clone", "-q", "--no-hardlinks", absSource, dest); err != nil {
+		return err
+	}
+	// An EMPTY target (a git repo with zero commits — a freshly created remote, like an
+	// unseeded semdev-test) clones with NO HEAD: there is nothing to develop and no tip to
+	// record as the diff base. Fail CLOSED with an operator-facing cause (SB5) rather than the
+	// opaque "HEAD: not a valid SHA1" that recordBase's update-ref would raise, and never a
+	// guessed base. `rev-parse -q --verify HEAD` exits non-zero on an unborn HEAD.
+	if _, err := c.git(ctx, dest, "rev-parse", "-q", "--verify", "HEAD"); err != nil {
+		return fmt.Errorf("source %s is a git repository with no commits (empty target) — seed it with at least one commit before provisioning", absSource)
+	}
+	if err := c.configHarnessIdentity(ctx, dest); err != nil {
+		return err
+	}
+	return c.recordBase(ctx, dest)
+}
+
+// sourceHasGit reports whether absSource is itself a git repository (has a .git entry) — a
+// forge clone whose history must be preserved, rather than a plain fixture directory.
+func sourceHasGit(absSource string) bool {
+	_, err := os.Stat(filepath.Join(absSource, ".git"))
+	return err == nil
 }
 
 // Materialize creates a fresh working copy of sourceDir for the run and records it,
@@ -155,17 +216,26 @@ func (c *Checkouts) Materialize(ctx context.Context, runEntityID, sourceDir stri
 	if err != nil {
 		return "", fmt.Errorf("runspace: create checkout dir: %w", err)
 	}
-	if err := copyTree(ctx, absSource, dest); err != nil {
-		_ = os.RemoveAll(dest)
-		return "", fmt.Errorf("runspace: materialize checkout for %s: %w", runEntityID, err)
-	}
-	// Make the fresh copy a git repository with a pristine base commit BEFORE recording it,
-	// so a run's checkout is always a snapshot-able repo (never a mutable tree the verify
-	// could copy). A failed init leaves no half-repo recorded — the prior good checkout, if
-	// any, stays intact (the copy-before-record discipline).
-	if err := c.initCommit(ctx, dest); err != nil {
-		_ = os.RemoveAll(dest)
-		return "", fmt.Errorf("runspace: git-init checkout for %s: %w", runEntityID, err)
+	// Prepare the fresh dir into the run's checkout BEFORE recording it, so a failed prepare
+	// leaves the prior good checkout intact (the copy-before-record discipline). Two paths by
+	// whether the source carries history (design D2): a forge clone is git-cloned so its
+	// history is preserved (a real, clean-diff PR); a plain fixture is copied and git-init'd
+	// with a pristine base commit. Both configure the harness identity and record
+	// refs/semdev/base, so the checkout is always a snapshot-able repo with a defined diff base.
+	if sourceHasGit(absSource) {
+		if err := c.cloneCheckout(ctx, absSource, dest); err != nil {
+			_ = os.RemoveAll(dest)
+			return "", fmt.Errorf("runspace: clone checkout for %s: %w", runEntityID, err)
+		}
+	} else {
+		if err := copyTree(ctx, absSource, dest); err != nil {
+			_ = os.RemoveAll(dest)
+			return "", fmt.Errorf("runspace: materialize checkout for %s: %w", runEntityID, err)
+		}
+		if err := c.initCommit(ctx, dest); err != nil {
+			_ = os.RemoveAll(dest)
+			return "", fmt.Errorf("runspace: git-init checkout for %s: %w", runEntityID, err)
+		}
 	}
 
 	// Only now that the new copy is complete: record it and remove any prior copy.
@@ -245,38 +315,29 @@ func (c *Checkouts) CloneForVerify(ctx context.Context, runEntityID string) (str
 	return dest, nil
 }
 
-// Diff returns the unified diff of everything the run has authored so far: the run's
-// checkout's pristine base commit (the ONE commit initCommit made of the source before any
-// attempt landed) through its current HEAD. Under the M0 one-in-flight serialization
-// invariant a run develops exactly one task with attempts applied strictly serially, so HEAD
-// IS the latest committed attempt (attempt.commit, apply_patch's stamped pointer) — base..HEAD
-// is exactly the cumulative authored change. It is the read_diff seam: the reviewer (Quinn)
-// reads this instead of re-deriving the diff from raw file contents. Fails CLOSED when no
-// checkout is materialized (Root's fail-closed posture) or git itself fails. `git rev-list
-// --max-parents=0 HEAD` normally names exactly one root commit (initCommit makes exactly
-// one); if history ever carried more than one (should not happen), the LAST line is taken
-// defensively rather than erroring or guessing which is "the" base.
+// Diff returns the unified diff of everything the run has authored so far: the run's diff
+// base (refs/semdev/base — the prepare-time tip recorded at materialize) through its current
+// HEAD. Under the M0 one-in-flight serialization invariant a run develops exactly one task
+// with attempts applied strictly serially, so HEAD IS the latest committed attempt
+// (attempt.commit, apply_patch's stamped pointer) — base..HEAD is exactly the cumulative
+// authored change. It is the read_diff seam: the reviewer (Quinn) reads this instead of
+// re-deriving the diff from raw file contents. Fails CLOSED when no checkout is materialized
+// (Root's fail-closed posture) or git itself fails. It bases on refs/semdev/base, NOT the
+// repo's root commit: a forge clone's root is the target's ORIGINAL commit, which would fold
+// the entire pre-existing history into the "authored" diff — for the fixture, refs/semdev/base
+// IS the pristine baseline commit, so the diff is byte-identical to the pre-change behavior.
 func (c *Checkouts) Diff(ctx context.Context, runEntityID string) (string, error) {
 	root, err := c.Root(ctx, runEntityID)
 	if err != nil {
 		return "", err
 	}
-	roots, err := c.git(ctx, root, "rev-list", "--max-parents=0", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("runspace: find the checkout's root commit for %s: %w", runEntityID, err)
-	}
-	lines := strings.Split(roots, "\n")
-	base := strings.TrimSpace(lines[len(lines)-1])
-	if base == "" {
-		return "", fmt.Errorf("runspace: no root commit found in %s's checkout", runEntityID)
-	}
 	// `git diff` exits 0 whether or not there is output (a base==HEAD run authored nothing
 	// yet, which is a legitimate empty diff, not an error); c.git already fails closed on a
 	// non-zero exit (a malformed ref, a corrupt repo), so no separate exit-code handling is
 	// needed here.
-	diff, err := c.git(ctx, root, "diff", base+"..HEAD")
+	diff, err := c.git(ctx, root, "diff", baseRef+"..HEAD")
 	if err != nil {
-		return "", fmt.Errorf("runspace: diff %s..HEAD for %s: %w", base, runEntityID, err)
+		return "", fmt.Errorf("runspace: diff %s..HEAD for %s: %w", baseRef, runEntityID, err)
 	}
 	return diff, nil
 }

@@ -8,46 +8,52 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
 
 ## 1. cliexec env passthrough (design D3 prerequisite; discharges forge-io follow-up #2)
 
-- [ ] 1.1 RED: pin that a command can read a value from the subprocess environment and
-  that the value appears in NO process argument the runner receives (a `TestRunnerEnvNotInArgv`
-  shape) — fails before the extension exists.
-- [ ] 1.2 Extend `cliexec` with an env-aware call as an OPTIONAL interface + type-assertion
-  (`RunWithEnv(ctx, dir, env, name, args...)`, review L3) so existing fakes stay untouched;
-  `OSRunner` sets `cmd.Env = append(os.Environ(), env...)`. Every existing `Run` caller is UNCHANGED
-  (the new path is additive). GREEN 1.1.
-- [ ] 1.3 Pin the fake runner used across the suite gains the env parameter with a recording
-  shape so downstream clone pins can assert on env (not argv).
+- [x] 1.1 RED: pin that a command reads a value from the subprocess environment
+  (`TestOSRunnerRunWithEnvExposesEnvToSubprocess`) — the value rides ENV, not argv — plus an
+  `EnvRunner` conformance pin. Failed compile before the extension existed (RED confirmed).
+- [x] 1.2 Extend `cliexec` with an env-aware call as an OPTIONAL interface + type-assertion
+  (`EnvRunner.RunWithEnv(ctx, dir, env, name, args...)`, review L3) so existing fakes stay untouched;
+  `OSRunner.RunWithEnv` sets `cmd.Env = append(os.Environ(), env...)` via a shared `runCmd` body.
+  `Run` stays byte-identical (nil env → nil cmd.Env → inherits os.Environ). GREEN; build + vet clean.
+- [x] 1.3 MOOT by the L3 optional-interface decision: existing suite fakes are UNCHANGED (they
+  implement `Runner`, not `EnvRunner`); the clone lane's recording `EnvRunner` fake that asserts
+  token-in-env-not-argv is built in group 3.4.
 
 ## 2. Recorded diff base + history-preserving materialize (design D2 — the crux)
 
-- [ ] 2.1 RED: pin that `Checkouts.Diff` over a checkout whose source carried PRE-EXISTING history
-  returns ONLY the attempt's change (`refs/semdev/base..HEAD`), NOT the whole history — fails today
-  because `Diff` uses `git rev-list --max-parents=0 HEAD` (the root commit).
-- [ ] 2.2 `Materialize` records the base as an IN-REPO ref (`refs/semdev/base`, a lightweight tag at
-  the prepare-time HEAD) — NOT an in-memory map (review H3) — so `Diff` reads `refs/semdev/base..HEAD`
-  statelessly, durable as long as the checkout exists. Two prepare strategies by whether the source
-  contains `.git`: no-`.git` (fixture) → `git init` + harness-identity config + baseline commit, base
-  ref = that commit (UNCHANGED behavior); has-`.git` (clone) → materialize via `git clone <sourceDir>
-  <checkout>` (NOT `copyTree` over `.git` — review M1), THEN set the repo-local harness identity
-  (`git config user.email/user.name` — clone copies no identity, CI has no global one; omitting it
-  fails the patcher commit — review H2), `git checkout -b <run-branch>` from the tip, base ref = the
-  tip. GREEN 2.1.
-- [ ] 2.3 GUARD: the existing fixture pins stay green UNCHANGED — `runspace` Materialize/Diff unit
-  tests, `read_diff` tests, and the cold-verify clone tests (the fixture base ref == the old root, so
-  byte-identical). Run them explicitly as the regression gate.
-- [ ] 2.4 Pin the has-`.git` prepare: a clone-shaped source materializes on a working branch off the
-  tip UNDER the configured harness identity, `apply_patch` commits atop real history succeed,
-  `CloneForVerify` clones the committed objects, and `attempt.commit.sha` + `refs/semdev/base` resolve
-  the cumulative diff to the fix alone. (Restart reconstruction is OUT OF SCOPE — see 2.6.)
-- [ ] 2.5 Pin the run-branch name is push-safe and collision-free across re-runs of the same coordinate
-  (design Open Question) — settle the scheme and pin it.
-- [ ] 2.6 HONESTY (review H3): the base ref + attempt commits live in the checkout, so a lost checkout
-  dir parks on restart exactly as today — this change does NOT claim the sandbox spec's "reconstruct
-  at the recorded commit" scenario (already unmet pre-change: `Provision` no-ops once `sandbox.ready`
-  is stamped; no durable base-commit/source-coordinate fact in `vocab.go`). File the pre-existing
-  restart-safety gap as a NAMED follow-up (durable base-commit + source-coordinate facts = a future
-  G9 addition + moved-base/shallow refetch); do NOT smuggle it into this change's no-new-predicate
-  pledge.
+- [x] 2.1 RED: `TestMaterializeClonePreservesHistoryAndDiffsOnlyTheAttempt` — a git source with
+  history must materialize (history preserved) and `Diff` return ONLY the attempt. Failed today at
+  Materialize ("nothing to commit" on the git-init-fresh over a committed copy). RED confirmed.
+- [x] 2.2 `Materialize` records the base as an in-repo ref `refs/semdev/base` via `git update-ref`
+  (NOT a tag — review nit; NOT an in-memory map — review H3), so `Diff` reads `refs/semdev/base..HEAD`
+  statelessly. Two prepare strategies by whether the source contains `.git`: no-`.git` (fixture) →
+  `initCommit` (init + `configHarnessIdentity` + baseline commit) + `recordBase`, base = that commit
+  (UNCHANGED); has-`.git` (clone) → `cloneCheckout`: `git clone --no-hardlinks <src> <dest>` (NOT
+  `copyTree` over `.git` — review M1) + `configHarnessIdentity` (clone copies no identity — review H2)
+  + `recordBase`, base = the cloned tip. GREEN.
+- [x] 2.3 GUARD: full `runspace` suite + the whole `internal/...` unit layer green UNCHANGED (read_diff,
+  measurement, floors, verify, coldproof all consume the checkout/Diff) — the fixture base ref == the
+  old root, so byte-identical. Regression gate passed.
+- [x] 2.4 `TestCloneForVerifyOverCloneSourceCarriesCommittedAttemptOnly`: a clone-based checkout's
+  cold-verify clone carries the committed attempt + the target's files and STILL excludes an
+  uncommitted warm-tree residue (immutable-snapshot guarantee holds on the clone path); the diff test
+  pins `apply_patch`-atop-real-history + `refs/semdev/base` → fix-alone. (Restart out of scope — 2.6.)
+- [x] 2.5 RESOLVED as MOOT: no local working branch is needed — delivery pushes the recorded attempt
+  sha to its OWN remote head (`delivery.BranchPrefix + runSuffix(runEntityID)`, delivery.go:110/129),
+  so the local branch name is irrelevant to the PR head. The run stays on the cloned default branch.
+  (No `git checkout -b`; the design open question is closed.)
+- [x] 2.7 EMPTY-TARGET fail-closed (go-reviewer B1): an empty git source (`.git`, zero commits — the
+  live `semdev-test`'s current state) clones with no HEAD; `cloneCheckout` detects the unborn HEAD
+  (`rev-parse -q --verify HEAD`) and fails closed with an operator-facing "no commits — seed it first"
+  cause (not the opaque `HEAD: not a valid SHA1`), leaving no half-materialized checkout. RED-first pin
+  `TestMaterializeEmptyGitSourceFailsClosedWithActionableError` + a `sourceHasGit` fixture-invariant pin.
+  Enforces the [[semdev-test-target-repo]] must-seed precondition in code.
+- [x] 2.6 HONESTY (review H3): documented in the `baseRef` doc comment + design D2 — the base ref +
+  attempt commits live in the checkout, so a lost checkout dir parks on restart exactly as today; this
+  change does NOT claim the sandbox spec's "reconstruct at the recorded commit" scenario (already unmet
+  pre-change: `Provision` no-ops once `sandbox.ready` is stamped; no durable base fact in `vocab.go`).
+  The durable-base-fact restart-safety gap stays a NAMED follow-up (a future G9 addition), NOT smuggled
+  into this change's no-new-predicate pledge.
 
 ## 3. Forge-clone Sources implementation (design D1; forge-io clone lane)
 

@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 )
 
@@ -45,7 +46,23 @@ type Runner interface {
 	Run(ctx context.Context, dir, name string, args ...string) (Result, error)
 }
 
-// OSRunner is the production Runner over os/exec.
+// EnvRunner is an OPTIONAL extension of Runner: it runs a command with EXTRA
+// environment variables (additive to the process environment, this call only) so a
+// secret can reach the subprocess WITHOUT appearing in any command argument — the
+// host's process listing never sees it (the no-argv-leak token channel, design D3).
+// Its INTENDED first consumer is the forthcoming forge-clone lane (group 3), which will
+// pass a token via GIT_ASKPASS; nothing wires it yet (the local-remote clones today need
+// no credential). A consumer must type-assert a Runner to EnvRunner (Checkouts.runner is
+// typed Runner) WITH a fail-closed branch when the assertion fails — a silent fallback to
+// plain Run would put the token back on argv, defeating D3. Existing Runner
+// implementations (the scripted test fakes) are unaffected: this is a separate interface,
+// not a new method on Runner.
+type EnvRunner interface {
+	Runner
+	RunWithEnv(ctx context.Context, dir string, env []string, name string, args ...string) (Result, error)
+}
+
+// OSRunner is the production Runner (and EnvRunner) over os/exec.
 type OSRunner struct{}
 
 // Run executes the command with CommandContext (so a cancelled/expired context
@@ -53,8 +70,25 @@ type OSRunner struct{}
 // returned in Result with a nil error; only a genuine start/cancel failure
 // returns a non-nil error.
 func (OSRunner) Run(ctx context.Context, dir, name string, args ...string) (Result, error) {
+	return runCmd(ctx, dir, nil, name, args...)
+}
+
+// RunWithEnv is Run with extra environment. env holds KEY=VALUE entries appended to
+// os.Environ() for this invocation only; use it to pass a secret (a token) that MUST
+// NOT ride argv. A nil/empty env behaves exactly like Run.
+func (OSRunner) RunWithEnv(ctx context.Context, dir string, env []string, name string, args ...string) (Result, error) {
+	return runCmd(ctx, dir, env, name, args...)
+}
+
+// runCmd is the shared exec body for Run and RunWithEnv. extraEnv is appended to the
+// inherited process environment only when non-empty (so Run stays byte-identical to
+// its pre-EnvRunner behavior — a nil cmd.Env inherits os.Environ automatically).
+func runCmd(ctx context.Context, dir string, extraEnv []string, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
