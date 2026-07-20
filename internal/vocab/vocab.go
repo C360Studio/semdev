@@ -70,6 +70,12 @@ const parks = "station-failure-parks"
 // the comment approval adapter, park-message comments, and real PR delivery.
 const forgeIO = "forge-io-real-lanes"
 
+// nlIntent is the change slug for the natural-language conversation-intent layer
+// (Phase 2): the change-approval gate reads NL approve/reject intent from an
+// authorized author via a classifier persona, keeping the exact command as a
+// deterministic fast-path; a reject cancels the run.
+const nlIntent = "nl-conversation-intent"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -277,6 +283,40 @@ var Predicates = []Predicate{
 	// repeats), so a run-scoped guard is correct and load-bearing (real delivery is not
 	// idempotent at M2).
 	{"delivery.route.routed", "dev-route-rule", "dev-from-task", reshape},
+
+	// nl-conversation-intent (Phase 2): the NL approval/reject gate. Registered
+	// register-before-write (beta.150 fails closed at the graph-write boundary on an
+	// unregistered canonical predicate). conversation.pending.* is the authorized human
+	// message handleMessage stamps on the RUN for the classifier to read (writer
+	// conversation-adapter — the transport, a NEW live Source for the first time, split
+	// from approval-adapter which the same struct also emits, kept honest by the
+	// sanctioned-writer census). conversation.intent.* is the classifier's ROUTING output
+	// (writer conversation-classifier — its own tool): .value ∈ {approve,reject,none}, plus
+	// .message-id + .author HARNESS-BOUND from the pending triples (never LLM-supplied — the
+	// apply consumer re-Authorizes THIS author) and .reason (the model's cited words, G7).
+	// conversation.intent.classified is the MULTI-VALUED (append-set) ledger of message ids
+	// already classified — the dedup key that stops a poll re-read / webhook redelivery
+	// re-classifying. run.change.rejected is the reject gate fact (writer approval-adapter —
+	// the SAME single logical writer as run.change.approved, two code sites one Source,
+	// censused); a phase-guarded run-lifecycle rule fires awaiting_approval→cancelled on it.
+	{"conversation.pending.message-id", "conversation-adapter", "conversation-channel", nlIntent},
+	{"conversation.pending.author", "conversation-adapter", "conversation-channel", nlIntent},
+	{"conversation.pending.body", "conversation-adapter", "conversation-channel", nlIntent},
+	{"conversation.intent.value", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.message-id", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.author", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.reason", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.classified", "conversation-classifier", "conversation-channel", nlIntent},
+	// conversation.classifier.dispatched is the classifier spawn rule's self-extinguishing
+	// marker (value = the pending message id it dispatched a classifier for), the
+	// dev.developer.dispatched pattern: publish_agent is not idempotent and the run is a
+	// long-lived, replay-exposed entity, so the spawn rule stamps this marker in the same
+	// on_enter as the publish and guards on it, or a graph replay re-spawns a duplicate
+	// classifier. Rule add_triple is a graph write, so it MUST be registered (beta.150 fails
+	// closed) — the writer is the rule subsystem label (rules carry the engine Source; the
+	// sanctioned-rule census keeps the realization honest, like route.attempt.routed).
+	{"conversation.classifier.dispatched", "conversation-spawn-rule", "conversation-channel", nlIntent},
+	{"run.change.rejected", "approval-adapter", "conversation-channel", nlIntent},
 }
 
 // frameworkAdjacent are canonical predicates semdev READS or WRITES that the framework

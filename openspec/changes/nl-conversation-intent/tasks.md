@@ -16,18 +16,20 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 1. Vocab + the closed taxonomy + the `conversation` persona (design D1, D10)
 
-- [ ] 1.1 Register ALL new canonical predicates FIRST (beta.150 fails closed at graph-write
+- [x] 1.1 Register ALL new canonical predicates FIRST (beta.150 fails closed at graph-write
   on an unregistered predicate — a writer added before its registration cannot go green):
-  `conversation.message.pending` (writer `conversation-adapter`), `conversation.intent` +
+  `conversation.pending.{message-id,author,body}` (writer `conversation-adapter`),
+  `conversation.intent.{value,message-id,author,reason}` + the
   `conversation.intent.classified` ledger (writer `conversation-classifier`),
-  `run.change.rejected` (writer `approval-adapter`). `internal/vocab.Register` + the
-  vocab census.
-- [ ] 1.2 RED: `TestConversationIntentTaxonomyClosed` — `internal/conversationintent`
+  `conversation.classifier.dispatched` (the grp4 spawn rule's self-extinguishing marker —
+  a rule `add_triple`, hence a graph write; writer `conversation-spawn-rule`), and
+  `run.change.rejected` (writer `approval-adapter`). `internal/vocab.Register` + the vocab census.
+- [x] 1.2 RED: `TestConversationIntentTaxonomyClosed` — `internal/conversationintent`
   declares exactly `{approve, reject, none}`; `Valid()`/`Names()` (mirrors `internal/taxonomy`).
-- [ ] 1.3 RED: `TestConversationTaxonomyMatchesPersonaContract` — the Go taxonomy == the
+- [x] 1.3 RED: `TestConversationTaxonomyMatchesPersonaContract` — the Go taxonomy == the
   `conversation` persona decision-contract fragment's intents. (The routing-RULE arm of the
   drift census lands in group 4 with the rules — noted, not asserted red here.)
-- [ ] 1.4 Implement `internal/conversationintent` + `configs/personas/fragments/conversation/`
+- [x] 1.4 Implement `internal/conversationintent` + `configs/personas/fragments/conversation/`
   (00-identity + a decision contract: read the message, output exactly one intent + a
   reason, NEVER name an author, default `none` for anything short of an explicit directive —
   no approve from silence/reaction/ambiguity).
@@ -40,7 +42,7 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   outcome boolean, no measurement fact).
 - [ ] 2.2 RED: `TestClassifyIntentStampsOnRunFromPending` — the tool subject-overrides to
   the RUN and stamps `conversation.intent`, `.message-id` + `.author` COPIED from the run's
-  `conversation.message.pending.*` (matched by pending id), `.reason` (model echo), and
+  `conversation.pending.*` (matched by pending id), `.reason` (model echo), and
   appends the id to `conversation.intent.classified` — all on the run, none on the loop (H2).
 - [ ] 2.3 RED: `TestClassifyIntentRejectsOffTaxonomy` — an `intent` outside the closed set
   is rejected (the decide-allowlist pattern), so a hallucinated value cannot route.
@@ -60,21 +62,22 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   `run.change.rejected` deterministically (no model turn). (Cancellation is asserted in 5.x.)
 - [ ] 3.4 RED: `TestNonCommandAuthorizedGatedMessageStampsPending` — a non-command message
   from an AUTHORIZED author on an `awaiting_approval` run stamps
-  `conversation.message.pending.{message-id,author,body}` + the spawn marker
-  `conversation.classifier.dispatched` and ACKs; an UNAUTHORIZED author, a NON-gated run
-  (phase ≠ awaiting_approval), and a message whose id is already in
-  `conversation.intent.classified` each stamp NOTHING (no model turn).
+  `conversation.pending.{message-id,author,body}` and ACKs; an UNAUTHORIZED author, a
+  NON-gated run (phase ≠ awaiting_approval), and a message whose id is already in
+  `conversation.intent.classified` each stamp NOTHING (no model turn). (The spawn marker
+  `conversation.classifier.dispatched` is the grp4 spawn RULE's, not handleMessage's — the
+  `dev.developer.dispatched` precedent: the rule stamps its own fire-once marker.)
 - [ ] 3.5 RED: `TestPendingDedupByAppendSetLedger` — dedup is against the MULTI-VALUED
   `conversation.intent.classified` ledger (not single-valued latest-wins): a redelivered
   NON-latest classified id is not re-stamped (MEDIUM-4); a genuinely new id is.
 - [ ] 3.6 Implement: the resolver phase getter; the exact-command fast-path (approve +
-  reject); the authorized-non-command-gated → pending bridge with append-set dedup + the
-  self-extinguishing spawn marker. `conversation.message.pending` writer = `conversation-adapter`.
+  reject); the authorized-non-command-gated → `conversation.pending.*` bridge (writer
+  `conversation-adapter`) with append-set-ledger dedup. The spawn marker is grp4's.
 
 ## 4. The spawn rule + the intent-routing rules (design D3, D6)
 
 - [ ] 4.1 RED: `TestBootstrapWiresConversationClassifierRules` — the pack bootstraps a spawn
-  rule (`conversation.message.pending` @ `awaiting_approval`, guarded on the
+  rule (`conversation.pending` @ `awaiting_approval`, guarded on the
   `conversation.classifier.dispatched` marker fire-once, `inherit` `role:conversation`,
   `tool_choice:required`, the intent-allowlist metadata, the pending body/author templated
   onto the prompt) and two routing rules (`conversation.intent==approve` / `==reject`, EACH

@@ -79,7 +79,7 @@ of the census lands with the rules in group 4 — noted so it is not asserted re
 `internal/tools/classifyintent` exposes `classify_intent(intent, reason)` — the model
 supplies ONLY the classification (`intent` from the taxonomy) and a short `reason`. It
 takes NO `author` and NO `message_id` (architect H3 / semstreams HIGH-2): the message the
-classifier was spawned to read is already on the run's `conversation.message.pending.*`
+classifier was spawned to read is already on the run's `conversation.pending.*`
 triples, so the HARNESS binds identity. The tool subject-overrides to the RUN (the
 `create_change`/`dispatch-developer` pattern, `$entity.triple.agent.run.entity-id`) and
 stamps on the RUN — NOT the classifier loop — `conversation.intent`, plus
@@ -102,7 +102,7 @@ The grounding fields + a distinct fact/writer (`conversation-classifier`) force 
 A rule spawns an `inherit`-scoped loop with `role: conversation` (→
 `configs/personas/fragments/conversation`) when a run at `awaiting_approval` gains a
 pending authorized message. v1 classifies the SINGLE triggering message: its author +
-body are templated onto the prompt from the run's `conversation.message.pending.{author,body}`
+body are templated onto the prompt from the run's `conversation.pending.{author,body}`
 triples. The decision contract: read the message, output exactly one intent, and default
 to `none` for anything short of an explicit directive — NEVER approve from silence, a
 reaction, or ambiguous positivity. The persona reports only `intent` + `reason`; it never
@@ -119,7 +119,7 @@ run's classified-ledger (D5), stamps pending and ACKs. Chatter, unauthorized aut
 messages on non-gated runs spend ZERO model turns.
 
 ### D5 — the bridge fact + dedup (an append-set ledger + a self-extinguishing spawn marker)
-`handleMessage` stamps `conversation.message.pending.{message-id,author,body}` on the run
+`handleMessage` stamps `conversation.pending.{message-id,author,body}` on the run
 (the body/author a rule templates to the classifier). Dedup is by the channel-native
 message id against an APPEND-SET ledger `conversation.intent.classified` on the run
 (multi-valued, the `task.attempt.instance` shape — NOT single-valued latest-wins, which
@@ -202,9 +202,12 @@ silent (ordinary chatter). No new paid-token path on the exact-command flow.
 ### D10 — vocabulary + writers (register-before-write; censused single writer)
 New canonical predicates (3-seg lower-kebab, `internal/vocab.Register`), registered in
 group 1 BEFORE any writer (beta.150 fails closed at the graph-write boundary on an
-unregistered predicate — architect M8): `conversation.message.pending` (writer
-`conversation-adapter`), `conversation.intent` + `.classified` ledger (writer
-`conversation-classifier`), `run.change.rejected` (writer `approval-adapter`). `run.change.approved`
+unregistered predicate — architect M8): `conversation.pending.{message-id,author,body}`
+(writer `conversation-adapter`), `conversation.intent.{value,message-id,author,reason}` +
+the `conversation.intent.classified` ledger (writer `conversation-classifier`),
+`conversation.classifier.dispatched` (the spawn rule's self-extinguishing marker — a
+rule `add_triple`, hence a graph write that MUST be registered; writer
+`conversation-spawn-rule`), and `run.change.rejected` (writer `approval-adapter`). `run.change.approved`
 and `run.change.rejected` are written from TWO code sites (the fast-path inline + the apply
 consumer) under the ONE Source `approval-adapter` — the sanctioned "one logical writer,
 multiple realizing sites" precedent (`g5_writers_test.go`, the route-mirror) — which

@@ -74,6 +74,16 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `route.attempt.unclean` | dev-route-rule | dev-from-task |
 | `route.attempt.routed` | dev-route-rule | dev-from-task |
 | `delivery.route.routed` | dev-route-rule | dev-from-task |
+| `conversation.pending.message-id` | conversation-adapter | conversation-channel |
+| `conversation.pending.author` | conversation-adapter | conversation-channel |
+| `conversation.pending.body` | conversation-adapter | conversation-channel |
+| `conversation.intent.value` | conversation-classifier | conversation-channel |
+| `conversation.intent.message-id` | conversation-classifier | conversation-channel |
+| `conversation.intent.author` | conversation-classifier | conversation-channel |
+| `conversation.intent.reason` | conversation-classifier | conversation-channel |
+| `conversation.intent.classified` | conversation-classifier | conversation-channel |
+| `conversation.classifier.dispatched` | conversation-spawn-rule | conversation-channel |
+| `run.change.rejected` | approval-adapter | conversation-channel |
 
 ## Components
 

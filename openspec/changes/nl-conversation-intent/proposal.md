@@ -45,7 +45,7 @@ misread is visible and catchable.
   token `/semdev approve` / `/semdev reject` short-circuits deterministically (no
   model turn, as today). Only a NON-command message from an AUTHORIZED author on an
   `awaiting_approval` run triggers NL classification (stamps
-  `conversation.message.pending`, deduped by the channel-native message id).
+  `conversation.pending`, deduped by the channel-native message id).
 - **The deterministic apply + transparency**: a rule routes `conversation.intent` to
   the conversation-channel adapter, which re-runs `Authorize` on the cited author,
   POSTS a short transparency note ("Proceeding based on @author's approval — say so
@@ -79,16 +79,16 @@ misread is visible and catchable.
 - **Code**: a `conversation` intent taxonomy (`internal/taxonomy` or a sibling) + a
   `conversation` persona fragment tree; a `classify_intent` tool
   (`internal/tools/classifyintent`); `handleMessage` gains the non-command →
-  `conversation.message.pending` bridge (dedup by message id) alongside the retained
+  `conversation.pending` bridge (dedup by message id) alongside the retained
   exact-command fast-path; the adapter gains a deterministic apply lane (re-Authorize
   + transparency Post + stamp) fed by an intent-routing rule.
-- **Graph / Vocab**: new READ + WRITE predicates — `conversation.message.pending`
+- **Graph / Vocab**: new READ + WRITE predicates — `conversation.pending`
   (the authorized human message awaiting classification), `conversation.intent` (the
   classifier's routing fact), `run.change.rejected` (the reject fact). Each gets a
   canonical vocab registration + a single writer (G5). The classifier READS
   `agent.run.phase` / `run.issue.ref` and the pending-message triple; it fires no
   lifecycle transition (G2).
-- **Rules**: spawn the classifier on `conversation.message.pending` (awaiting_approval);
+- **Rules**: spawn the classifier on `conversation.pending` (awaiting_approval);
   route `conversation.intent == approve|reject` to the adapter apply lane; fire
   `awaiting_approval → cancelled` on `run.change.rejected` (run-lifecycle).
 - **Regression guard**: the exact-command approval path (poll + webhook journeys) and
