@@ -87,11 +87,11 @@ review surface (Phase 3), NO non-GitHub `Read`, NO issue-discovery-by-poll, NO
 
 ## 5. Spec + docs
 
-- [ ] 5.1 The `conversation-channel` delta (MODIFY the seam requirement to add the
+- [x] 5.1 The `conversation-channel` delta (MODIFY the seam requirement to add the
   `Read` verb + a read scenario; ADD "The approval gate is operable with no inbound
   webhook") matches the code — no new predicate, cursor in-memory (B-2), poll-vs-webhook
   XOR (B-1), poll-path auth = `Message.Author` (H-1).
-- [ ] 5.2 Docs: the pull-first deployment shape (poll mode = `http_port 0` +
+- [x] 5.2 Docs: the pull-first deployment shape (poll mode = `http_port 0` +
   `poll.enabled`; the webhook is the optional accelerator); update the real-llm /
   live-run runbook so a non-webhook-reachable target uses poll approval; note the
   paired admission-config invariant still holds (both front-door components).

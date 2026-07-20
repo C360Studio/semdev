@@ -242,13 +242,44 @@ restart-safety gap (design D2 review H3: `Provision` no-ops once `sandbox.ready`
 is stamped, and no durable base fact exists yet). Do not restart `serve` during a
 live run.
 
-**Approval caveat (read before the live run).** On a webhook-UNREACHABLE host the
-change-approval gate still needs a non-webhook approval. Until the queued
-`pull-first-forge` change lands the `semdev approve` CLI + the `/semdev approve`
-comment-poller + the proposal review-surface, approval on such a host is a
-STAND-IN write (the exact `run.change.approved` fact, Source `approval-adapter`).
-A webhook-reachable host can approve with a real `/semdev approve` comment today
-(proven by `TestBridgeProofWebhookIssueToApprovedRun`).
+**Approval on a webhook-unreachable host — the POLL transport (pull-first-transport,
+landed).** On a host no webhook can reach, the change-approval gate is now
+releasable by POLLING the issue thread — no stand-in needed. Configure
+conversation-channel in POLL mode and approve with a real `/semdev approve` comment
+on the issue; the poller reads it on its interval and lands the exact
+`run.change.approved` fact (Source `approval-adapter`) the resume rule consumes. This
+is the pull-first deployment shape:
+
+```jsonc
+"components": {
+  "issue-intake":         { "config": { "http_port": 0 } },   // no webhook receiver (the default)
+  "conversation-channel": { "config": {
+    "poll": { "enabled": true, "interval": "15s" },            // the poll transport (default 15s, floor 5s)
+    "token_env": "GITHUB_TOKEN",                               // required — the poller Reads the thread
+    "repo": "owner/semdev-test", "allowlist": ["<you>"]        // MUST match issue-intake's (below)
+  } }
+}
+```
+
+Proven end-to-end by `TestBridgeProofApprovalByPollNoWebhook` (http_port 0 + poll on,
+real docker, zero paid tokens). Notes:
+
+- **Poll vs webhook is an XOR** (one inbound comment lane): poll mode SKIPS the
+  webhook comment consumer. A webhook-reachable host instead leaves `http_port > 0`
+  and `poll.enabled` off and approves with a real `/semdev approve` comment today
+  (proven by `TestBridgeProofWebhookIssueToApprovedRun`). The webhook is the optional
+  latency accelerator; poll is the portable default.
+- **Boot coherence**: `http_port 0` AND `poll.enabled false` leaves the approval lane
+  DEAD (a run parks at `awaiting_approval` forever) — boot LOUD-WARNS this combo. Set
+  exactly one inbound path.
+- **Paired admission-config invariant** (still holds — the carve split these knobs
+  across two components): conversation-channel's `allowlist` + `repo` +
+  `opt_in_command` MUST match issue-intake's, or an admitted actor's `/semdev approve`
+  is rejected at the (separately-configured) approval gate and the run parks forever.
+- Poll mode needs a forge token (to Read the thread); it still needs NO webhook secret.
+
+A CLI stand-in write (the exact `run.change.approved` fact) remains available for a
+host that runs NEITHER transport, but is no longer the only non-webhook option.
 
 **What the offline journey does and does NOT cover** (honesty, ledger it): the
 `TestBridgeProofSelfTargetForgeCloneToPR` mock journey proves the
