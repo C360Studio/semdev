@@ -39,7 +39,9 @@ import (
 
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/experiment"
+	"github.com/c360studio/semdev/internal/forge/clone"
 	"github.com/c360studio/semdev/internal/runspace"
+	"github.com/c360studio/semdev/internal/station/provision"
 	"github.com/c360studio/semdev/internal/vocab"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/config"
@@ -113,13 +115,17 @@ type RunOptions struct {
 	// from the environment at the composition edge (cmd/*'s main), never
 	// here — keeps this package hermetic to its caller's choice.
 	GitHubToken string
-	// SandboxSourceDir is the run's target SOURCE at M0 — the operator-configured
-	// directory provision_sandbox materializes each run's checkout from and
-	// cold-proves (the in-repo Go fixture the journey drives). Empty makes the
-	// provision tool's source resolve fail closed, so a run parks toward the operator
-	// rather than provisioning a guessed target (SB5). forge-io resolves this per-run
-	// from the run's issue_ref at M2, behind the same seam.
+	// SandboxSourceDir is the run's target SOURCE in FIXTURE mode — the operator-configured
+	// directory provision_sandbox materializes each run's checkout from and cold-proves (the
+	// in-repo Go fixture the journey drives). Empty makes the provision source resolve fail
+	// closed, so a run parks toward the operator rather than provisioning a guessed target
+	// (SB5). Mutually exclusive with ForgeSource (design D5).
 	SandboxSourceDir string
+	// ForgeSource selects the FORGE-TARGET source mode: the run's source is CLONED from the
+	// real repository its run.issue.ref coordinate names (self-target provisioning). Set it
+	// (nil disables) to develop a real target instead of the fixture; exactly one of
+	// SandboxSourceDir / ForgeSource may be configured — both is a loud boot error (design D5).
+	ForgeSource *ForgeSourceConfig
 	// PersonasDir is the root of the role-fragment tree (<root>/<role>/*.md)
 	// seeded into the PERSONAS KV bucket at boot. Empty derives it from the
 	// config file's own directory (<configDir>/personas/fragments), which is
@@ -131,6 +137,59 @@ type RunOptions struct {
 	// Logger receives every log line the runtime boot emits. Nil defaults to
 	// slog.Default().
 	Logger *slog.Logger
+}
+
+// ForgeSourceConfig is the forge-target source mode (design D5): the git host base the run's
+// target lives under, and the env var its token is read from. Mirrors clone.Config; carried on
+// RunOptions and (for the operator binary) loaded from the config file's `source.forge` block.
+type ForgeSourceConfig struct {
+	// BaseURL is the git host base: "https://github.com" live, or "file:///…/remotes" for the
+	// offline bare-remote journey. The clone target is <BaseURL>/<owner>/<repo>.git.
+	BaseURL string `json:"base_url"`
+	// TokenEnv names the env var holding the forge token (default GITHUB_TOKEN); unused for
+	// file:// / public repos.
+	TokenEnv string `json:"token_env"`
+}
+
+// sourceSpec maps RunOptions to the provision station's source selection, FAILING CLOSED on an
+// ambiguous config (design D5): a forge source and a fixture dir set together is a loud boot
+// error, and a forge source without a base URL is rejected. Neither set → fixture mode with an
+// empty dir, which resolves fail-closed at runtime (SB5), the pre-change default.
+func sourceSpec(opts RunOptions) (provision.SourceSpec, error) {
+	if opts.ForgeSource != nil {
+		if opts.SandboxSourceDir != "" {
+			return provision.SourceSpec{}, fmt.Errorf("boot: both a fixture source dir and a forge source are configured — set exactly one (design D5)")
+		}
+		if strings.TrimSpace(opts.ForgeSource.BaseURL) == "" {
+			return provision.SourceSpec{}, fmt.Errorf("boot: forge source is configured without a base URL")
+		}
+		return provision.SourceSpec{Forge: &clone.Config{
+			BaseURL:  opts.ForgeSource.BaseURL,
+			TokenEnv: opts.ForgeSource.TokenEnv,
+		}}, nil
+	}
+	return provision.SourceSpec{FixtureDir: opts.SandboxSourceDir}, nil
+}
+
+// LoadForgeSourceConfig reads the `source.forge` block from the bootstrap config file (a second
+// read of the same file, the experiment.LoadConfig pattern — the framework loader ignores
+// unknown top-level keys). Returns nil when no forge source is declared (fixture default). A
+// malformed file is rejected loudly. The operator binary calls this to populate
+// RunOptions.ForgeSource; the e2e journeys set the field directly.
+func LoadForgeSourceConfig(path string) (*ForgeSourceConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("boot: read config %s: %w", path, err)
+	}
+	var wrapper struct {
+		Source struct {
+			Forge *ForgeSourceConfig `json:"forge"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, fmt.Errorf("boot: parse source config %s: %w", path, err)
+	}
+	return wrapper.Source.Forge, nil
 }
 
 // Runtime is the live, wired semstreams runtime: config loaded, NATS
@@ -491,8 +550,12 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	}
 	sandboxes := runspace.NewSandboxes()
 
+	spec, err := sourceSpec(opts)
+	if err != nil {
+		return nil, err
+	}
 	componentReg := component.NewRegistry()
-	if err := RegisterAll(componentReg, checkouts, sandboxes, opts.SandboxSourceDir); err != nil {
+	if err := RegisterAll(componentReg, checkouts, sandboxes, spec); err != nil {
 		return nil, fmt.Errorf("register components: %w", err)
 	}
 

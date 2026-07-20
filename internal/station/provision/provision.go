@@ -50,6 +50,8 @@ import (
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cleanroom"
+	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/forge/clone"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
@@ -61,6 +63,24 @@ import (
 // ComponentName is the registered factory name and the component.<name>.> dispatch
 // namespace the provision rule publishes to.
 const ComponentName = "provision-station"
+
+// SourceSpec selects where a run's SOURCE comes from — exactly one mode (boot validates the
+// exclusivity, design D5). FixtureDir is the static in-repo fixture (dev/test; empty → the
+// source resolve fails closed → block → park, SB5). Forge selects the forge-clone source: the
+// run's source is cloned from the REAL target its run.issue.ref coordinate names.
+type SourceSpec struct {
+	FixtureDir string
+	Forge      *clone.Config
+}
+
+// buildSources builds the provisionsandbox.Sources for the spec, reusing the station's fact
+// reader for the forge-clone lane (it reads run.issue.ref). Fixture mode is the default.
+func buildSources(spec SourceSpec, reader changefacts.Reader, logger *slog.Logger) (provisionsandbox.Sources, error) {
+	if spec.Forge != nil {
+		return clone.NewSource(reader, cliexec.OSRunner{}, "", *spec.Forge, logger)
+	}
+	return runspace.StaticSource{Dir: spec.FixtureDir}, nil
+}
 
 // handler provisions the run's sandbox, proves it cold, and stamps the readiness package.
 type handler struct {
@@ -93,12 +113,12 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 }
 
 // newProcessor builds the provision station from the framework deps plus boot's SHARED run
-// checkouts + warm-sandbox registry (captured by Register) and the operator-configured source
-// dir. It fails loud if either shared seam is nil — a provision component that cannot
-// materialize into the shared checkout, or stand up into the shared warm-container registry
-// measure_task reads, must not start (never a silent no-op). An EMPTY sourceDir is NOT a
-// fail-loud: it makes the source resolve fail closed → block → park (SB5), matching the tool.
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceDir string) (component.Discoverable, error) {
+// checkouts + warm-sandbox registry (captured by Register) and the run's SOURCE spec. It fails
+// loud if either shared seam is nil — a provision component that cannot materialize into the
+// shared checkout, or stand up into the shared warm-container registry measure_task reads, must
+// not start (never a silent no-op). A fixture-mode EMPTY dir is NOT a fail-loud: it makes the
+// source resolve fail closed → block → park (SB5), matching the tool.
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -119,11 +139,15 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
 	factReader := changefacts.NewNATSReader(deps.NATSClient)
+	sources, err := buildSources(spec, factReader, logger)
+	if err != nil {
+		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build run source")
+	}
 	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
 	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		deps: provisionsandbox.ProvisionDeps{
-			Sources:     runspace.StaticSource{Dir: sourceDir},
+			Sources:     sources, // StaticSource (fixture) or the forge-clone Source (real target)
 			Checkouts:   checkouts, // *runspace.Checkouts implements Materialize (provision Checkouts)
 			Manifests:   runspace.Manifests{},
 			Warmers:     sandboxes, // *runspace.Sandboxes implements Provision (provision Warmers)
@@ -140,14 +164,14 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 
 // Register registers the provision station, capturing boot's SHARED *runspace.Checkouts and
 // *runspace.Sandboxes (the same instances the dev-loop tools use — see the package doc) plus
-// the operator-configured run source dir. Called from boot.RegisterAll with the live
-// instances; the conformance census passes nil/"" (the factory registers but fails loud if
-// ever constructed, which the census never does — it only inspects the registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceDir string) error {
+// the run's SOURCE spec. Called from boot.RegisterAll with the live instances; the conformance
+// census passes nil/zero (the factory registers but fails loud if ever constructed, which the
+// census never does — it only inspects the registry).
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts, sandboxes, sourceDir)
+			return newProcessor(raw, deps, checkouts, sandboxes, spec)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

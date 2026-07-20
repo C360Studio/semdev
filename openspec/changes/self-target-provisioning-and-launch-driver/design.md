@@ -235,6 +235,16 @@ tool pack is chosen at BOOT from the config, not per-run from the label). No rac
 - **`cliexec.Runner` interface churn (review L3)** → adding a second method forces every
   fake runner to implement it; prefer an OPTIONAL interface + type-assertion
   (`RunWithEnv`) so existing fakes stay untouched, or accept the churn explicitly.
+- **Token authentication is opt-in (impl review M1)** → the forge-clone lane reads a token
+  ONLY when the operator names the env var (`source.forge.token_env`); an empty `token_env`
+  is unauthenticated even if `GITHUB_TOKEN` is ambient — a stray token never silently
+  authenticates a clone to whatever host `base_url` names. The clone error is a scrubbed
+  summary (raw git stderr goes to the log, never the public block-reason comment — M4).
+- **Named follow-ups (impl review LOWs, not blocking M2 dogfood)**: (a) per-run source
+  clones under the clone base are not reaped after `Materialize` copies them — monotonic
+  disk growth for a long-lived daemon; add a reap or a periodic sweep. (b) The clone relies
+  on the ambient run context deadline with no dedicated clone timeout — a very large target
+  could run long; add a bounded `context.WithTimeout` matching the I/O-timeout standard.
 
 ## Migration Plan
 

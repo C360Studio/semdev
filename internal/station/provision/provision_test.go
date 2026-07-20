@@ -8,7 +8,9 @@ import (
 
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/coldproof"
+	"github.com/c360studio/semdev/internal/forge/clone"
 	"github.com/c360studio/semdev/internal/harness"
+	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
@@ -142,5 +144,33 @@ func TestHandleWriteFaultReturnsError(t *testing.T) {
 	h := newHandler(fakeProver{baseline: readyBaseline()}, fakeWarmers{}, w)
 	if err := h.Handle(context.Background(), req()); err == nil {
 		t.Error("a graph-write fault must return an error so the base retries")
+	}
+}
+
+// stubReader is a minimal changefacts.Reader for the buildSources forge branch (it never
+// clones — buildSources only constructs the Source).
+type stubReader struct{}
+
+func (stubReader) ReadFacts(context.Context, string, string) ([]message.Triple, error) {
+	return nil, nil
+}
+
+// buildSources selects the run's SOURCE by the spec's mode: a fixture directory yields the
+// static source; a forge config yields the forge-clone source. Both non-nil, no error.
+func TestBuildSourcesSelectsMode(t *testing.T) {
+	fixture, err := buildSources(SourceSpec{FixtureDir: "/fix"}, stubReader{}, slog.Default())
+	if err != nil || fixture == nil {
+		t.Fatalf("fixture mode: source=%v err=%v", fixture, err)
+	}
+	if _, ok := fixture.(runspace.StaticSource); !ok {
+		t.Errorf("fixture mode should build a runspace.StaticSource, got %T", fixture)
+	}
+
+	forge, err := buildSources(SourceSpec{Forge: &clone.Config{BaseURL: "https://github.com"}}, stubReader{}, slog.Default())
+	if err != nil || forge == nil {
+		t.Fatalf("forge mode: source=%v err=%v", forge, err)
+	}
+	if _, ok := forge.(*clone.Source); !ok {
+		t.Errorf("forge mode should build a *clone.Source, got %T", forge)
 	}
 }

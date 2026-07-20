@@ -57,32 +57,40 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
 
 ## 3. Forge-clone Sources implementation (design D1; forge-io clone lane)
 
-- [ ] 3.1 RED: pin `Resolve(ctx, runEntityID)` reads `run.issue.ref` from the graph, parses
-  `owner/repo#N`, and clones `<forgeBase>/owner/repo` at the default branch into a fresh per-run dir —
-  fails before the impl exists. Use a LOCAL bare git remote (seeded with history) as the forge double.
-- [ ] 3.2 Implement the forge-clone `Sources` (`internal/forge/clone` — framework-alignment note +
-  registry/DI wiring): graph reader for the coordinate, ref parse (reuse the host-neutral parser the
-  approval/intake lane uses), shallow-or-full clone via `cliexec` env-token (GIT_ASKPASS reading the
-  token from the subprocess env — D3), return the source dir. GREEN 3.1.
-- [ ] 3.3 FAIL-CLOSED pins (SB5): no coordinate on the run → error (park); unparseable ref → error;
-  unknown/unreachable repo → error; auth fault → error. NONE returns a guessed dir.
-- [ ] 3.4 NO-ARGV-LEAK pin: the token appears in no argument the recording runner sees; it rides only
-  the subprocess env (asserts against the group-1 recording runner).
-- [ ] 3.5 Coordinate → clone-URL mapping pin (owner/repo extraction; base-URL scoping; `.git` suffix
-  handling) including a ref with an org that contains dots / a repo with a hyphen.
+- [x] 3.1 Happy-path pin `TestResolveClonesTargetFromCoordinate`: `Resolve` reads `run.issue.ref`,
+  parses `owner/repo#N`, clones `<base>/owner/repo.git` into a fresh per-run dir — proven against a
+  LOCAL bare git remote seeded with history (`seedBareRemote` file:// double). NOTE: for this new
+  package the pins were authored ALONGSIDE the impl (all green first run), not strict red-then-green.
+- [x] 3.2 Implemented the forge-clone `Sources` (`internal/forge/clone`, G1 framework-alignment note in
+  the package doc — no new primitive, satisfies the EXISTING `provisionsandbox.Sources` seam): graph
+  reader for the coordinate, LOCAL `parseOwnerRepo` (kept out of `intake` to avoid a low→high forge-layer
+  dependency), full clone via `cliexec` with a GIT_ASKPASS env-token (D3). Boot/DI wiring is group 4.
+- [x] 3.3 FAIL-CLOSED pins `TestResolveFailsClosed` (no coordinate / unparseable ref / reader fault) +
+  `TestResolveUnknownRepoFailsClosed` (missing remote → clone fails). None returns a guessed dir; a
+  failed clone reaps its half-materialized dir.
+- [x] 3.4 NO-ARGV-LEAK pin `TestResolveTokenRidesEnvNotArgv`: with a token, it rides `SEMDEV_FORGE_TOKEN`
+  in the subprocess env via GIT_ASKPASS, appears in NO argv, the URL carries only the non-secret
+  `x-access-token` username, and the runner MUST be an `EnvRunner` (fail-closed, never an argv fallback).
+- [x] 3.5 Coordinate → clone-URL mapping pin `TestResolveCoordinateToURLMapping` (hyphen repo, dotted
+  org; `.git` suffix; base-URL scoping via `net/url`).
 
 ## 4. Boot source-mode selection (design D5 — fail-closed on ambiguity)
 
-- [ ] 4.1 RED: pin boot selects EXACTLY ONE source mode — fixture dir XOR forge-target — and errors
-  loudly when neither or both are configured (no guessed default, SB5).
-- [ ] 4.2 Wire the mode in `internal/boot`: fixture mode → `runspace.StaticSource` (today's path);
-  forge-target mode → the group-3 clone source, reading the reused `forge` config block +
-  `RunOptions.GitHubToken`. `provisionsandbox`, `Materialize` interface, and the sandbox stages are
-  untouched (same `Sources` interface). GREEN 4.1.
-- [ ] 4.3 GUARD: every existing e2e journey + boot integration test still selects the fixture mode and
-  passes UNCHANGED (the fixture default is the pre-change behavior).
-- [ ] 4.4 Config census pin: the new `source` mode block and the `forge` clone fields are documented
-  in the bootstrap config shape and rejected-if-malformed at boot (no silent skip).
+- [x] 4.1 Pin `TestSourceSpecFailsClosedOnAmbiguity`: `sourceSpec` errors loudly when BOTH a fixture
+  dir and a forge source are set, or a forge source has no base URL (design D5). NOTE: neither set →
+  fixture mode with an empty dir → runtime park (SB5, the pre-change default), NOT a boot error — keeps
+  the existing empty-`SandboxSourceDir` integration boots working.
+- [x] 4.2 Wired the mode: `provision.SourceSpec{FixtureDir | *clone.Config}` threaded through
+  `RegisterAll` → `provision.Register` → `newProcessor`, which builds Sources via `buildSources`
+  (fixture → `runspace.StaticSource`; forge → `clone.NewSource` reusing the station's fact reader).
+  `provisionsandbox`, the `Sources`/`Materialize` interfaces, and the sandbox stages UNCHANGED. Pins
+  `TestBuildSourcesSelectsMode` + `TestSourceSpecSelection`.
+- [x] 4.3 GUARD: full `internal/...` unit layer + `test/conformance` (G1 census updated to
+  `provision.SourceSpec{}`) green UNCHANGED — the fixture default is the pre-change behavior.
+- [x] 4.4 `LoadForgeSourceConfig` reads the config file's `source.forge` block (base_url/token_env; the
+  experiment.LoadConfig second-read pattern) — present → parsed, absent → nil, malformed/missing → loud
+  error. `cmd/semdev` wires it into `RunOptions.ForgeSource` at the composition edge (parity-scan-safe).
+  Pin `TestLoadForgeSourceConfig`.
 
 ## 5. Operator launch driver (design D6 — composes existing seams)
 

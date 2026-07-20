@@ -60,15 +60,16 @@ import (
 // component that built its own would get a different empty map and never find the
 // run's checkout / warm container. Self-sufficient stations (delivery/projection/
 // validation) ignore them (their deps build from the NATS client at construction).
-// sandboxSourceDir is the operator-configured run SOURCE the provision station
-// materializes each checkout from (RunOptions.SandboxSourceDir — the same value
-// RegisterTools threads into provision_sandbox); an empty dir makes provisioning fail
-// closed → block → park, never a guessed target (SB5). All are zero-valued on the
-// schema-scanning census path: the checkout/sandbox factories still register (so the
-// G1 census sees them) but fail loud if ever CONSTRUCTED without the seam — which the
-// census never does (it only inspects the registry). The live boot passes the shared
-// instances + source dir, created before this call.
-func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sandboxSourceDir string) error {
+// sourceSpec selects where the provision station materializes each checkout FROM —
+// the fixture directory (dev/test) XOR the forge-clone source (the real target the run's
+// coordinate names); boot builds it from RunOptions with a both-set fail-closed guard
+// (design D5). A fixture-mode empty dir makes provisioning fail closed → block → park,
+// never a guessed target (SB5). All are zero-valued on the schema-scanning census path:
+// the checkout/sandbox factories still register (so the G1 census sees them) but fail
+// loud if ever CONSTRUCTED without the seam — which the census never does (it only
+// inspects the registry). The live boot passes the shared instances + source spec,
+// created before this call.
+func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceSpec provision.SourceSpec) error {
 	if err := componentregistry.Register(reg); err != nil {
 		return fmt.Errorf("register framework components: %w", err)
 	}
@@ -94,7 +95,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	}
 	// provision captures BOTH shared instances (it materializes the checkout AND stands up
 	// the warm container measure_task reads) plus the operator's run source dir.
-	if err := provision.Register(reg, checkouts, sandboxes, sandboxSourceDir); err != nil {
+	if err := provision.Register(reg, checkouts, sandboxes, sourceSpec); err != nil {
 		return fmt.Errorf("register provision station: %w", err)
 	}
 	// The forge-io front door (forge-io-real-lanes): webhook receiver + durable

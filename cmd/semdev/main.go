@@ -27,9 +27,19 @@ func main() {
 	// (the half-wired-binary silent-flow-break class; see internal/boot/boot.go
 	// and internal/boot/runtime.go). Neither binary wires NATS, the component/
 	// tool/service registries, or the ServiceManager independently.
+	// The forge-target source (self-target provisioning) is declared in the config file's
+	// `source.forge` block; nil (no block) keeps the fixture default. Loaded here at the
+	// composition edge, like GitHubToken, so boot stays hermetic to the file layout.
+	forgeSource, err := boot.LoadForgeSourceConfig(configPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "semdev: %v\n", err)
+		os.Exit(1)
+	}
+
 	opts := boot.RunOptions{
 		ConfigPath:  configPath(),
 		GitHubToken: os.Getenv("GITHUB_TOKEN"),
+		ForgeSource: forgeSource,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
