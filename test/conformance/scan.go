@@ -174,6 +174,146 @@ func fileImports(src []byte) ([]string, error) {
 	return out, nil
 }
 
+// exportedTypeLeaks returns the qualified selectors (e.g. "githubwebhook.CommentEvent")
+// from the package whose import path ends in "/"+pkgSuffix that appear in the
+// EXPORTED surface of a Go source file: exported func/method signatures, exported
+// struct fields, exported interface methods, and exported var/const types (declared
+// OR inferred from the initializer). An UNEXPORTED normalize taking a
+// githubwebhook.CommentEvent is deliberately NOT flagged — the pin guards the
+// conversation port's public API from re-leaking the host shape, not the impl's
+// contained internals (the CommentEvent→Message normalize is meant to live here,
+// unexported).
+//
+// The local ident is RESOLVED from the file's import specs (not hardcoded), so an
+// alias `gw "…/githubwebhook"` cannot slip a host type past the guard; a dot-import
+// of the host package is itself reported as a leak (its types enter scope namelessly
+// and cannot be tracked, so it is forbidden outright).
+func exportedTypeLeaks(src []byte, pkgSuffix string) ([]string, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+
+	// Resolve the local name(s) the host package is bound to in THIS file.
+	localNames := make(map[string]bool)
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if path != pkgSuffix && !strings.HasSuffix(path, "/"+pkgSuffix) {
+			continue
+		}
+		name := path[strings.LastIndex(path, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		switch name {
+		case ".":
+			// A dot-import pulls the host types into scope with no qualifier — they
+			// become bare idents indistinguishable from local names. Forbid it: the
+			// carve's surface must never dot-import the host shape.
+			out = append(out, pkgSuffix+" (dot-import)")
+		case "_":
+			// Blank import — side effects only, no accessible symbols.
+		default:
+			localNames[name] = true
+		}
+	}
+
+	collect := func(expr ast.Expr) {
+		if expr == nil {
+			return
+		}
+		ast.Inspect(expr, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if x, ok := sel.X.(*ast.Ident); ok && localNames[x.Name] {
+				out = append(out, x.Name+"."+sel.Sel.Name)
+			}
+			return true
+		})
+	}
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			// A method on an unexported receiver is not exported surface, nor is an
+			// unexported function.
+			if !d.Name.IsExported() || (d.Recv != nil && !receiverExported(d.Recv)) {
+				continue
+			}
+			collect(d.Type)
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					if !s.Name.IsExported() {
+						continue
+					}
+					switch t := s.Type.(type) {
+					case *ast.StructType:
+						for _, fld := range t.Fields.List {
+							if fieldExported(fld) {
+								collect(fld.Type)
+							}
+						}
+					case *ast.InterfaceType:
+						for _, m := range t.Methods.List {
+							collect(m.Type)
+						}
+					default:
+						collect(s.Type)
+					}
+				case *ast.ValueSpec:
+					exported := false
+					for _, name := range s.Names {
+						if name.IsExported() {
+							exported = true
+							break
+						}
+					}
+					if !exported {
+						continue
+					}
+					collect(s.Type) // the declared type, when explicit
+					for _, v := range s.Values {
+						collect(v) // an inferred host type (var X = githubwebhook.New()) is surface too
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// receiverExported reports whether a method receiver's base type is exported —
+// a method on an unexported type is not part of a package's public API.
+func receiverExported(recv *ast.FieldList) bool {
+	if recv == nil || len(recv.List) == 0 {
+		return false
+	}
+	t := recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	id, ok := t.(*ast.Ident)
+	return ok && id.IsExported()
+}
+
+// fieldExported reports whether a struct field is part of the exported surface: a
+// named field with an exported name, or an embedded field (always surface).
+func fieldExported(f *ast.Field) bool {
+	if len(f.Names) == 0 {
+		return true // embedded
+	}
+	for _, n := range f.Names {
+		if n.IsExported() {
+			return true
+		}
+	}
+	return false
+}
+
 // qualifiedFunc returns "pkg.Func" for a selector call like pkg.Func(...), or
 // just "Func" for a bare call. ok is false for more complex call targets (method
 // chains, etc.) that the registration pins do not need to reason about.

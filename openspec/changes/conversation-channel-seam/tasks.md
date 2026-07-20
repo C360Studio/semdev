@@ -9,11 +9,14 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
 
 ## 1. The ConversationChannel port + neutral types (design D1–D4)
 
-- [ ] 1.1 RED: pins that the neutral types carry no host shape — `ThreadRef` is an
+- [x] 1.1 RED: pins that the neutral types carry no host shape — `ThreadRef` is an
   opaque string; `Message{ID,Author,Body,At}` has no owner/repo/number field. A
   conformance pin asserts the `conversation` package's EXPORTED surface imports no
   `githubwebhook` type (the CommentEvent→Message normalize is an unexported internal).
-- [ ] 1.2 Add `internal/forge/conversation`: the `ConversationChannel` interface
+  [Done: `conversation_test.go` type-shape pins; `test/conformance/conversation_seam_test.go`
+  + `exportedTypeLeaks` AST scanner (alias/dot-import-resolving, red-first self-test).]
+- [x] 1.2 Add `internal/forge/conversation`: the `Channel` interface (named `Channel`,
+  not `ConversationChannel` — avoids the revive stutter; reads as `conversation.Channel`)
   (`Post(ctx,thread,body)` + `ResolveThread(ctx,workRef)→ThreadRef` — NO `Read` verb;
   it would be latent code, added by `pull-first-transport`), the neutral
   `Message`/`ThreadRef` types, and the G1 framework-alignment package doc.
