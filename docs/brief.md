@@ -97,9 +97,11 @@ the floors around a workflow that already works.
 ## Communication and audit trail (v1)
 
 - **No web UI.** GitHub is the product surface; questions to humans are posted
-  as issue/PR comments. Comms ride a channel-agnostic seam (the semteams
-  front-door bus pattern), so Slack/Jira adapters can be added without
-  touching the arc.
+  as issue/PR comments. Comms ride a channel-agnostic seam — the
+  `conversation-channel` capability's `Channel` port (post a message, resolve a
+  run's thread) with a neutral `Message` — so Slack/Jira adapters can be added
+  behind the same port without touching the arc. GitHub issue/PR comments is the
+  v1 implementation.
 - **Full trajectory per run, always captured**: prompts, tool calls, facts
   written, decisions, budgets spent — durable artifacts, not projections.
 - **`semdev trajectory <run>`** renders a run's full audit trail as a

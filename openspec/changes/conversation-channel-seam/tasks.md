@@ -96,12 +96,12 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
 
 ## 5. Spec relocation coherence + docs (G10)
 
-- [ ] 5.1 The `forge-io` delta (REMOVE "Human communication rides the seam"; MODIFY
+- [x] 5.1 The `forge-io` delta (REMOVE "Human communication rides the seam"; MODIFY
   "Intake is gated" to drop the steering scenario) and the new `conversation-channel`
   spec match the code — no arc rule references a channel payload; the relocated steering
   requirement says "an authorized actor," not "the run's authorized requester" (M-1);
   the `human.opt.signal` reply lane is spec'd as a RESERVED forward contract (M-3).
-- [ ] 5.2 Docs match reality: `docs/brief.md` (the conversation seam), CLAUDE.md status,
+- [x] 5.2 Docs match reality: `docs/brief.md` (the conversation seam), CLAUDE.md status,
   `docs/port-manifest.md` (the T7 comms-seam row → the `conversation-channel` capability),
   the memory pointers. Note the `github_list_comments` LLM-grounding tool remains a
   legitimately host-specific code-host reader, NOT subsumed by the port (L-1).

@@ -54,6 +54,20 @@ shape. **Read these three documents before changing anything:**
 
 ## Status
 
+**IN FLIGHT — Phase 1 `conversation-channel-seam` (the pure carve), groups 1–4
+IMPLEMENTED + reviewed + committed; groups 5–6 (spec/docs coherence + full-suite
+verify/archive) in progress.** The conversation half of the arc is carved behind a
+channel-neutral `Channel` port (`Post`/`ResolveThread` + a neutral `Message`): the
+GitHub v1 impl in `internal/forge/conversation`, a shared `internal/intake/admission`
+core, and a new `conversation-channel` component (`internal/conversationchannel`)
+owning the `/semdev approve` comment lane + park-post — carved out of a NARROWED
+`issue-intake` (now the issue lane + webhook receiver only). Byte-identical arc
+behavior (a refactor behind stable facts): the webhook+parks e2e journeys pass on
+real docker, both adversarial reviewers APPROVE. `human.opt.signal`'s writer moved
+to the channel-neutral `conversation-adapter` (G5 pivot); `human.opt.signal` +
+`run.change.approved` capability tags → `conversation-channel`. The poll transport
+is a deferred follow-on (`pull-first-transport`); NL intent is Phase 2.
+
 M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers), now on
 **semstreams beta.154** (on the beta.147 breaking canonical-predicate + entity-ID wave;
 beta.149 landed the #551 per-loop executor tool-enforcement fix; beta.150 hardens the

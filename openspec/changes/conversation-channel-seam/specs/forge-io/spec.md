@@ -38,11 +38,14 @@ capability) — this capability owns issue/PR intake and budget admission.
 non-GitHub channel can carry the chat without touching the arc. `forge-io` narrows
 to code-host concerns only (issue intake, PR delivery, source clone, issue content).
 
-**Migration**: The same behavior — `ask_human` posts a message, a human reply
-re-enters as `human.opt.signal`, the change-approval gate is operable from the
-thread and lands `run.change.approved` through the approval adapter, and a parked
-run's `run.awaiting.human` message reaches the human — is now specified by the
-`conversation-channel` capability's "Human communication rides the conversation
-channel" requirement, through the port's Post/Read verbs. The facts
-(`human.opt.signal`, `run.change.approved`) and the resume rule are unchanged;
-`human.opt.signal`'s writer moves from `comment-adapter` to `conversation-channel`.
+**Migration**: The delivered behavior — the change-approval gate is operable from
+the thread and lands `run.change.approved` through the approval adapter, and a
+parked run's `run.awaiting.human` message reaches the human — is now specified by
+the `conversation-channel` capability's "Human communication rides the conversation
+channel" requirement, through the port's `Post` + `ResolveThread` verbs. (The
+human-reply lane — `ask_human` posting a question and a reply re-entering as
+`human.opt.signal` to resume a parked run — is a RESERVED forward contract in the
+new capability, not delivered by this carve.) The facts (`human.opt.signal`,
+`run.change.approved`) and the resume rule are unchanged; `human.opt.signal`'s
+writer moves from `comment-adapter` to the channel-neutral `conversation-adapter`
+(capability `conversation-channel`).
