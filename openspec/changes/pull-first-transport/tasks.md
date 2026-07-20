@@ -10,32 +10,32 @@ review surface (Phase 3), NO non-GitHub `Read`, NO issue-discovery-by-poll, NO
 
 ## 1. The `Read` verb + `Cursor` on the port + GitHub impl (design D1, D7)
 
-- [ ] 1.1 RED: `TestChannelReadVerb` — the port has EXACTLY three verbs now (Post,
+- [x] 1.1 RED: `TestChannelReadVerb` — the port has EXACTLY three verbs now (Post,
   ResolveThread, Read); `Read(thread, cursor)` returns `([]Message, Cursor, error)`;
   `Cursor` is an opaque string (empty = from the top). The exported-surface
   host-neutrality pin still holds (no `githubwebhook` type on the Read signature).
-- [ ] 1.2 RED: `TestGitHubChannelReadFiltersByCursor` — the GitHub `Read` maps each
+- [x] 1.2 RED: `TestGitHubChannelReadFiltersByCursor` — the GitHub `Read` maps each
   `github.Comment` → neutral `Message{ID=itoa(comment id), Author, Body, At}`, returns
   those with `id > cursor` NUMERICALLY (parse to int64 — pin a digit-width-boundary
   case: cursor "9", comments 9,10,11 → returns 10,11; review M1) + the max id as the
   next cursor; an empty cursor returns ALL; a NO-NEW-COMMENTS read returns the INPUT
   cursor unchanged (not max-of-empty → no re-read storm; review M2); no attribution
   guard (a polled comment has one author = the principal).
-- [ ] 1.3 Implement `Read` on the `Channel` interface + the GitHub impl over
+- [x] 1.3 Implement `Read` on the `Channel` interface + the GitHub impl over
   `github.Client.ListComments` (reuse `SplitRef` for owner/repo/number). Post +
   ResolveThread + `NormalizeInboundComment` unchanged.
 
 ## 2. One approval core, two transports (design D3; H-1)
 
-- [ ] 2.1 RED: `TestApprovalCoreSharedByWebhookAndPoll` — extract `handleMessage(ctx,
+- [x] 2.1 RED: `TestApprovalCoreSharedByWebhookAndPoll` — extract `handleMessage(ctx,
   msg, thread)` and prove the WEBHOOK path (`handleCommentEvent` → normalize →
   handleMessage) is byte-identical to today (the migrated approval pins stay green),
   AND that feeding a neutral `Message` DIRECTLY (the poll path) through `handleMessage`
   authorizes `Message.Author` and lands the same `run.change.approved`.
-- [ ] 2.2 Refactor the approval adapter: `handleCommentEvent(payload)` →
+- [x] 2.2 Refactor the approval adapter: `handleCommentEvent(payload)` →
   `NormalizeInboundComment` → `handleMessage`; the poller calls `handleMessage`
   directly. Decode-error ACK + all grp2-review carry-forwards preserved.
-- [ ] 2.3 PIN the accepted edit divergence (review M3): the poll path honors an
+- [x] 2.3 PIN the accepted edit divergence (review M3): the poll path honors an
   approve in a comment's CURRENT body (an edited-in `/semdev approve`, attributed to
   its author); the webhook path fires only on `created`. Not byte-identical on edits —
   documented in the spec, not claimed away. (No security hole: `Authorize` gates the

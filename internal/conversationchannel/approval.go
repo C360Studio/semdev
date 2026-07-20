@@ -63,12 +63,14 @@ func newApprovalAdapter(client *natsclient.Client, cfg ComponentConfig, checker 
 	return a
 }
 
-// handleCommentEvent processes one flattened comment event through the Channel's
-// neutral normalize. nil = definitive (acked); error = transient (redelivered): an
-// authorization lookup fault, a graph read/write blip, or the run not existing YET
-// (the wake→mint race — the approval may beat the mint by seconds; redelivery
-// retries it). A DECODE failure is definitive (acked) — the receiver only publishes
-// shapes it flattened itself (grp2-review carry-forward b).
+// handleCommentEvent processes one flattened WEBHOOK comment event through the
+// Channel's neutral normalize, then hands the Message to the shared approval core
+// (handleMessage). It is the webhook transport's entry point; the poller (grp3)
+// calls handleMessage directly with a Message it Read (D3 — one core, two
+// transports). nil = definitive (acked); error = transient (redelivered). A DECODE
+// failure is definitive (acked) — the receiver only publishes shapes it flattened
+// itself (grp2-review carry-forward b). A non-signal comment (not created, not
+// issue-bound, or not attributable to its sender) is skipped without a write.
 func (a *approvalAdapter) handleCommentEvent(ctx context.Context, payload []byte) error {
 	msg, thread, ok, err := conversation.NormalizeInboundComment(payload)
 	if err != nil {
@@ -80,6 +82,20 @@ func (a *approvalAdapter) handleCommentEvent(ctx context.Context, payload []byte
 	if !ok {
 		return nil
 	}
+	return a.handleMessage(ctx, msg, thread)
+}
+
+// handleMessage is the SHARED, transport-neutral approval core (pull-first-transport
+// D3): repo-bind check → command match on msg.Body → authorize msg.Author →
+// resolve the run by thread → stamp run.change.approved. BOTH transports feed it:
+// the webhook consumer via handleCommentEvent (after NormalizeInboundComment's
+// sender==author guard), the poller via Channel.Read. It authorizes Message.Author
+// either way (H-1: a poll read carries one identity, the comment author).
+//
+// nil = definitive (acked); error = transient (redelivered): an authorization
+// lookup fault, a graph read/write blip, or the run not existing YET (the wake→mint
+// race — the approval may beat the mint by seconds; redelivery retries it).
+func (a *approvalAdapter) handleMessage(ctx context.Context, msg conversation.Message, thread conversation.ThreadRef) error {
 	if a.cfg.Repo != "" && !strings.EqualFold(strings.TrimSpace(a.cfg.Repo), refRepo(string(thread))) {
 		return nil
 	}
@@ -88,18 +104,18 @@ func (a *approvalAdapter) handleCommentEvent(ctx context.Context, payload []byte
 	}
 
 	// Build the admission Event from the neutral Message (Author = the attributed
-	// author == the sender, since ok requires sender==author) + the thread's
-	// resolved code-host scope (owner/repo from SplitRef(thread) == the payload's
-	// Repository.Owner/Name). This keeps Authorize byte-identical to the pre-carve
-	// path (grp2-review carry-forward a).
+	// author) + the thread's resolved code-host scope (owner/repo from
+	// SplitRef(thread)). This keeps Authorize byte-identical to the pre-carve path
+	// (grp2-review carry-forward a).
 	owner, repo, _, err := admission.SplitRef(string(thread))
 	if err != nil {
-		// A real flattened comment always carries Repository.FullName (the flattener
-		// reconstructs owner/name), so an unparseable thread is unreachable in
-		// practice. If it ever occurred (e.g. an empty FullName), fail CLOSED here —
-		// strictly safer than the pre-carve path, which read owner/repo from the raw
-		// fields and would have proceeded (review L2: a deliberate, safe divergence).
-		a.logger.Error("approval: unparseable thread from a normalized comment; skipping",
+		// A real thread always carries a parseable owner/repo#number (the webhook
+		// flattener reconstructs FullName; the poller enumerates run.issue.ref refs),
+		// so an unparseable thread is unreachable in practice. If it ever occurred,
+		// fail CLOSED here — strictly safer than the pre-carve path, which read
+		// owner/repo from the raw fields and would have proceeded (review L2: a
+		// deliberate, safe divergence).
+		a.logger.Error("approval: unparseable thread; skipping",
 			slog.String("thread", string(thread)), slog.Any("error", err))
 		return nil
 	}
