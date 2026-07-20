@@ -34,14 +34,25 @@ type classifiedRequester interface {
 // their common home. The WRITER (Source) is the approval adapter's own const.
 const ApprovedPredicate = "run.change.approved"
 
+// RejectedPredicate is the change-rejection gate fact the approval adapter stamps
+// on the run when an authorized actor rejects the change — the exact `/semdev
+// reject` command or a classified NL reject intent (nl-conversation-intent D7). A
+// phase-guarded run-lifecycle rule fires awaiting_approval→cancelled on it. Its
+// single writer (Source) is the approval adapter's own const — the SAME writer as
+// ApprovedPredicate (two code sites, one Source, censused, G5). It lives beside
+// ApprovedPredicate because both are the gate facts the shared approval core writes.
+const RejectedPredicate = "run.change.rejected"
+
 // RunResolver finds the run entity bound to a host-neutral issue ref via its
 // rule-stamped run.issue.ref fact. Implemented over the graph's prefix query;
 // faked in unit pins. Shared by issue-intake (duplicate-delivery discrimination),
 // the conversation-channel approval adapter, and the operator launch driver.
 type RunResolver interface {
 	// ResolveRunByRef returns the run entity ID carrying run.issue.ref == ref,
-	// "" when none exists (yet), or an error on a transport fault.
-	ResolveRunByRef(ctx context.Context, ref string) (runEntityID string, approved bool, err error)
+	// its change-approval state, and its agent.run.phase (the M7 getter — the
+	// conversation-channel NL bridge gates on awaiting_approval), "" ids/phase
+	// when none exists (yet), or an error on a transport fault.
+	ResolveRunByRef(ctx context.Context, ref string) (runEntityID string, approved bool, phase string, err error)
 }
 
 // NATSRunResolver resolves ref→run over the graph's paginated prefix query
@@ -57,38 +68,46 @@ type NATSRunResolver struct {
 const maxRunPages = 16
 
 // ResolveRunByRef returns the run entity ID carrying run.issue.ref == ref (with
-// its run.change.approved state), "" when none exists yet, or an error on a
-// transport fault — the RunResolver contract, over the graph prefix query.
-func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (string, bool, error) {
+// its run.change.approved state and its agent.run.phase), "" ids/phase when none
+// exists yet, or an error on a transport fault — the RunResolver contract, over
+// the graph prefix query.
+func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (string, bool, string, error) {
 	cursor := ""
 	for page := 0; page < maxRunPages; page++ {
 		req := graph.PrefixQueryRequest{Prefix: r.prefix, Cursor: cursor}
 		data, err := json.Marshal(req)
 		if err != nil {
-			return "", false, err
+			return "", false, "", err
 		}
 		respData, err := r.client.RequestClassified(ctx, "graph.ingest.query.prefix", data, 5*time.Second)
 		if err != nil {
-			return "", false, fmt.Errorf("prefix query: %w", err)
+			return "", false, "", fmt.Errorf("prefix query: %w", err)
 		}
 		var resp graph.PrefixQueryResponse
 		if err := json.Unmarshal(respData, &resp); err != nil {
-			return "", false, fmt.Errorf("decode prefix response: %w", err)
+			return "", false, "", fmt.Errorf("decode prefix response: %w", err)
 		}
 		for i := range resp.Entities {
 			e := &resp.Entities[i]
 			var refMatch, approved bool
+			var phase string
 			for _, tr := range e.Triples {
-				if tr.Predicate == "run.issue.ref" {
+				switch tr.Predicate {
+				case "run.issue.ref":
 					if s, ok := tr.Object.(string); ok && s == ref {
 						refMatch = true
 					}
-				}
-				// approved = the VALUE the resume rule matches ("true"), not
-				// mere presence (review finding).
-				if tr.Predicate == ApprovedPredicate {
+				case ApprovedPredicate:
+					// approved = the VALUE the resume rule matches ("true"), not
+					// mere presence (review finding).
 					if s, ok := tr.Object.(string); ok && s == "true" {
 						approved = true
+					}
+				case agentrun.PhasePredicate:
+					// The M7 phase getter: the framework run phase the NL bridge
+					// gates on (awaiting_approval). semdev READS it, never writes it (G2).
+					if s, ok := tr.Object.(string); ok {
+						phase = s
 					}
 				}
 			}
@@ -98,15 +117,15 @@ func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (stri
 				// park; when the resume lane lands, prefer-newest (or an
 				// explicit disambiguation) replaces this — noted in the
 				// design's resume carry-forward.
-				return e.ID, approved, nil
+				return e.ID, approved, phase, nil
 			}
 		}
 		if resp.NextCursor == "" {
-			return "", false, nil
+			return "", false, "", nil
 		}
 		cursor = resp.NextCursor
 	}
-	return "", false, fmt.Errorf("run resolution exceeded %d pages", maxRunPages)
+	return "", false, "", fmt.Errorf("run resolution exceeded %d pages", maxRunPages)
 }
 
 // ResolveRunIDsByRef returns EVERY run entity ID carrying run.issue.ref == ref (unordered) —

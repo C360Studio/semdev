@@ -57,6 +57,47 @@ func mustPage(t *testing.T, resp graph.PrefixQueryResponse) []byte {
 	return b
 }
 
+// TestResolverSurfacesPhase pins the M7 phase getter (nl-conversation-intent
+// D4): ResolveRunByRef surfaces agent.run.phase alongside the run id + approved
+// state, so handleMessage can gate the NL bridge on awaiting_approval WITHOUT a
+// second query. A run with an approved fact reports approved==true and its own
+// phase; a gated run reports phase=="awaiting_approval", approved==false.
+func TestResolverSurfacesPhase(t *testing.T) {
+	gated := runEntity("run-1", "awaiting_approval", "acme/widgets#1")
+	approved := runEntity("run-2", "executing", "acme/widgets#2")
+	approved.Triples = append(approved.Triples,
+		message.Triple{Subject: "run-2", Predicate: ApprovedPredicate, Object: "true"})
+	page := mustPage(t, graph.PrefixQueryResponse{Entities: []graph.EntityState{gated, approved}})
+
+	runID, wasApproved, phase, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+		ResolveRunByRef(context.Background(), "acme/widgets#1")
+	if err != nil {
+		t.Fatalf("ResolveRunByRef: %v", err)
+	}
+	if runID != "run-1" {
+		t.Errorf("runID = %q, want run-1", runID)
+	}
+	if wasApproved {
+		t.Errorf("approved = true, want false (no run.change.approved fact on the gated run)")
+	}
+	if phase != "awaiting_approval" {
+		t.Fatalf("phase = %q, want awaiting_approval — the resolver must surface agent.run.phase (M7)", phase)
+	}
+
+	// The approved run reports its own phase + approved state.
+	_, wasApproved2, phase2, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+		ResolveRunByRef(context.Background(), "acme/widgets#2")
+	if err != nil {
+		t.Fatalf("ResolveRunByRef(approved): %v", err)
+	}
+	if !wasApproved2 {
+		t.Errorf("approved = false, want true")
+	}
+	if phase2 != "executing" {
+		t.Errorf("phase = %q, want executing", phase2)
+	}
+}
+
 // TestListRunsAwaitingApproval pins the poll transport's enumeration
 // (pull-first-transport D2): returns the run.issue.ref of every run at
 // agent.run.phase == awaiting_approval, EXCLUDES runs in any other phase or with no

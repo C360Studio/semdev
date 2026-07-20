@@ -61,6 +61,14 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		// and the single writer vocab declares for the conversation.intent.* namespace.
 		{"classify_intent", classifyintent.Source, conversationintent.IntentValuePredicate},
 		{"classify_intent", classifyintent.Source, conversationintent.IntentClassifiedPredicate},
+		// conversation.pending.*: the NL bridge (handleMessage, group 3) stamps the
+		// authorized human message under conversation-adapter — a DISTINCT Source from
+		// the gate writer (approval-adapter) the same struct also emits. The tie
+		// between AdapterSource and the single writer vocab declares for the pending
+		// namespace (nl-conversation-intent D5).
+		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingMessageIDPredicate},
+		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingAuthorPredicate},
+		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingBodyPredicate},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.rejected"},
 		// The route mirror (design R1): check_floors + submit_review both stamp the route.*

@@ -168,6 +168,21 @@ leaves `awaiting_approval`, so the poller stops enumerating it and no further
 classification fires. The authored change is abandoned; a re-triggered issue starts a fresh
 run (a rework loop that keeps the change is a Phase 3 concern, OQ2).
 
+**Both gate facts can co-exist — the resume AND cancel rules MUST partition the cell
+space (grp3-review M2, go+semstreams).** The exact-command fast-paths (`releaseGate`)
+BYPASS the routing rules' both-facts-absent guard (D6) and stamp a gate fact directly: an
+authorized `/semdev reject` then `/semdev approve` on a still-gated run leaves it carrying
+`run.change.rejected == true` AND `run.change.approved == true`. The Go fast-path refuses
+only reject-on-ALREADY-approved (H1, via the resolver's `approved` getter); it deliberately
+does NOT grow a second Go-side gate read to enforce full mutual exclusion, because the
+lifecycle partition is the RULES' job (G2) and must be evaluated over ONE atomic mirror
+snapshot (the routing-upgrades cell-space lesson — the engine writes each action as its own
+KV revision, so a Go guard racing the rules is weaker, not stronger). Therefore BOTH
+lifecycle rules must be mutually exclusive: the RESUME rule (`run-lifecycle/02`) gains
+`run.change.rejected length_eq 0`, and the CANCEL rule carries `run.change.approved
+length_eq 0` — a run holding both facts transitions to NEITHER (a safe park at the gate),
+never both. Pinned by the `TestConflictingIntentsResolveToOneTerminal` journey (6.4).
+
 ### D8 — the false-approval safety posture (four pre-landing guards + the downstream backstop)
 An LLM must never manufacture an approval a human did not give. Guards, none the LLM's
 word alone:

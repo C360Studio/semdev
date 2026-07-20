@@ -21,7 +21,20 @@ const (
 	PendingPrefix             = "conversation.pending."
 	PendingMessageIDPredicate = PendingPrefix + "message-id"
 	PendingAuthorPredicate    = PendingPrefix + "author"
+	// PendingBodyPredicate is the authorized human message text the group-4 spawn
+	// rule templates onto the classifier prompt (classify_intent reads only the id
+	// + author it copies onto the intent — never the body). Writer:
+	// conversation-adapter (handleMessage's NL bridge, group 3).
+	PendingBodyPredicate = PendingPrefix + "body"
 )
+
+// AdapterSource is the single G5 writer stamped on every conversation.pending.*
+// triple the conversation adapter's NL bridge (handleMessage) writes. It is a
+// DISTINCT Source from the gate writer (approval-adapter) the same struct also
+// emits — the transport lane vocab declares for the pending namespace — kept
+// honest by the sanctioned-writer census. It MUST equal the writer internal/vocab
+// declares for conversation.pending.* (TestToolSourceMatchesVocabWriter checks it).
+const AdapterSource = "conversation-adapter"
 
 // The classifier's ROUTING output — stamped on the RUN by classify_intent
 // (group 2, subject-overridden to the run so handleMessage's dedup and the

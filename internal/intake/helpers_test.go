@@ -30,9 +30,10 @@ func cfg() admission.Config {
 type fakeResolver struct {
 	runID    string
 	approved bool
+	phase    string
 	err      error
 }
 
-func (f *fakeResolver) ResolveRunByRef(context.Context, string) (string, bool, error) {
-	return f.runID, f.approved, f.err
+func (f *fakeResolver) ResolveRunByRef(context.Context, string) (string, bool, string, error) {
+	return f.runID, f.approved, f.phase, f.err
 }

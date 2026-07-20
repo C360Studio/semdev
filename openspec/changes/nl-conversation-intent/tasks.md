@@ -56,27 +56,36 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 3. `handleMessage`: resolver phase getter, fast-path retained, NL bridge (design D4, D5)
 
-- [ ] 3.1 RED: `TestResolverSurfacesPhase` — the run resolver surfaces `agent.run.phase`
+- [x] 3.1 RED: `TestResolverSurfacesPhase` — the run resolver surfaces `agent.run.phase`
   (today it returns only `(runID, approved, err)`) so `handleMessage` can gate on
-  `awaiting_approval` (M7).
-- [ ] 3.2 RED: `TestExactApproveCommandStillDeterministic` — the whole-token `/semdev approve`
+  `awaiting_approval` (M7). DONE: `ResolveRunByRef` → `(runID, approved, phase, err)`;
+  callers/fakes (`intake/component.go`, both fakes) updated.
+- [x] 3.2 RED: `TestExactApproveCommandStillDeterministic` — the whole-token `/semdev approve`
   fast-path is BYTE-IDENTICAL (stamps `run.change.approved`, no pending, no classifier); the
-  migrated approval pins stay green.
-- [ ] 3.3 RED: `TestExactRejectCommandStampsRejected` — a whole-token `/semdev reject` stamps
+  migrated approval pins stay green. DONE: refactored into `releaseGate`/`stampGateFact`;
+  the test also pins zero classifier-ledger reads on the fast-path.
+- [x] 3.3 RED: `TestExactRejectCommandStampsRejected` — a whole-token `/semdev reject` stamps
   `run.change.rejected` deterministically (no model turn). (Cancellation is asserted in 5.x.)
-- [ ] 3.4 RED: `TestNonCommandAuthorizedGatedMessageStampsPending` — a non-command message
+  DONE (+ `TestExactRejectRefusedOnApprovedRun`: H1 — reject-on-approved is a no-op).
+- [x] 3.4 RED: `TestNonCommandAuthorizedGatedMessageStampsPending` — a non-command message
   from an AUTHORIZED author on an `awaiting_approval` run stamps
   `conversation.pending.{message-id,author,body}` and ACKs; an UNAUTHORIZED author, a
   NON-gated run (phase ≠ awaiting_approval), and a message whose id is already in
   `conversation.intent.classified` each stamp NOTHING (no model turn). (The spawn marker
   `conversation.classifier.dispatched` is the grp4 spawn RULE's, not handleMessage's — the
-  `dev.developer.dispatched` precedent: the rule stamps its own fire-once marker.)
-- [ ] 3.5 RED: `TestPendingDedupByAppendSetLedger` — dedup is against the MULTI-VALUED
+  `dev.developer.dispatched` precedent: the rule stamps its own fire-once marker.) DONE
+  (grp3-review M1 fold: the internal phase-gate precedes the external Authorize call, so
+  non-gated chatter never spends a code-host permission call).
+- [x] 3.5 RED: `TestPendingDedupByAppendSetLedger` — dedup is against the MULTI-VALUED
   `conversation.intent.classified` ledger (not single-valued latest-wins): a redelivered
-  NON-latest classified id is not re-stamped (MEDIUM-4); a genuinely new id is.
-- [ ] 3.6 Implement: the resolver phase getter; the exact-command fast-path (approve +
+  NON-latest classified id is not re-stamped (MEDIUM-4); a genuinely new id is. DONE
+  (+ `TestNonCommandLedgerReadFaultRedelivers`: a ledger read fault is transient).
+- [x] 3.6 Implement: the resolver phase getter; the exact-command fast-path (approve +
   reject); the authorized-non-command-gated → `conversation.pending.*` bridge (writer
-  `conversation-adapter`) with append-set-ledger dedup. The spawn marker is grp4's.
+  `conversation-adapter`) with append-set-ledger dedup. The spawn marker is grp4's. DONE:
+  added `conversationintent.AdapterSource` + `PendingBodyPredicate`; G5 ties in
+  `g5_writers_test.go` for all three pending predicates. Both reviewers APPROVE (zero
+  blocking/high); M1 + nits folded, M2/L4 carried into grp5 (5.3, 5.5).
 
 ## 4. The spawn rule + the intent-routing rules (design D3, D6)
 
@@ -104,13 +113,22 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 - [ ] 5.3 RED: `TestRejectCancelsGatedRunOnly` — a run-lifecycle rule fires
   `awaiting_approval → cancelled` on `run.change.rejected`, PHASE-GUARDED to
   `awaiting_approval` (H1: it must NOT fire the legal `executing→cancelled` edge on an
-  already-approved run); a bootstrap/rule-load pin covers the guard.
+  already-approved run); a bootstrap/rule-load pin covers the guard. **Cell-space
+  partition (grp3-review M2):** the exact-command fast-paths can leave a still-gated run
+  carrying BOTH gate facts, so the cancel rule MUST also carry `run.change.approved
+  length_eq 0` AND the existing RESUME rule (`run-lifecycle/02`) MUST gain
+  `run.change.rejected length_eq 0` — a run holding both facts transitions to NEITHER (a
+  safe park), never both. Add a rule-load pin asserting both mutual-exclusion guards.
 - [ ] 5.4 RED: `TestClassifierFaultPostsFallbackNote` — a faulted classifier terminal (no
   `conversation.intent`, `agent.loop.outcome` faulted) triggers a fallback-to-command note
   post; a confident `none` posts nothing (HIGH-3).
 - [ ] 5.5 RED: `TestOnlySanctionedGateWriters` — the G5 census: the ONLY Source of
   `run.change.approved`/`rejected` is `approval-adapter`, and both the fast-path and the
-  apply consumer route through one shared writer method (D11).
+  apply consumer route through one shared writer method (D11). Include the
+  `TestToolSourceMatchesVocabWriter` ties for BOTH gate predicates
+  (`approval-adapter`→`run.change.approved` and →`run.change.rejected`) — grp3-review L4
+  (the gate facts are adapter-stamped, so their Source↔vocab tie belongs with this D11
+  census, alongside the grp3 `conversation-adapter`→pending ties already added).
 - [ ] 5.6 Implement: the apply consumer (a declared jetstream input port on the
   conversation-channel component: gate-still-open → harness-bound Authorize → Post → stamp,
   transient-on-Post-failure) + the phase-guarded `run.change.rejected → cancelled`

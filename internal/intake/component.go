@@ -412,7 +412,7 @@ func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error 
 	recordID := AdmissionRecordEntityID(c.platform.Org, c.platform.Platform, in.IssueRef, deliveryID)
 	if err := RecordAdmission(ctx, c.creator, recordID, decision.Actor, in.IssueRef); err != nil {
 		if err == ErrAlreadyRecorded {
-			runID, _, rerr := c.resolver.ResolveRunByRef(ctx, in.IssueRef)
+			runID, _, _, rerr := c.resolver.ResolveRunByRef(ctx, in.IssueRef)
 			if rerr != nil {
 				atomic.AddInt64(&c.errors, 1)
 				return fmt.Errorf("intake: recorded admission but could not check for the run: %w", rerr) // redeliver
