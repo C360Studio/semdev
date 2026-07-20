@@ -43,33 +43,33 @@ review surface (Phase 3), NO non-GitHub `Read`, NO issue-discovery-by-poll, NO
 
 ## 3. The poller + config + XOR ownership (design D2, D4, D5, D6)
 
-- [ ] 3.1 RED: `TestPollerReadsAwaitingApprovalRunsAndReleasesGate` — a fake channel
+- [x] 3.1 RED: `TestPollerReadsAwaitingApprovalRunsAndReleasesGate` — a fake channel
   + fake resolver: the poller enumerates awaiting-approval runs, `Read`s each thread,
   feeds the fresh `/semdev approve` Message to the core → the gate is released; a
   second poll with NO new comments keeps the cursor STABLE and does NOT re-read (M2); a
   restart (empty cursor) re-reads + re-applies as a NO-OP (idempotent —
   `alreadyApproved`). Also pins: an enumeration/`Read` TRANSPORT ERROR is retried next
   tick (loop survives), NOT conflated with empty (review H2).
-- [ ] 3.2 RED: `TestListRunsAwaitingApproval` — the resolver enumerates runs at
+- [x] 3.2 RED: `TestListRunsAwaitingApproval` — the resolver enumerates runs at
   `agent.run.phase == awaiting_approval` and returns their `run.issue.ref` (read-only
   prefix query, G2 — never a lifecycle write) via `RequestClassified` (mirror
   `ResolveRunIDsByRef`); pin that a classified TRANSPORT ERROR PROPAGATES AS `err`, is
   NOT decoded as an empty slice (the ADR-060 silent-success shape; review H2), and that
   the enumeration is repo-scoped when `cfg.Repo` is bound (review L1).
-- [ ] 3.3 RED: `TestPollConfigXORsTheWebhookConsumer` — with `poll.enabled`, Start
+- [x] 3.3 RED: `TestPollConfigXORsTheWebhookConsumer` — with `poll.enabled`, Start
   wires the POLLER + the park consumer and SKIPS the `comment_events` webhook consumer;
   without it, the webhook consumer runs (today). The park-post consumer runs in BOTH.
   Also pins: `Validate`/`applyConfigDefaults` rejects a non-positive `poll.interval`
   and clamps to the ≥5s floor (review M4); `Stop` cancels the poll goroutine — it exits
   (review M5).
-- [ ] 3.4 Implement the poller (interval loop, in-memory `map[ThreadRef]Cursor` pruned
+- [x] 3.4 Implement the poller (interval loop, in-memory `map[ThreadRef]Cursor` pruned
   to the awaiting set each tick, awaiting-approval enumeration, `Read`→`handleMessage`;
   an enumerate/`Read` error is logged + retried next tick and never conflated with
   empty, never blocks; bound to a ctx `Stop` CANCELS) + the `poll` config block
   (`enabled`, `interval` default 15s, floor ≥5s) + `ListRunsAwaitingApproval`
   (`RequestClassified`, repo-scoped) on the resolver + the XOR wiring in Start + the
   LOUD active-inbound-mode startup log (review H1).
-- [ ] 3.5 The boot coherence guard (review H1): `internal/boot` (it assembles the full
+- [x] 3.5 The boot coherence guard (review H1): `internal/boot` (it assembles the full
   bootstrap and sees both component blocks) fails closed / loud-warns when issue-intake
   `http_port == 0` AND conversation-channel `poll.enabled == false` — the silent
   dead-approval-lane combination. RED-first: a pin over the assembled bootstrap.

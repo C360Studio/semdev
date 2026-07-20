@@ -696,6 +696,16 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 		return nil, err
 	}
 
+	// Boot coherence guard (pull-first-transport H1): warn LOUDLY if the assembled
+	// bootstrap leaves the /semdev approve lane unreachable (no webhook receiver AND
+	// poll off) — the silent dead-approval-lane combo the two component blocks can't
+	// see individually. Loud-warn, not fail-closed: a harness/external publisher can
+	// still feed the stream directly (the shipped default + journeys do).
+	if reachable, detail := inboundApprovalReachable(cfg); !reachable {
+		logger.Warn("conversation approval lane may be unreachable (pull-first-transport H1): "+detail,
+			slog.String("config", opts.ConfigPath))
+	}
+
 	natsClient, err := connectRuntimeNATS(ctx, opts.NATSURLs, cfg)
 	if err != nil {
 		return nil, err

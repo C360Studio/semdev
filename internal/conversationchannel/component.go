@@ -70,6 +70,55 @@ type ComponentConfig struct {
 	// messages and to run collaborator permission checks (default GITHUB_TOKEN,
 	// the dotenv lane).
 	TokenEnv string `json:"token_env,omitempty" schema:"type:string,description:Env var NAME holding the forge token for posting + collaborator permission checks.,category:basic"`
+
+	// APIBase overrides the forge REST endpoint (the e2e forge double); "" = GitHub.
+	// Both the Channel's Read (poll transport) and the collaborator checker ride it.
+	APIBase string `json:"api_base,omitempty" schema:"type:string,description:Forge REST API base override (e2e double); empty = api.github.com.,category:basic"`
+
+	// Poll configures the PULL-FIRST inbound transport (pull-first-transport). When
+	// enabled the component POLLS each awaiting-approval run's thread for the
+	// /semdev approve comment instead of consuming webhook comment events — the
+	// webhook-unreachable deployment (dev box / behind NAT). Nil/disabled = webhook
+	// mode (today). A comment lane is EITHER polled OR webhook-fed, never both (B-1).
+	Poll *PollConfig `json:"poll,omitempty" schema:"type:object,description:Pull-first poll transport (enabled + interval); when enabled the poller replaces the webhook comment consumer.,category:basic"`
+}
+
+// PollConfig is the pull-first poll transport's config block.
+type PollConfig struct {
+	// Enabled turns on the poller (and, structurally, skips the webhook comment
+	// consumer — B-1). A pull-first deployment pairs this with issue-intake
+	// http_port 0 (no receiver); a webhook deployment leaves it off.
+	Enabled bool `json:"enabled,omitempty" schema:"type:bool,description:Poll the thread for approval comments instead of consuming webhook comment events.,category:basic"`
+	// Interval is the poll cadence as a duration (default 15s; a positive value
+	// below the 5s floor is clamped up; a non-positive/unparseable value is rejected
+	// at Validate — a mis-set 0 must not become a ListComments rate-limit storm, M4).
+	Interval string `json:"interval,omitempty" schema:"type:string,description:Poll interval duration (default 15s; floor 5s).,category:basic"`
+}
+
+// Poll cadence bounds (pull-first-transport D6).
+const (
+	defaultPollInterval = 15 * time.Second
+	minPollInterval     = 5 * time.Second
+)
+
+// pollEnabled reports whether the pull-first poll transport is on.
+func (c *ComponentConfig) pollEnabled() bool { return c.Poll != nil && c.Poll.Enabled }
+
+// pollInterval resolves the poll cadence: the parsed interval clamped to the floor,
+// or the default when unset/invalid. applyConfigDefaults + Validate have already
+// defaulted and floor-clamped a valid config, so on the live path this just parses.
+func (c *ComponentConfig) pollInterval() time.Duration {
+	if c.Poll == nil || c.Poll.Interval == "" {
+		return defaultPollInterval
+	}
+	d, err := time.ParseDuration(c.Poll.Interval)
+	if err != nil || d <= 0 {
+		return defaultPollInterval
+	}
+	if d < minPollInterval {
+		return minPollInterval
+	}
+	return d
 }
 
 // Validate requires the jetstream input ports — a consumer-less lane would start
@@ -78,6 +127,16 @@ type ComponentConfig struct {
 func (c *ComponentConfig) Validate() error {
 	if c.Ports == nil || len(c.Ports.Inputs) == 0 {
 		return errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "Validate", "ports configuration with the comment + user.response inputs is required")
+	}
+	// A non-positive or unparseable poll interval must fail LOUD, not silently
+	// become a tight ListComments loop (review M4). applyConfigDefaults has already
+	// defaulted an empty interval and clamped a sub-floor positive, so only a
+	// genuinely bad value ("0s", "-5s", "garbage") reaches here unhealed.
+	if c.pollEnabled() {
+		if d, err := time.ParseDuration(c.Poll.Interval); err != nil || d <= 0 {
+			return errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "Validate",
+				"poll.interval must be a positive duration (e.g. 15s)")
+		}
 	}
 	return nil
 }
@@ -114,11 +173,13 @@ type Component struct {
 	nats     *natsclient.Client
 	approv   *approvalAdapter
 	parkpost *parkPoster
+	pollLoop *poller // nil in webhook mode; the pull-first inbound transport in poll mode
 	logger   *slog.Logger
 
-	mu        sync.RWMutex
-	started   bool
-	startTime time.Time
+	mu         sync.RWMutex
+	started    bool
+	startTime  time.Time
+	pollCancel context.CancelFunc // cancels the poll goroutine on Stop (M5); guarded by mu
 
 	eventsConsumed int64
 	errors         int64
@@ -158,6 +219,9 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 	var channel conversation.Channel
 	if token := strings.TrimSpace(os.Getenv(cfg.TokenEnv)); token != "" {
 		client := github.NewClient(token).WithLogger(logger)
+		if cfg.APIBase != "" {
+			client = client.WithBaseURL(cfg.APIBase)
+		}
 		checker = client
 		channel = conversation.NewGitHubChannel(client)
 	} else {
@@ -177,6 +241,20 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		fetcher: admission.NewNATSEntityFetcher(deps.NATSClient),
 		logger:  logger,
 	}
+	// Pull-first poll transport (pull-first-transport D2): the poller Reads each
+	// awaiting-approval thread through the SAME channel + feeds the SAME approval
+	// core (handleMessage) the webhook consumer uses. It needs a channel to Read, so
+	// poll mode with no forge token is a fail-closed wiring error (a dead lane, not a
+	// silent degrade — the boot guard catches the http_port-0 + poll-off combo, this
+	// catches poll-on + no-token).
+	if cfg.pollEnabled() {
+		if channel == nil {
+			return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor",
+				"poll mode requires a forge token (to read the thread for approval comments) but none is set in "+cfg.TokenEnv)
+		}
+		lister := admission.NewRunResolver(deps.NATSClient, deps.Platform.Org, deps.Platform.Platform)
+		c.pollLoop = newPoller(channel, lister, c.approv.handleMessage, cfg.Repo, cfg.pollInterval(), logger)
+	}
 	return c, nil
 }
 
@@ -189,6 +267,16 @@ func applyConfigDefaults(cfg *ComponentConfig) {
 	}
 	if cfg.TokenEnv == "" {
 		cfg.TokenEnv = "GITHUB_TOKEN"
+	}
+	// Poll cadence defaults + floor clamp (M4): default an unset interval; clamp a
+	// positive-but-sub-floor value up to the floor. A non-positive/unparseable value
+	// is left as-is so Validate rejects it loudly (never a silent tight loop).
+	if cfg.pollEnabled() {
+		if cfg.Poll.Interval == "" {
+			cfg.Poll.Interval = defaultPollInterval.String()
+		} else if d, err := time.ParseDuration(cfg.Poll.Interval); err == nil && d > 0 && d < minPollInterval {
+			cfg.Poll.Interval = minPollInterval.String()
+		}
 	}
 }
 
@@ -227,17 +315,51 @@ func (c *Component) Start(ctx context.Context) error {
 		return err
 	}
 
-	for _, port := range c.config.Ports.Inputs {
-		if port.Type != "jetstream" || port.Subject == "" {
-			continue
-		}
+	for _, port := range c.activeConsumerPorts() {
 		if err := c.setupConsumer(ctx, port); err != nil {
 			return fail(err)
 		}
 	}
 
-	c.logger.Info("conversation-channel started", slog.String("repo", c.config.Repo))
+	// The pull-first inbound transport (poll mode): launch the poller on a context
+	// this component CANCELS on Stop (M5). Log the ACTIVE inbound mode LOUDLY (H1a):
+	// the dangerous combo — no webhook receiver AND poll off — is a silent
+	// dead-approval lane the component cannot see alone (the receiver is a different
+	// component's knob); boot's coherence guard (inboundApprovalReachable) catches it,
+	// and this log makes the per-component mode diagnosable.
+	if c.config.pollEnabled() {
+		pollCtx, cancel := context.WithCancel(ctx)
+		c.mu.Lock()
+		c.pollCancel = cancel
+		c.mu.Unlock()
+		go c.pollLoop.run(pollCtx)
+		c.logger.Info("conversation-channel: poll ENABLED — pull-first inbound transport (webhook comment consumer SKIPPED)",
+			slog.Duration("interval", c.config.pollInterval()), slog.String("repo", c.config.Repo))
+	} else {
+		c.logger.Info("conversation-channel: poll DISABLED — approval requires an inbound webhook receiver (webhook mode)",
+			slog.String("repo", c.config.Repo))
+	}
 	return nil
+}
+
+// activeConsumerPorts returns the input ports Start wires as durable consumers. In
+// POLL mode it EXCLUDES the webhook comment lane (SubjectComment) — the poller owns
+// inbound comments, so a comment is never double-processed (the XOR, B-1). The
+// park-post lane (user.response) runs in BOTH modes (it is the outbound park lane,
+// orthogonal to the inbound comment transport).
+func (c *Component) activeConsumerPorts() []component.PortDefinition {
+	pollMode := c.config.pollEnabled()
+	var out []component.PortDefinition
+	for _, port := range c.config.Ports.Inputs {
+		if port.Type != "jetstream" || port.Subject == "" {
+			continue
+		}
+		if pollMode && port.Subject == admission.SubjectComment {
+			continue
+		}
+		out = append(out, port)
+	}
+	return out
 }
 
 // setupConsumer creates a durable consumer for one input port (the agentic-tools
@@ -305,11 +427,19 @@ var _ admission.PermissionChecker = (*github.Client)(nil)
 
 // --- lifecycle + discovery boilerplate ---
 
-// Stop unwinds the consumers with the client.
+// Stop unwinds the consumers with the client and CANCELS the poll goroutine (M5):
+// today's Stop only flipped `started`, which would leak the poller — it would keep
+// polling + re-authorizing after shutdown. Capturing and calling the cancel here is
+// what actually stops it.
 func (c *Component) Stop(_ time.Duration) error {
 	c.mu.Lock()
 	c.started = false
+	cancel := c.pollCancel
+	c.pollCancel = nil
 	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 

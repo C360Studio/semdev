@@ -4,11 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/natsclient"
 )
+
+// PhaseAwaitingApproval is the run phase at the change-approval gate — the phase
+// the poll transport enumerates (pull-first-transport D2). It is a framework
+// phase VALUE (agentrun's state machine) semdev READS, never writes (G2). The
+// PREDICATE is agentrun.PhasePredicate ("agent.run.phase").
+const PhaseAwaitingApproval = "awaiting_approval"
+
+// classifiedRequester is the classified request/response surface the resolver's
+// read-only prefix queries need — *natsclient.Client satisfies it. Abstracting it
+// (rather than holding the concrete client) makes the enumeration unit-testable and
+// keeps the ADR-060 contract pinnable offline: a classified ERROR body must
+// PROPAGATE as err, never decode as a zero-valued empty response.
+type classifiedRequester interface {
+	RequestClassified(ctx context.Context, subject string, data []byte, timeout time.Duration) ([]byte, error)
+}
 
 // ApprovedPredicate is the change-approval fact the approval adapter stamps on the
 // run and the resume rule (run-lifecycle/02) matches. It lives here because BOTH
@@ -31,7 +48,7 @@ type RunResolver interface {
 // (the framework's lesson-reader pattern): list this platform's
 // chain-execution entities, match run.issue.ref.
 type NATSRunResolver struct {
-	client *natsclient.Client
+	client classifiedRequester
 	// prefix is the 5-part chain namespace {org}.{platform}.agent.chain.execution.
 	prefix string
 }
@@ -130,6 +147,76 @@ func (r *NATSRunResolver) ResolveRunIDsByRef(ctx context.Context, ref string) ([
 		cursor = resp.NextCursor
 	}
 	return nil, fmt.Errorf("run-id enumeration exceeded %d pages", maxRunPages)
+}
+
+// ListRunsAwaitingApproval returns the run.issue.ref of every run at
+// agent.run.phase == PhaseAwaitingApproval (the change-approval gate) — the threads
+// the poll transport reads (pull-first-transport D2). A read-only graph prefix query
+// (G2 — never a lifecycle write). When repo is bound ("owner/name"; "" = all) the
+// enumeration is scoped to that repo's refs, so the poller never reads a foreign
+// thread it cannot access (review L1). A run with no ref yet is skipped (its thread
+// is not locatable).
+//
+// It uses RequestClassified so a classified ERROR body PROPAGATES as err and is NEVER
+// decoded as a zero-valued (empty) response (review H2, the ADR-060 silent-success
+// class): an empty Entities on a real fault would read as "no runs awaiting", the
+// poller would idle, and a run would park at awaiting_approval forever — silently.
+func (r *NATSRunResolver) ListRunsAwaitingApproval(ctx context.Context, repo string) ([]string, error) {
+	var refs []string
+	cursor := ""
+	for page := 0; page < maxRunPages; page++ {
+		req := graph.PrefixQueryRequest{Prefix: r.prefix, Cursor: cursor}
+		data, err := json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+		respData, err := r.client.RequestClassified(ctx, "graph.ingest.query.prefix", data, 5*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("prefix query: %w", err)
+		}
+		var resp graph.PrefixQueryResponse
+		if err := json.Unmarshal(respData, &resp); err != nil {
+			return nil, fmt.Errorf("decode prefix response: %w", err)
+		}
+		for i := range resp.Entities {
+			e := &resp.Entities[i]
+			var awaiting bool
+			var ref string
+			for _, tr := range e.Triples {
+				switch tr.Predicate {
+				case agentrun.PhasePredicate:
+					if s, ok := tr.Object.(string); ok && s == PhaseAwaitingApproval {
+						awaiting = true
+					}
+				case "run.issue.ref":
+					if s, ok := tr.Object.(string); ok {
+						ref = s
+					}
+				}
+			}
+			if awaiting && ref != "" && refInRepo(ref, repo) {
+				refs = append(refs, ref)
+			}
+		}
+		if resp.NextCursor == "" {
+			return refs, nil
+		}
+		cursor = resp.NextCursor
+	}
+	return nil, fmt.Errorf("awaiting-approval enumeration exceeded %d pages", maxRunPages)
+}
+
+// refInRepo reports whether ref ("owner/repo#number") belongs to repo ("owner/name";
+// "" matches every repo) — the poll enumeration's repo scope (L1).
+func refInRepo(ref, repo string) bool {
+	if repo == "" {
+		return true
+	}
+	owner, name, _, err := SplitRef(ref)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(repo), owner+"/"+name)
 }
 
 // NewRunResolver builds the graph-backed ref→run resolver over a live NATS client — the seam
