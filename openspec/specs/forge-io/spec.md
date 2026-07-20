@@ -14,6 +14,14 @@ normalize it into an issue fact that the arc consumes. The arc SHALL depend only
 on the normalized fact, never on a specific host's API shape. GitHub is the v1
 adapter.
 
+The intake lane SHALL run as a registered runtime component: it consumes the
+webhook input's issue events from the durable stream, normalizes them, applies
+the admission gate (authorized, opted-in actors — zero model tokens for
+rejects), and on admission publishes the coordinator wake through the same
+front-door contract the journeys prove. The admitted issue's host-neutral ref
+SHALL land on the run as `run.issue.ref` by its declared single writer once
+the run exists; no product Go fires the run-creating transition itself.
+
 The coordinator wake built from an admitted issue SHALL carry the issue's
 actor-attributed authored content (the text the admission invariant binds to the
 event's actor) alongside the host-neutral issue ref, bounded in length. The
@@ -40,6 +48,16 @@ produces a wake that names the ref alone, exactly as before.
 - **WHEN** an admitted event carries no actor-attributed authored text
 - **THEN** the wake prompt names the issue ref and carries no fabricated content
 
+#### Scenario: A live webhook event drives the arc without a test harness
+- **WHEN** the running intake component receives an admitted issue event on the webhook lane
+- **THEN** it publishes the coordinator wake with no journey or test code in the path
+- **AND** a rejected event publishes no wake and spends zero model tokens
+
+#### Scenario: The intake component is registered, not bespoke
+- **WHEN** the runtime boots from the bootstrap config
+- **THEN** the intake component is a registered component with a registry entry
+- **AND** its framework-alignment note records why a component (not a rule alone) is required
+
 ### Requirement: Host adapter is swappable behind the seam
 
 The comms/host boundary SHALL be a channel-agnostic seam. Adding or replacing a
@@ -56,12 +74,14 @@ WHEN a run reaches the `open_pr` action, the configured adapter SHALL create a
 real pull request on the configured forge whose description carries the run's
 evidence summary (what was verified, how, and where the full trajectory lives)
 and SHALL record `delivery.pr.ref`. A local stand-in reference (e.g.
-`local-delivery:<run>`) SHALL NOT satisfy this requirement. Delivery SHALL be
-idempotent: a replayed or restarted delivery looks up the run's existing pull
-request before creating, so no run double-opens. An M0-completion claim SHALL
-require at least one recorded real-forge delivery in the evidence ledger;
-protocol-faithful test doubles satisfy e2e journeys but not the completion
-claim.
+`local-delivery:<run>`) SHALL NOT satisfy this requirement, and the stand-in
+code path SHALL NOT exist once this requirement is implemented. Delivery SHALL
+be idempotent at BOTH layers: the graph-side read-before-create replay guard,
+AND a forge-level guard (querying the forge for an existing pull request by
+the run's head branch) so a concurrent double-fire cannot double-open. An
+M0-completion claim SHALL require at least one recorded real-forge delivery in
+the evidence ledger; protocol-faithful test doubles satisfy e2e journeys but
+not the completion claim.
 
 #### Scenario: open_pr creates an evidence-bearing PR
 - **WHEN** the `open_pr` action fires for a verified run
@@ -73,9 +93,18 @@ claim.
 - **THEN** the adapter finds the existing pull request and records the same `delivery.pr.ref`
 - **AND** no second pull request is created
 
+#### Scenario: Concurrent delivery cannot double-open at the forge
+- **WHEN** two deliveries race past the graph-side guard for the same run
+- **THEN** the forge-level head-branch query resolves them to one pull request
+
 #### Scenario: A local stub cannot claim delivery
 - **WHEN** a delivery records a local stand-in reference instead of a forge pull request
 - **THEN** the requirement is unmet and no M0-completion claim may cite the run
+
+#### Scenario: Journeys speak the real protocol against a local double
+- **WHEN** an e2e journey drives delivery
+- **THEN** it exercises the real adapter request shapes against a protocol-faithful local forge double
+- **AND** no journey depends on a live forge
 
 ### Requirement: Human communication rides the seam
 
@@ -83,10 +112,30 @@ Questions to humans SHALL be posted as issue/PR comments through the adapter, an
 a human reply SHALL re-enter as a normalized `human.opt.signal` fact keyed to the
 run. The arc SHALL NOT contain a bespoke chat surface.
 
+The change-approval human gate SHALL be operable from the issue: an authorized
+actor's approval signal (the v1 signal is settled in the design; it binds to
+ITS actor per the admission Event invariant) SHALL land as `run.change.approved`
+on the run through the approval adapter — the same fact, source, and placement
+the resume rule already consumes. A parked run's `run.awaiting.human` message
+SHALL reach the human as an issue comment through the adapter.
+
 #### Scenario: ask_human posts a comment and resumes on reply
 - **WHEN** the `ask_human` action fires for a parked run
 - **THEN** the adapter posts the question as an issue/PR comment
 - **AND** a human reply re-enters as a `human.opt.signal` fact that lets a rule resume the run
+
+#### Scenario: An authorized approval on the issue releases the gate
+- **WHEN** an authorized actor issues the approval signal on the admitted issue
+- **THEN** the approval adapter records `run.change.approved` on the run
+- **AND** the existing resume rule advances the run with no journey stand-in write
+
+#### Scenario: An unauthorized approval signal is ignored
+- **WHEN** an actor without authorization issues the approval signal
+- **THEN** no `run.change.approved` lands and the run stays gated
+
+#### Scenario: A parked run surfaces its message on the issue
+- **WHEN** a run records `run.awaiting.human`
+- **THEN** the adapter posts the park message as an issue comment naming what the human must decide
 
 ### Requirement: Intake is gated to authorized, opted-in actors
 
@@ -118,4 +167,59 @@ reply.
 #### Scenario: Only the authorizing requester steers a run's human gate
 - **WHEN** a comment answering a run's `ask_human` question arrives from an actor other than that run's authorized requester
 - **THEN** it is not routed to the run's human-response gate
+
+### Requirement: The forge provides the run's source at its coordinate
+
+The code-host seam SHALL provide a read-only CLONE lane: given a run's host-neutral
+coordinate (`owner/repo#N`), the configured forge adapter SHALL make that
+repository's source available at its default branch, scoped to the configured forge
+base URL and authenticated with the configured token. GitHub is the v1 adapter, and
+the lane SHALL depend only on the host-neutral coordinate and the adapter seam, never
+on a host-specific payload shape (the same swappability the intake and delivery lanes
+hold).
+
+The lane SHALL fail closed: an unknown or unreachable repository, an authentication
+fault, or a clone failure SHALL surface as an error toward the operator (the run
+parks), never a partial or guessed source.
+
+The configured token SHALL NOT appear in any process argument the clone shells to
+(no credential in a command line visible to the host's process listing); it SHALL be
+supplied only through the subprocess environment.
+
+#### Scenario: A coordinate resolves to a cloned source
+- **WHEN** the clone lane is asked for the source of a run whose coordinate names an
+  accessible repository
+- **THEN** the adapter provides that repository's source at its default branch
+- **AND** the source feeds the run's provisioning pipeline
+
+#### Scenario: An unreachable or unauthorized repository fails closed
+- **WHEN** the clone lane targets a repository that does not exist, is unreachable, or
+  rejects the configured token
+- **THEN** the lane returns an error toward the operator and the run parks
+- **AND** no partial or guessed source is materialized
+
+#### Scenario: The token never rides a process argument
+- **WHEN** the clone lane authenticates to a private forge
+- **THEN** the token is passed only through the subprocess environment
+- **AND** it appears in no argument of any command the lane executes
+
+### Requirement: The forge provides an issue's authored content on demand
+
+The code-host seam SHALL provide a read-only ISSUE lane: given a run's host-neutral
+coordinate (`owner/repo#N`), the configured forge adapter SHALL return that issue's
+actor-attributed authored content (title and body). This is the content channel for a
+front door that has no webhook payload to draw from (the operator launch driver): the
+wake it composes SHALL carry the issue's real authored content, exactly as the webhook
+front door carries the payload's content, so the arc never authors against an empty
+ask. The lane SHALL depend only on the host-neutral coordinate and the adapter seam.
+
+#### Scenario: The launch front door reads real issue content
+- **WHEN** the operator launch driver builds a wake for a coordinate
+- **THEN** it fetches that issue's authored content through the forge issue lane
+- **AND** the wake carries that content, not an empty ask
+
+#### Scenario: An unreadable issue fails closed
+- **WHEN** the issue lane targets an issue that does not exist or is unreachable
+- **THEN** the lane returns an error toward the operator and no run is launched
+- **AND** no wake carrying fabricated or empty content is published
 
