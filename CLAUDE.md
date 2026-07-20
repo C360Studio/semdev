@@ -79,16 +79,29 @@ ever runs the lesson lifecycle rulepack, its bootstrap must mirror `lessonRecord
 OpenSpec changes on the `m0-walking-skeleton-spine` branch (draft PR):
 `m0-walking-skeleton-spine` (the arc + evidence spine), `containerized-sandbox-dev-loop`
 (the real sandbox + cold clean-room verify), `simplify-m0-execution-rail` (the
-rule-native execution rail), and `station-failure-parks` (M2's first unattended-safety
-floor, IMPLEMENTED: the station harness stamps `station.dispatch.failed` on
-retries-exhausted [shutdown-abort deliberately unstamped — no false terminal], the two
-run-lifecycle park rules [05 run-fired on the chain grammar / 06 loop-fired on the
-agentic-loop grammar, split PINNED by the dispatch-entity census — validation turned out
-LOOP-fired, correcting D2's sketch] record `run.awaiting.human` naming the station + its
-refusal; graph `triple.add` pinned live as unconditional APPEND; run 1's projection-refusal
-shape is now the RED-first-verified journey `TestBridgeProofStationFailureParks` — the
-class that silently stalled run 1 now parks toward the human). ARCHIVED (implemented +
-specs synced):
+rule-native execution rail), and `forge-io-real-lanes` (M2's forge seam made REAL,
+IMPLEMENTED except the operator-gated live-forge run [task 5.4]: the `issue-intake`
+component owns BOTH webhook halves — the framework RETIRED its github-webhook input in
+beta.147, so semdev owns the receiver [HTTP+HMAC+flatten→the semdev-declared GITHUB
+stream, delivery-GUID dedup] AND the durable consumer [Normalize → the admission gate →
+the admission-record entity (`intake.actor.admitted` finally stamped, content-derived ID
+= idempotency backstop) → the coordinator wake]; the wake's TaskID is now the BARE issue
+ref and `coordinator/04-stamp-issue-ref` stamps `run.issue.ref` rule-owned (RED/GREEN
+journey-verified); the approval gate is operable FROM the issue [`/semdev approve`
+comment → the approval adapter → the exact stand-in fact, proven end-to-end by
+`TestBridgeProofWebhookIssueToApprovedRun` with NO stand-in writes]; park messages post
+as issue comments [the intake component's USER-stream consumer]; and delivery is REAL —
+the `local-delivery:` stub is DELETED, `openpr.Delivery` pushes the RECORDED verified
+`attempt.commit.sha` [never HEAD] and creates-or-adopts the evidence-bearing PR
+[query-by-head FIRST — doubly idempotent], every journey now delivers against a
+protocol-faithful local forge double + a REAL bare-git-remote push, and an unconfigured
+forge fails closed into the station-failure park. Both reviewers approve zero
+blocking/high, all findings applied. The M0-completion claim still awaits the ONE
+recorded live-forge delivery — operator-gated, tracked as task 5.4). ARCHIVED
+(implemented + specs synced): `station-failure-parks` (M2's first unattended-safety
+floor: `station.dispatch.failed` harness-stamped on retries-exhausted, the run-/loop-fired
+park rules, the dispatch-entity census, the RED-first `TestBridgeProofStationFailureParks`
+journey — the class that silently stalled real-LLM run 1 now parks toward the human),
 `migrate-semstreams-beta147`, `adopt-per-task-routing-budgets` (#568 per-task attempt
 budgets, shipped `79a884a`), `adopt-reason-aware-escalate` (#529/#569 transient grace
 via the atomic-mirror classification, shipped `56b30a4` — the rule-engine double-dispatch

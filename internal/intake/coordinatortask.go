@@ -54,8 +54,15 @@ func CoordinatorTask(in Intake, model string) (*agentic.TaskMessage, error) {
 		return nil, fmt.Errorf("intake: coordinator task needs a non-empty model")
 	}
 
+	// TaskID is the BARE host-neutral ref (forge-io-real-lanes D2 as-built): the
+	// framework stamps it verbatim on the coordinator loop as agent.loop.task,
+	// and the issue-ref rule substitutes that triple onto the minted run as
+	// run.issue.ref — a prefix here would be stamped into the graph (rule
+	// substitution cannot strip it). Nothing binds on a prefix (verified at the
+	// D2 settlement); the front-door loop is discriminated by its
+	// coordinator.decision.next-action=issue_intake decision, not the TaskID.
 	task := &agentic.TaskMessage{
-		TaskID:     "intake:" + ref,
+		TaskID:     ref,
 		Role:       coordinatorRole,
 		Model:      model,
 		Prompt:     coordinatorPrompt(ref, in.Event.AuthoredText),

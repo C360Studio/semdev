@@ -130,6 +130,64 @@ names — `GITHUB_TOKEN` via the dotenv lane; never a token in config). The
 env-gated live journey pattern (SEMDEV_REAL_LLM's gate discipline) applies to
 any test that would touch the live forge.
 
+## As-built settlements (group 1 verification, 2026-07-19)
+
+**1.1 — THE FRAMEWORK WEBHOOK INPUT NO LONGER EXISTS.** The design's Context
+("the framework `github_webhook` input's `github.event.issue` subjects") was a
+pre-beta.147 fossil: `input/github-webhook` — the FULL receiver (HTTP listener,
+HMAC-SHA256 validation, event filter, flatten, publish `github.event.*`) — was
+DELETED in the beta.147 boundary wave (semstreams `a533306e`, ADR-075), and the
+sister-repo cutover checklist (semstreams docs/operations/31) explicitly
+transfers ownership to semdev: "own the GitHub executors, webhook types, and
+workflow/rule policy," with the two flattened-payload gaps transferred as
+SEMDEV backlog (#2 comment parent number/id, #3 specific added/removed label)
+— they are OURS to close, not upstream asks. Consequences:
+- D1 grows the RECEIVER half: the intake component owns BOTH the HTTP receiver
+  (HMAC, event filter, flatten → publish `github.event.*` onto the GITHUB
+  stream, which semdev's bootstrap must now DECLARE — the framework no longer
+  brings it) and the durable consumer (Normalize → Decide → wake). One
+  component, two lanes; the removed framework component is the receiver's
+  reference shape.
+- Task 2.5's journey shape is exactly right: publish RAW `github.event.*`
+  payloads onto the GITHUB stream (no HTTP) to drive the consumer half; the
+  receiver half gets unit pins (HMAC accept/reject, flatten shape). Live HTTP
+  stays env-gated/manual.
+- Task 3.4's condition RESOLVES: the payload shape is semdev-defined now, so
+  the comment-event flattening CAN carry the issue number — no upstream ask.
+
+**1.2 — D2 SETTLED: the loop-entity rule route; the mint-rule add_triple route
+is impossible.** Verified in the engine (`processor/rule/actions.go`
+run_scope=new): the mint passes ONLY org/platform/firing-loop-ID to the
+lifecycle manager — publish_agent `properties` never reach the run entity, and
+the run's ID is not substitutable at mint-rule fire time. Settled route:
+- `intake.CoordinatorTask` TaskID becomes the BARE ref (`owner/repo#number`,
+  dropping the `intake:` prefix — verified: nothing binds on it; the journeys
+  bind on the returned TaskID transparently). The framework stamps
+  `agent.loop.task` = the ref on the front-door coordinator loop.
+- A new coordinator-pack rule stamps `run.issue.ref` =
+  `$entity.triple.agent.loop.task.value` onto
+  `$entity.triple.agent.run.entity-id`, gated on
+  `coordinator.decision.next-action eq issue_intake` — the ONLY coordinator
+  loops with that decision are front-door intake loops, so the rewake/authoring
+  coordinators (whose agent.loop.task is a rule-minted task id, NOT a ref) can
+  never mis-stamp. Ref add FIRST, one-shot marker second (the
+  station-failure-parks park-first lesson: a marker-set-ref-absent crash window
+  would strand a ref-less run; the re-fire this allows appends a benign
+  duplicate identical triple).
+- G9 cost: one marker predicate (`run.issue.stamped`); `run.issue.ref`'s vocab
+  writer moves to the rule-pack name exactly as the mint rule's
+  `deferred_issue_ref` metadata planned.
+
+**D3 SETTLED (per 1.1): v1 approval = the comment command `/semdev approve`.**
+semdev's OWN flattener defines the comment payload: issue number + comment
+author + body + sender (closing transferred backlog #2 for this flow).
+Attribution: the sender==comment-author guard (the same Event-invariant shape
+`opened` uses). Authorization reuses the admission core (`authorize`:
+allowlist, else push-capable collaborator via the github client). Run
+resolution: prefix-list `*.*.agent.chain.execution.*` via
+`graph.ingest.query.prefix` (the framework's lesson-reader pattern), filter
+`run.issue.ref` == the ref.
+
 ## Risks / Trade-offs
 
 - **[Upstream flattened-payload gaps constrain the approval signal]** →
@@ -149,6 +207,19 @@ any test that would touch the live forge.
 - **[Two changes touch the mint rule]** (this one's D2 `add_triple` and
   station-failure-parks' rules pack) → both are additive `on_enter` items in
   different rule files; implementation order free, noted for the reviewers.
+
+- **[Park→comment lane has no wire-level proof]** (review LOW, tracked not
+  fixed): the user.response consumer + posting are unit-pinned only; every
+  journey runs it commenter-less (no token), so a subject-filter regression
+  would be invisible (posting is best-effort by design; the park fact stays
+  durable + graph-visible). Named follow-up: a small NATS-backed integration —
+  publish user.response.X onto USER, assert the double records create_comment.
+- **[Token rides `git push` argv]** (review LOW, tracked not fixed): the
+  credentialed https push URL is a process argument, visible in `ps` for the
+  push's duration on the semdev host itself. Threat model is own-host at M2;
+  the clean fix is env-injected git config (`GIT_CONFIG_COUNT` /
+  `http.extraHeader`) which needs a small env extension on `cliexec.Runner` —
+  named follow-up, not this change.
 
 ## Migration Plan
 

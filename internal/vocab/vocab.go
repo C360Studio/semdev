@@ -65,6 +65,11 @@ const semsourceAB = "integrate-semsource-ab-harness"
 // retries-exhausted and a park rule records run.awaiting.human from it.
 const parks = "station-failure-parks"
 
+// forgeIO is the change slug that makes the forge seam real (M2): the
+// issue-intake component on the webhook lane, the rule-owned run.issue.ref,
+// the comment approval adapter, park-message comments, and real PR delivery.
+const forgeIO = "forge-io-real-lanes"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -73,7 +78,23 @@ const parks = "station-failure-parks"
 var Predicates = []Predicate{
 	{"intake.actor.login", "admission-check", "forge-io", m0},
 	{"intake.actor.admitted", "admission-check", "forge-io", m0},
-	{"run.issue.ref", "issue-intake-adapter", "forge-io", m0},
+	// intake.event.ref correlates an admission record (the intake component's
+	// per-admitted-event evidence entity, forge.intake.event grammar) to its
+	// issue. Deliberately DISTINCT from run.issue.ref: that predicate lives on
+	// the RUN with a rule writer — sharing it would give one fact two writers (G5).
+	{"intake.event.ref", "admission-check", "forge-io", forgeIO},
+	// run.issue.ref moved to its RULE writer exactly as the mint rule's
+	// deferred_issue_ref metadata planned (forge-io-real-lanes D2 as-built):
+	// the run does not exist at wake time, so the intake component cannot stamp
+	// it — the coordinator-pack issue-ref rule (04) substitutes the front-door
+	// loop's agent.loop.task (= the BARE issue ref, the wake's TaskID) onto the
+	// minted run via the agent.run.entity-id anchor.
+	{"run.issue.ref", "issue-ref-rule", "forge-io", m0},
+	// run.issue.stamped is the issue-ref rule's fired-once self-extinguish
+	// marker on the FIRING front-door loop (the rule's write target — the run —
+	// is invisible to the loop's conditions, so the marker is the extinguisher;
+	// ref-first ordering per the station-failure-parks park-first lesson).
+	{"run.issue.stamped", "issue-ref-rule", "forge-io", forgeIO},
 	{"run.change.approved", "approval-adapter", "forge-io", m0},
 	// experiment.run.condition is the A/B EVIDENCE LABEL (integrate-semsource-ab-harness, D3):
 	// stamped once on the run at mint by the launch path (writer experiment-intake, G5) from

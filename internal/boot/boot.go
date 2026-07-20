@@ -22,6 +22,7 @@ import (
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/semsource"
+	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station/delivery"
 	"github.com/c360studio/semdev/internal/station/floors"
@@ -73,7 +74,9 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	}
 	// Self-sufficient R6 stations (publish-triggered, zero model turns) — deps build
 	// from the NATS client via component.Dependencies at component-manager start.
-	if err := delivery.Register(reg); err != nil {
+	// Delivery captures the SHARED checkouts since forge-io-real-lanes: the real
+	// delivery pushes the run's committed attempt branch from its warm checkout.
+	if err := delivery.Register(reg, checkouts); err != nil {
 		return fmt.Errorf("register delivery station: %w", err)
 	}
 	if err := projection.Register(reg); err != nil {
@@ -93,6 +96,12 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	// the warm container measure_task reads) plus the operator's run source dir.
 	if err := provision.Register(reg, checkouts, sandboxes, sandboxSourceDir); err != nil {
 		return fmt.Errorf("register provision station: %w", err)
+	}
+	// The forge-io front door (forge-io-real-lanes): webhook receiver + durable
+	// admission consumer. Self-sufficient — its deps (NATS, forge client from the
+	// token env) build at construction.
+	if err := intake.Register(reg); err != nil {
+		return fmt.Errorf("register issue-intake component: %w", err)
 	}
 	return nil
 }

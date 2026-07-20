@@ -69,6 +69,27 @@ Template:
   `sandbox.blocked` on the run.
 - **Change:** simplify-m0-execution-rail
 
+## issue-intake-component
+
+- **Primitive considered:** a rule pack over the GITHUB stream, or configuring a
+  framework webhook input.
+- **Why it cannot express this:** the framework RETIRED its github-webhook input
+  in the beta.147 boundary wave (ADR-075; the cutover checklist transfers the
+  receiver, the payload shapes, and the flattening to semdev) — there is no
+  framework input to configure, and NOTHING publishes `github.event.*` without
+  one. A rule cannot terminate HTTP, validate an HMAC, decode a host payload,
+  make the collaborator-permission network call the admission gate requires, or
+  build a prompt-bearing coordinator wake. The component owns both halves of
+  the lane: the receiver (HMAC → filter → flatten → publish onto the
+  semdev-declared GITHUB stream, delivery-GUID msg-id dedup) and the durable
+  consumer (Normalize → the existing `intake.Decide` gate → admission record →
+  `intake.CoordinatorTask` wake; comment events → the approval adapter). It
+  adds NO admission logic of its own, stamps no lifecycle fact (G2 — the wake
+  is the host-way front door; the mint rule fires the transition), and records
+  only what the gate itself derived (G3).
+- **Registry entry:** `issue-intake` (`component`)
+- **Change:** forge-io-real-lanes
+
 ## create-change-author-tool
 
 - **Primitive considered:** a rule that authors the OpenSpec change directly, or

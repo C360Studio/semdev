@@ -3,9 +3,13 @@ package vocab
 import "testing"
 
 func TestWriterOfExactMatch(t *testing.T) {
+	// run.issue.ref's writer MOVED to the rule pack (forge-io-real-lanes D2
+	// as-built, per the mint rule's recorded deferred_issue_ref plan): the run
+	// does not exist at wake time, so the coordinator-pack issue-ref rule — not
+	// the intake component — stamps it.
 	w, ok := WriterOf("run.issue.ref")
-	if !ok || w != "issue-intake-adapter" {
-		t.Fatalf("WriterOf(run.issue.ref) = %q, %v; want issue-intake-adapter, true", w, ok)
+	if !ok || w != "issue-ref-rule" {
+		t.Fatalf("WriterOf(run.issue.ref) = %q, %v; want issue-ref-rule, true", w, ok)
 	}
 }
 

@@ -42,6 +42,9 @@ var Entries = []Entry{
 	{Name: "floors-station", Kind: KindComponent, Capability: "dev-from-task", AlignmentNote: "deterministic-station-component"},
 	{Name: "verify-station", Kind: KindComponent, Capability: "clean-room-verify", AlignmentNote: "deterministic-station-component"},
 	{Name: "provision-station", Kind: KindComponent, Capability: "sandbox", AlignmentNote: "deterministic-station-component"},
+	// The forge-io front door (forge-io-real-lanes): webhook receiver + durable
+	// admission consumer + comment approval adapter.
+	{Name: "issue-intake", Kind: KindComponent, Capability: "forge-io", AlignmentNote: "issue-intake-component"},
 	// The deterministic-station tools (validate_change/project_tasks/verify_artifact/
 	// check_floors/open_pr/provision_sandbox) were CONVERTED to the R6 station components
 	// above in group 6 and their executors deleted (6E) — they are no longer registered

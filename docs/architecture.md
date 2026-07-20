@@ -16,7 +16,9 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 |-----------|--------|------------|
 | `intake.actor.login` | admission-check | forge-io |
 | `intake.actor.admitted` | admission-check | forge-io |
-| `run.issue.ref` | issue-intake-adapter | forge-io |
+| `intake.event.ref` | admission-check | forge-io |
+| `run.issue.ref` | issue-ref-rule | forge-io |
+| `run.issue.stamped` | issue-ref-rule | forge-io |
 | `run.change.approved` | approval-adapter | forge-io |
 | `experiment.run.condition` | experiment-intake | semsource-ab |
 | `human.opt.signal` | comment-adapter | forge-io |
@@ -88,6 +90,7 @@ the G10 census (`TestDocsComponentsMatchRegistry`).
 | `floors-station` | component | dev-from-task | `deterministic-station-component` |
 | `verify-station` | component | clean-room-verify | `deterministic-station-component` |
 | `provision-station` | component | sandbox | `deterministic-station-component` |
+| `issue-intake` | component | forge-io | `issue-intake-component` |
 | `create_change` | tool | openspec-io | `create-change-author-tool` |
 | `render_openspec` | tool | openspec-io | `render-openspec-hydrate-tool` |
 | `write_change` | tool | openspec-io | `write-change-workspace-tool` |

@@ -55,9 +55,9 @@
 
 ## 8. Real forge delivery
 
-- [ ] 8.1 `open_pr` speaks the real forge API through the forge-io adapter; delete the `local-delivery:<run>` stub path
-- [ ] 8.2 Protocol-faithful local forge double for e2e (records the real request shape); evidence summary in the PR body
-- [ ] 8.3 Decide the recorded real-forge run's target with the operator (disposable repo vs org sandbox) and record the evidence-ledger entry — M0-complete claims require it
+- [x] 8.1 DISCHARGED BY forge-io-real-lanes (not re-done here): `openpr.Delivery` speaks the real adapter (push + query-by-head + create, doubly idempotent); the `local-delivery:` stub path DELETED
+- [x] 8.2 DISCHARGED BY forge-io-real-lanes: `internal/forge/forgetest` double (records request shapes + ordering) + a bare git remote for REAL pushes; the evidence summary renders from harness-stamped run facts into the PR body
+- [ ] 8.3 STILL OPEN, tracked as forge-io-real-lanes task 5.4 (operator-gated): the recorded real-forge run + ledger entry — M0-complete claims require it
 
 ## 9. Brownfield ingest runtime component
 

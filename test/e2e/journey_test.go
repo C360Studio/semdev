@@ -46,6 +46,7 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/floors"
+	"github.com/c360studio/semdev/internal/forge/forgetest"
 	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/mockllm"
@@ -498,14 +499,41 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// fires ON THE RUN (delivery is terminal, so it routes on run facts directly — no loop, no
 	// mirror, no check_coherence tool): because verify.cleanroom.result=pass AND review.verdict.value=approved
 	// AND openspec.change.validated present, it PUBLISHES the delivery-station COMPONENT (R6), which
-	// records delivery.pr.ref with zero model turns. This is the bridge proof's terminal: under the mock,
-	// an issue drove all the way to a reviewed, clean-room-verified PR — the rail CONNECTS (not a
-	// completeness claim). Assert delivery.pr.ref is present (an M0 local-delivery stub — the real forge-io
-	// PR is a later group; the gate genuinely passed, only the delivery target is stubbed).
+	// delivers the REAL adapter path with zero model turns (forge-io-real-lanes: a REAL git push of
+	// the committed attempt branch to the journey's bare remote + query-by-head + create against the
+	// protocol-faithful forge double; the local-delivery stub is DELETED). requirePRDelivered asserts
+	// the PR URL, the evidence-bearing body, the query-before-create ordering, and the pushed branch.
 	// Red-first: break any signal (verify/validate/review) and the delivery route blocks (08b
-	// parks) instead of delivering; disable the delivery-station component and delivery.pr.ref never lands.
+	// parks); an unconfigured forge FAILS delivery closed and the run parks (station-failure-parks).
 	requirePRDelivered(ctx, t, runEntityID)
-	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — the run cohered and the delivery station recorded delivery.pr.ref (mock RequestCount=%d)", mock.RequestCount())
+	t.Logf("station 15: ISSUE→PR ARC CONNECTS (bridge proof) — REAL delivery: branch pushed, evidence PR opened on the double (mock RequestCount=%d)", mock.RequestCount())
+
+	// Station 15b — REPLAY across BOTH guards, live: re-dispatch the delivery
+	// station for the same run; the graph guard short-circuits (same ref, no
+	// second push, ZERO further API calls). The discriminator is the double's
+	// REQUEST LOG, not a fixed sleep (review finding: on the failure path the
+	// erroneous replay makes real find/create calls, so a NEW request appearing
+	// is the failure signal — poll for growth and fail fast; "still 1 PR after
+	// a nap" could false-green under load).
+	client15 := connectFrontDoor(ctx, t)
+	baselineRequests := len(journeyForgeDouble.Requests())
+	replayEnv, _ := json.Marshal(map[string]any{"entity_id": runEntityID, "properties": map[string]any{}})
+	if err := client15.Publish(ctx, "component.delivery-station.dispatch", replayEnv); err != nil {
+		t.Fatalf("replay dispatch publish: %v", err)
+	}
+	_ = client15.Close(context.Background())
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := len(journeyForgeDouble.Requests()); got > baselineRequests {
+			t.Fatalf("the REPLAYED delivery dispatch reached the forge (%d new API requests: %+v) — the graph guard must short-circuit BEFORE any push or API call",
+				got-baselineRequests, journeyForgeDouble.Requests()[baselineRequests:])
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if prs := journeyForgeDouble.PRs(); len(prs) != 1 {
+		t.Fatalf("after a REPLAYED delivery dispatch the double holds %d PRs, want STILL exactly 1", len(prs))
+	}
+	t.Logf("station 15b: replayed delivery dispatch made ZERO forge calls — one PR across replays at the graph guard (forge guard unit-pinned)")
 
 	// Exactly eight model turns drove the FULL arc. The route rules chain the stations with NO
 	// model turns of their own, and the deterministic stations validate / project / PROVISION /
@@ -937,6 +965,11 @@ func startJourneyRuntimeExperiment(ctx context.Context, t *testing.T, mock *mock
 	if semsourceEndpoint != "" {
 		configPath = injectSemsourceExperiment(t, configPath, semsourceEndpoint)
 	}
+	// EVERY journey delivers against the REAL adapter path (forge-io-real-lanes:
+	// the local-delivery stub is deleted): a protocol-faithful local forge double
+	// for the API shapes + a local BARE repository for a REAL git push. Journeys
+	// that never reach delivery simply never touch either.
+	configPath = injectJourneyForge(t, configPath)
 	rt, err := boot.NewRuntime(ctx, boot.RunOptions{
 		ConfigPath: configPath,
 		// The patched config lives in a temp dir, so point persona seeding at the repo's real
@@ -964,6 +997,66 @@ func startJourneyRuntimeExperiment(ctx context.Context, t *testing.T, mock *mock
 	})
 
 	requireAgenticHealthy(ctx, t, rt)
+}
+
+// journeyForgeDouble / journeyForgeBare expose the CURRENT test's forge double
+// and bare push target for delivery-shape assertions (tests run serially; set
+// by injectJourneyForge per boot).
+var (
+	journeyForgeDouble *forgetest.Double
+	journeyForgeBare   string
+)
+
+// journeyForgeOwner/Repo name the journeys' delivery target (the double's
+// namespace + the bare repo's logical identity).
+const (
+	journeyForgeOwner = "c360studio"
+	journeyForgeRepo  = "semdev-journey"
+)
+
+// injectJourneyForge stands up the per-test delivery target — a forge double
+// (API shapes) + a bare git repository (a REAL push target) — and patches the
+// delivery-station's forge config in the journey bootstrap. The token env is
+// set per-test: the client requires a non-empty token; the double ignores it.
+func injectJourneyForge(t *testing.T, configPath string) string {
+	t.Helper()
+
+	bare := filepath.Join(t.TempDir(), "journey-forge-bare.git")
+	if out, err := exec.Command("git", "init", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("init bare journey remote: %v\n%s", err, out)
+	}
+	double := forgetest.Start()
+	t.Cleanup(double.Close)
+	journeyForgeDouble = double
+	journeyForgeBare = bare
+	t.Setenv("SEMDEV_JOURNEY_FORGE_TOKEN", "journey-forge-token")
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read journey config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode journey config: %v", err)
+	}
+	deliveryCfg := mustMap(t, mustMap(t, mustMap(t, cfg, "components"), "delivery-station"), "config")
+	deliveryCfg["forge"] = map[string]any{
+		"owner":       journeyForgeOwner,
+		"repo":        journeyForgeRepo,
+		"remote_url":  "file://" + bare,
+		"base_branch": "main",
+		"api_base":    double.URL(),
+		"token_env":   "SEMDEV_JOURNEY_FORGE_TOKEN",
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("re-encode journey config: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "journey-bootstrap-forge.json")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write journey config: %v", err)
+	}
+	return path
 }
 
 // resetNATS wipes and restarts the JetStream NATS so the calling journey boots against clean
@@ -1227,13 +1320,13 @@ func publishCoordinatorWake(ctx context.Context, t *testing.T) string {
 	return task.TaskID
 }
 
-// approveChange stands in for the group-5 approval adapter (a forge-io path,
-// deferred): it stamps run.change.approved=true on the run entity via the same
-// OwnedFactWriter transport the tools use, with the vocab writer Source
-// (approval-adapter). The predicate + Source mirror the run-lifecycle/02 resume
-// rule's condition and the vocab table; D15 puts the fact on the RUN entity so the
-// run-fired resume rule reads it. This is the human half of the first gate — the
-// arc is otherwise fully autonomous.
+// approveChange stands in for the REAL approval adapter (which SHIPPED with
+// forge-io-real-lanes: internal/intake/approval.go, proven end-to-end by the
+// webhook journey's comment-event station): it stamps run.change.approved=true
+// on the run entity via the same OwnedFactWriter transport, with the vocab
+// writer Source (approval-adapter) — impersonating the adapter's exact triple.
+// It remains legitimate for journeys that do not drive the webhook lane (no
+// issue ref to bind a comment to); the webhook journey is the adapter's proof.
 func approveChange(ctx context.Context, t *testing.T, runEntityID string) {
 	t.Helper()
 	client := connectFrontDoor(ctx, t)
@@ -1549,6 +1642,7 @@ func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
 	defer func() { _ = client.Close(context.Background()) }()
 
 	const prRef = "delivery.pr.ref"
+	var ref string
 	requireEventually(t, 45*time.Second, func() bool {
 		e, ok := scanEntities(ctx, client)[runEntityID]
 		if !ok {
@@ -1557,11 +1651,56 @@ func requirePRDelivered(ctx context.Context, t *testing.T, runEntityID string) {
 		// The blocked delivery route (08b) parks on a non-pass verify — if the run parked
 		// instead of delivering, surface it rather than timing out.
 		if park := tripleString(e, "run.awaiting.human"); park != "" && tripleString(e, prRef) == "" {
-			t.Fatalf("the run PARKED instead of delivering (run.awaiting.human=%q, no delivery.pr.ref) — the delivery route blocked (08b): a delivery signal did not cohere (verify not pass, change unvalidated, or the task unapproved). The happy-path journey expects all three green", park)
+			t.Fatalf("the run PARKED instead of delivering (run.awaiting.human=%q, no delivery.pr.ref) — the delivery route blocked (08b) or the REAL delivery failed terminally (station-failure-parks: check the forge double/bare-remote config). The happy-path journey expects a delivered PR", park)
 		}
-		return tripleString(e, prRef) != ""
-	}, "run entity "+runEntityID+" never gained "+prRef+" — the coherent delivery route (dev-from-task/08a) did not fire or open_pr did not record it: "+
-		"check all three signals are on the run (verify.cleanroom.result=pass, review.verdict.value=approved, openspec.change.validated present), the delivery route fires on the run reading them, and open_pr is advertised/scripted")
+		ref = tripleString(e, prRef)
+		return ref != ""
+	}, "run entity "+runEntityID+" never gained "+prRef+" — the coherent delivery route (dev-from-task/08a) did not fire or the delivery station failed: "+
+		"check all three signals are on the run (verify.cleanroom.result=pass, review.verdict.value=approved, openspec.change.validated present) and the journey forge (double + bare remote) is wired")
+
+	// The REAL delivery contract (forge-io-real-lanes): pr.ref is a live PR URL
+	// from the forge (the double), never the deleted local stub.
+	if strings.HasPrefix(ref, "local-delivery:") {
+		t.Fatalf("delivery.pr.ref = %q — the local stub path is DELETED; a stand-in reference cannot claim delivery", ref)
+	}
+	if !strings.Contains(ref, "/pull/") {
+		t.Fatalf("delivery.pr.ref = %q, want a forge PR URL (…/pull/<n>)", ref)
+	}
+	// The double holds exactly ONE PR whose body carries the evidence summary,
+	// created AFTER a query-by-head (the idempotency ordering), and the bare
+	// remote REALLY carries the pushed semdev/<suffix> branch.
+	if journeyForgeDouble != nil {
+		prs := journeyForgeDouble.PRs()
+		if len(prs) != 1 {
+			t.Fatalf("forge double holds %d PRs, want exactly 1", len(prs))
+		}
+		if !strings.Contains(prs[0].Body, "delivery evidence") || !strings.Contains(prs[0].Body, runEntityID) {
+			t.Errorf("PR body must carry the evidence summary + run pointer, got %q", prs[0].Body)
+		}
+		kinds := []string{}
+		for _, r := range journeyForgeDouble.Requests() {
+			kinds = append(kinds, r.Kind)
+		}
+		if got := strings.Join(kinds, ","); !strings.Contains(got, "find_pr,create_pr") {
+			t.Errorf("forge request order = %q, want query-by-head BEFORE create (the forge-level guard)", got)
+		}
+		out, err := exec.CommandContext(ctx, "git", "--git-dir", journeyForgeBare, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/semdev/").CombinedOutput()
+		if err != nil {
+			t.Fatalf("list bare-remote branches: %v\n%s", err, out)
+		}
+		refLine := strings.TrimSpace(string(out))
+		if refLine == "" {
+			t.Fatalf("bare remote has no semdev/<run-suffix> branch — the REAL git push did not happen")
+		}
+		// The delivered tip IS the verified snapshot: the branch head must be
+		// exactly the run's attempt.commit.sha (G4/G7 — the bytes measured and
+		// clean-room-verified are the bytes delivered).
+		if e, ok := scanEntities(ctx, client)[runEntityID]; ok {
+			if sha := tripleString(e, "attempt.commit.sha"); sha != "" && !strings.Contains(refLine, sha) {
+				t.Errorf("bare-remote branch tip %q != the run's attempt.commit.sha %q — delivery must push the VERIFIED commit, never bare HEAD", refLine, sha)
+			}
+		}
+	}
 }
 
 // requireTriplePresent polls until the run entity carries at least one triple for

@@ -6,13 +6,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/c360studio/semdev/internal/intake"
 )
 
-// The client implements the admission gate's PermissionChecker, so it drops
-// straight into intake.Decide.
-var _ intake.PermissionChecker = (*Client)(nil)
+// The client implements the admission gate's PermissionChecker so it drops
+// straight into intake.Decide — the compile-time assertion lives IN intake
+// (component.go), which imports this package; asserting it here would be an
+// import cycle now that the intake component constructs the client.
 
 // A 200 returns the granular role_name in preference to the coarse permission,
 // and sends the expected auth headers to the collaborators/permission endpoint.

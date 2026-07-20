@@ -1,6 +1,6 @@
 {
   "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect.",
-  "version": "0.24.0",
+  "version": "0.26.0",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -11,7 +11,7 @@
   },
   "tier": "agentic",
   "experiment": {
-    "_comment": "The semsource A/B condition (integrate-semsource-ab-harness) — a semdev-OWNED section the framework loader ignores. condition: \"\" (unconfigured, the baseline DEFAULT — zero new facts, zero semsource code paths), \"baseline\" (stamps experiment.run.condition=baseline as an evidence label), or \"semsource\" (requires semsource_endpoint; boot swaps the -semsource variant dispatch pack in, constructs the live proxy client, and launch gates on semsource's PER-SIGNAL readiness — index.ready AND embedding.ready). The condition is an evidence label only: no rule reads experiment.* (conformance-linted).",
+    "_comment": "The semsource A/B condition (integrate-semsource-ab-harness) \u2014 a semdev-OWNED section the framework loader ignores. condition: \"\" (unconfigured, the baseline DEFAULT \u2014 zero new facts, zero semsource code paths), \"baseline\" (stamps experiment.run.condition=baseline as an evidence label), or \"semsource\" (requires semsource_endpoint; boot swaps the -semsource variant dispatch pack in, constructs the live proxy client, and launch gates on semsource's PER-SIGNAL readiness \u2014 index.ready AND embedding.ready). The condition is an evidence label only: no rule reads experiment.* (conformance-linted).",
     "condition": "",
     "semsource_endpoint": ""
   },
@@ -27,6 +27,14 @@
       ],
       "storage": "file",
       "max_age": "24h"
+    },
+    "GITHUB": {
+      "subjects": [
+        "github.event.>"
+      ],
+      "storage": "file",
+      "max_age": "72h",
+      "duplicates": "10m"
     },
     "TOOL": {
       "subjects": [
@@ -82,7 +90,7 @@
       "name": "service-manager",
       "enabled": true,
       "config": {
-        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven — if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
+        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven \u2014 if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
         "http_port": 18080
       }
     },
@@ -154,7 +162,9 @@
       "enabled": true,
       "config": {
         "entity_watch_buckets": {
-          "ENTITY_STATES": ["*.*.*.*.*.*"]
+          "ENTITY_STATES": [
+            "*.*.*.*.*.*"
+          ]
         },
         "enable_graph_integration": true,
         "pack_id": "semdev",
@@ -162,6 +172,7 @@
           "rules/coordinator/01-issue-intake-mint-run.json",
           "rules/coordinator/02-create-change-spawn.json",
           "rules/coordinator/03-validate-authored-change.json",
+          "rules/coordinator/04-stamp-issue-ref.json",
           "rules/agent-run/01-handoff-marker.json",
           "rules/agent-run/02-dispatched-to-executing.json",
           "rules/run-lifecycle/01-offer-change-approval.json",
@@ -192,6 +203,42 @@
           "rules/sandbox/02-park-unprovable.json"
         ],
         "inline_rules": []
+      }
+    },
+    "issue-intake": {
+      "type": "processor",
+      "name": "issue-intake",
+      "enabled": true,
+      "config": {
+        "_comment": "The forge-io front door (forge-io-real-lanes): durable consumer on the GITHUB stream (semdev-declared; the framework retired its webhook input in beta.147). DEFAULT POSTURE IS FAIL-CLOSED: receiver disabled (http_port 0 \u2014 journeys publish flattened events straight onto the stream), repo unbound, allowlist empty, no token env populated => allowlist-only admission with an empty allowlist rejects every actor. A live deployment sets http_port + webhook_secret_env + repo + allowlist (or GITHUB_TOKEN via the dotenv lane for collaborator checks).",
+        "ports": {
+          "inputs": [
+            {
+              "name": "github_events",
+              "type": "jetstream",
+              "subject": "github.event.>",
+              "stream_name": "GITHUB",
+              "required": true,
+              "description": "Flattened webhook events (the receiver or an e2e journey publishes them)."
+            },
+            {
+              "name": "user_responses",
+              "type": "jetstream",
+              "subject": "user.response.>",
+              "stream_name": "USER",
+              "required": false,
+              "description": "Park-lane publishes posted as issue comments (forge-io-real-lanes D4)."
+            }
+          ],
+          "outputs": []
+        },
+        "http_port": 0,
+        "repo": "",
+        "allowlist": [],
+        "opt_in_label": "semdev",
+        "opt_in_command": "/semdev",
+        "model": "coordinator",
+        "token_env": "GITHUB_TOKEN"
       }
     },
     "agentic-tools": {
@@ -422,11 +469,17 @@
           ]
         },
         "permissions": {
-          "view": ["*"],
-          "submit_task": ["*"],
+          "view": [
+            "*"
+          ],
+          "submit_task": [
+            "*"
+          ],
           "cancel_own": true,
           "cancel_any": [],
-          "approve": ["*"]
+          "approve": [
+            "*"
+          ]
         }
       }
     },
@@ -445,6 +498,15 @@
               "description": "The delivery route's publish target (dev-from-task/08a). The run entity travels as the payload entity_id; the station stamps pr.ref on it."
             }
           ]
+        },
+        "forge": {
+          "_comment": "The REAL delivery target (forge-io-real-lanes D5). UNCONFIGURED (empty owner/repo/remote_url) = every delivery FAILS CLOSED and the run PARKS (the local-delivery stub is deleted). Journeys patch a local forge double + file:// bare remote; a live deployment sets owner/repo/remote_url and provides the token via token_env (dotenv lane).",
+          "owner": "",
+          "repo": "",
+          "remote_url": "",
+          "base_branch": "main",
+          "api_base": "",
+          "token_env": "GITHUB_TOKEN"
         }
       }
     },

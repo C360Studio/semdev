@@ -62,6 +62,56 @@ func Normalize(subject string, payload []byte) (*Intake, error) {
 	return normalizeIssue(e), nil
 }
 
+// CommentSignal is the normalized, host-neutral view of a comment event for the
+// signal lanes (v1: the approval command). It exists because a comment is NOT an
+// intake trigger (it creates no run) but IS a human signal on an existing run —
+// a different consumer with the same Event-invariant discipline.
+type CommentSignal struct {
+	// Event carries the actor + repo scope for the authorization check.
+	// AuthoredText is the comment body ONLY when Attributable (see below);
+	// otherwise empty, so a command in a foreign-authored body can never be
+	// treated as the sender's signal.
+	Event Event
+	// IssueRef is the host-neutral parent-issue reference "owner/repo#number" —
+	// carried by semdev's OWN flattener (the retired framework flattener dropped
+	// the issue number; owning the receiver closed that gap).
+	IssueRef string
+	// Attributable reports the sender==comment-author guard: the body is the
+	// sender's own words. A non-attributable comment event carries no signal.
+	Attributable bool
+	// Relevant is false for comment actions that are not signals (edited,
+	// deleted) — the consumer skips them without any decision.
+	Relevant bool
+}
+
+// NormalizeComment decodes a github.event.comment payload into a CommentSignal.
+// Only a `created` comment is a signal candidate; the attribution guard mirrors
+// normalizeIssue's sender==author check (the admission Event invariant: a signal
+// binds to ITS actor or it is no signal at all).
+func NormalizeComment(payload []byte) (*CommentSignal, error) {
+	var e githubwebhook.CommentEvent
+	if err := json.Unmarshal(payload, &e); err != nil {
+		return nil, fmt.Errorf("intake: decode comment event: %w", err)
+	}
+	if e.Action != "created" || e.IssueNumber == 0 {
+		return &CommentSignal{Relevant: false}, nil
+	}
+	sig := &CommentSignal{
+		Relevant: true,
+		IssueRef: fmt.Sprintf("%s#%d", e.Repository.FullName, e.IssueNumber),
+		Event: Event{
+			Actor: e.Sender,
+			Owner: e.Repository.Owner,
+			Repo:  e.Repository.Name,
+		},
+	}
+	if strings.EqualFold(strings.TrimSpace(e.Sender), strings.TrimSpace(e.Comment.Author)) {
+		sig.Attributable = true
+		sig.Event.AuthoredText = e.Comment.Body
+	}
+	return sig, nil
+}
+
 func normalizeIssue(e githubwebhook.IssueEvent) *Intake {
 	in := &Intake{
 		Relevant: true,
