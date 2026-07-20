@@ -7,212 +7,274 @@ calls `hasApprovalCommand` (`:179`) — two whole tokens `/semdev approve` — a
 author passes `admission.Authorize`, stamps `run.change.approved`. Everything before the
 command check (repo-bind) and after it (Authorize, resolve, write) is deterministic Go.
 
-semdev already has the machinery to read INTENT with an LLM: the coordinator persona
-(Sarah) reads an issue and returns one action from a CLOSED taxonomy
-(`internal/taxonomy/taxonomy.go` — the Go source of truth; mirrored in
-`configs/personas/fragments/coordinator/10-decision-contract.md`; the framework `decide`
-tool stamps `coordinator.decision.next-action`; rules route on it). That is exactly the
-shape this change applies to the approval gate — one persona-read intent from a closed
-set, a rule routes on the resulting fact.
+semdev already reads INTENT with an LLM: the coordinator persona reads an issue and
+returns one action from a CLOSED taxonomy (`internal/taxonomy/taxonomy.go` — the Go
+source of truth; mirrored in `configs/personas/fragments/coordinator/10-decision-contract.md`;
+the framework `decide` tool stamps `coordinator.decision.next-action` **on the loop
+entity** — `decide.go:361`; rules route). This change applies that shape to the approval
+gate: one persona-read intent from a closed set, a rule routes on the resulting fact.
 
-Two facts constrain the design:
-- **The classification and the write live in different execution worlds.** LLM
-  classification = a rule spawns a loop, the loop's tool stamps a fact, a rule routes.
-  The approval write = deterministic Go inline in a component that spawns no loop. The
-  bridge must be async (the LLM turn cannot sit inside the poll/webhook ack window) and
-  must keep `Authorize` + the write deterministic.
-- **A rule can only template the FIRING entity's own triples** (`dispatch-developer.json:5`).
-  For a spawned classifier to see the human's message, the message must be a triple on
-  the run entity the rule fires on — not left transient in the transport.
+Two facts constrain the design (both confirmed in the pre-impl review):
+- **Classification and the gate write live in different execution worlds.** LLM
+  classification = a rule spawns a loop, the loop's tool stamps a routing fact, a rule
+  routes. The gate write = deterministic Go. The bridge must be async (the LLM turn
+  cannot sit inside the poll/webhook ack window) and must keep `Authorize` + the write
+  deterministic.
+- **A rule can only template the FIRING entity's own triples** (`dispatch-developer.json:5`),
+  and `handleMessage`/the dedup only ever see the RUN (via `ResolveRunByRef`). So the
+  human message AND the intent classification must live as triples ON THE RUN — not on
+  the classifier loop (the `decide` default) and not transient in the transport.
+
+**The stakes, stated honestly (semstreams pre-impl).** `decide` routes the system's own
+next step and every downstream consequence is itself floored. `classify_intent → approve`
+releases the HUMAN floor. There is NO harness ground-truth for "what a human meant," so —
+unlike `submit_review`, which floors its verdict on `measurement.CanApprove` — an
+analogous floor is impossible. The safety case therefore rests entirely on: (1) a
+deterministic WHO-gate, (2) message-grounding, (3) a conservative persona, (4) transparency,
+and — the real backstop — (5) the downstream **PR merge is still a human gate**: a false
+NL-approval wastes development tokens but CANNOT ship unreviewed code, because semdev opens
+a PR it never auto-merges. Every one of these must actually hold; the design below wires
+each.
 
 ## Goals / Non-Goals
 
 **Goals:**
 - The change-approval gate reads NATURAL-LANGUAGE approve/reject intent from an
-  authorized author's message, via the coordinator-decision house pattern (persona →
-  closed taxonomy → routing fact → rule), never an inline model call in product Go.
+  authorized author's message, via the coordinator-decision house pattern, never an
+  inline model call in product Go.
 - The exact `/semdev approve` (and a new `/semdev reject`) stay deterministic zero-token
   fast-paths. NL classification fires only on a non-command message from an authorized
   author on an `awaiting_approval` run.
 - A rejected change CANCELS the run (the existing `awaiting_approval → cancelled` edge,
-  rule-owned) instead of hanging at the gate.
-- Fail-safe: `Authorize` decides WHO (deterministic); the approval/rejection FACT is
-  harness-stamped (`approval-adapter`, G5); an inferred action is announced on the thread
-  before it takes effect; the LLM classification is a ROUTING signal (G3), never a
-  measurement; re-classification is idempotent (deduped by the message id).
+  rule-owned, PHASE-GUARDED).
+- Fail-safe against manufacturing an approval: `Authorize` decides WHO (deterministic,
+  re-checked at apply, on a HARNESS-bound author); the gate fact is harness-stamped
+  (`approval-adapter`, G5); the classification is a ROUTING signal (G3); an inferred
+  action is announced before it lands; re-classification is idempotent; the run cannot
+  end with both approved AND rejected.
 
 **Non-Goals:**
-- Answering an `ask_human` clarifying question (the reserved `human.opt.signal` reply
-  lane — not built) and change-request / "tweak the plan" intent (Phase 3 draft-PR
-  surface).
-- Classifying whole-thread aggregate text — intent is always bound to ONE authorized
-  author's message. Reading the fuller thread for richer context is a later enrichment
-  (v1 classifies the single triggering message).
-- Non-GitHub channels; a confirm-then-wait round-trip (v1 acts on a confident
-  classification and announces it, it does not block on a second human turn).
+- Answering an `ask_human` question (the reserved `human.opt.signal` lane) and
+  change-request / "tweak the plan" intent (Phase 3 draft-PR surface).
+- Classifying whole-thread aggregate text — intent is bound to ONE authorized author's
+  message. Reading the fuller thread is a later enrichment (v1 = the single triggering
+  message; multi-turn intent fails toward staying gated, never toward a false approve).
+- **Reversing a LANDED NL-approval via the NL lane.** Once `run.change.approved` lands and
+  the run resumes to `executing`, the NL lane does NOT cancel it (an `executing→cancelled`
+  reject rule would let a stale/second-thoughts reject kill approved, token-burning work —
+  architect H1). NL-approve is irreversible-once-landed; the transparency post is honest
+  VISIBILITY, not an undo promise; the PR merge is the human's downstream stop.
+- Non-GitHub channels; a confirm-then-wait round-trip.
 
 ## Decisions
 
 ### D1 — a closed conversation-intent taxonomy, Go source of truth
-`internal/conversationintent` (sibling of `internal/taxonomy`) declares the CLOSED
-intent set `{approve, reject, none}` with `Valid()` + `Names()`. `none` = no directive
-(ordinary chatter); the run stays gated. The set is mirrored into a new `conversation`
-persona fragment's decision contract and into the routing rules; a conformance census
-fails on drift (mirroring `TestTaxonomyMatchesPersonaContract`). Keeping it a THREE-member
-closed set (not free text) is what makes the classifier's output routable and auditable.
+`internal/conversationintent` (sibling of `internal/taxonomy`) declares the CLOSED set
+`{approve, reject, none}` with `Valid()` + `Names()`. `none` = no directive; the run
+stays gated. The set is the source of truth for the `conversation` persona's decision
+contract AND the routing rules; a conformance census fails on drift (the routing-rule arm
+of the census lands with the rules in group 4 — noted so it is not asserted red early).
 
-### D2 — a `classify_intent` tool, the `decide` analog (G3-clean)
-`internal/tools/classifyintent` exposes `classify_intent`: the classifier loop calls it
-with `intent` (from the taxonomy) + `message_id` + `author` (the cited message it read) +
-a short `reason`. It stamps `conversation.intent` (the routing value), `conversation.intent.message-id`,
-and `conversation.intent.reason` on the firing loop / run. **This is NOT a G3 violation:**
-G3 bars an LLM-supplied MEASUREMENT outcome (a test pass/fail the harness must stamp).
-An intent is a ROUTING classification — the coordinator's `decide` already takes a
-`next_action` from a closed taxonomy and that is the sanctioned house pattern. The tool
-takes NO outcome boolean and stamps NO measurement fact; it records what the persona
-read, exactly as `decide` records the coordinator's chosen action. `tool_choice: required`
-forces the call so a weak model cannot terminate text-only.
+### D2 — a `classify_intent` tool: the model supplies JUDGMENT, the harness supplies IDENTITY
+`internal/tools/classifyintent` exposes `classify_intent(intent, reason)` — the model
+supplies ONLY the classification (`intent` from the taxonomy) and a short `reason`. It
+takes NO `author` and NO `message_id` (architect H3 / semstreams HIGH-2): the message the
+classifier was spawned to read is already on the run's `conversation.message.pending.*`
+triples, so the HARNESS binds identity. The tool subject-overrides to the RUN (the
+`create_change`/`dispatch-developer` pattern, `$entity.triple.agent.run.entity-id`) and
+stamps on the RUN — NOT the classifier loop — `conversation.intent`, plus
+`conversation.intent.message-id` and `conversation.intent.author` copied from the run's
+pending triples (matched by the pending message id), plus `conversation.intent.reason`
+(the model's echo, inert to the security path). Stamping on the run is load-bearing:
+`handleMessage`'s dedup and the routing rule both read the run (architect H2).
+
+**G3 (routing, not measurement) + G1 (why a new tool, not `decide`):** `classify_intent`
+takes no outcome boolean and stamps no measurement fact — it is the `decide` shape (a
+routing classification the harness records), NOT the `submit_review` shape (a
+harness-floored verdict). It is a SEPARATE tool from `decide` because (a) `decide` carries
+no message-id grounding (its args are action/reason/subtopics/retry_hint) and (b) `decide`
+stamps under Source `coordinator-decide` on the coordinator's routing lane — reusing it
+would give that predicate a second writer and collide with the coordinator's lane (G5).
+The grounding fields + a distinct fact/writer (`conversation-classifier`) force a new tool.
+`tool_choice: required` forces the call so a weak model cannot terminate text-only.
 
 ### D3 — a `conversation` classifier persona, inherit-scoped, single-message
-A rule spawns an `inherit`-scoped loop with `role: conversation` (→ the
-`configs/personas/fragments/conversation` fragment tree) when a run at
-`awaiting_approval` gains a pending authorized message. **v1 classifies the SINGLE
-triggering message**, not the whole thread: the message's author + body are templated
-onto the loop's prompt from the run's `conversation.message.pending.*` triples (resolving
-the "rules template only the firing entity's triples" limit without a tool round-trip).
-The persona's contract: read the human's message, output exactly one intent from the
-closed set with the message cited, and NEVER infer approval from silence, a reaction, or
-ambiguous positivity — an unclear message is `none`. Reading the fuller thread for
-context is deferred (it needs `github_list_comments` in a scoped `tools` list; v1's
-single, self-contained approval/rejection utterance does not require it).
+A rule spawns an `inherit`-scoped loop with `role: conversation` (→
+`configs/personas/fragments/conversation`) when a run at `awaiting_approval` gains a
+pending authorized message. v1 classifies the SINGLE triggering message: its author +
+body are templated onto the prompt from the run's `conversation.message.pending.{author,body}`
+triples. The decision contract: read the message, output exactly one intent, and default
+to `none` for anything short of an explicit directive — NEVER approve from silence, a
+reaction, or ambiguous positivity. The persona reports only `intent` + `reason`; it never
+names an author (the harness owns identity, D2).
 
-### D4 — the hybrid fast-path (exact command short-circuits; NL bridges)
-`handleMessage` keeps the deterministic exact-command check FIRST: a whole-token
-`/semdev approve` → the existing approve write (no model turn); a new whole-token
-`/semdev reject` → the reject write. Only a message that is NOT an exact command, from an
-author who passes `Authorize`, on a run at `awaiting_approval`, stamps
-`conversation.message.pending` and returns (ACK). Ordinary chatter from anyone, and any
-message on a non-gated run, is ignored deterministically with zero model turns — the
-model is spent ONLY on a plausible NL directive from someone allowed to give one.
+### D4 — the hybrid fast-path (exact command short-circuits; NL bridges), phase-gated
+`handleMessage` reads the run's PHASE (the resolver gains a phase getter — architect M7,
+`ResolveRunByRef` today returns only `(runID, approved, err)`). It keeps the deterministic
+exact-command check FIRST: whole-token `/semdev approve` → the existing approve write;
+whole-token `/semdev reject` → the reject write (both zero model turns). Otherwise, ONLY a
+message that is (a) not an exact command, (b) from an author who passes `Authorize`, (c) on
+a run at `agent.run.phase == awaiting_approval`, and (d) whose id is NOT already in the
+run's classified-ledger (D5), stamps pending and ACKs. Chatter, unauthorized authors, and
+messages on non-gated runs spend ZERO model turns.
 
-### D5 — the bridge fact + dedup by message id
-`handleMessage` stamps `conversation.message.pending.{message-id,author,body}` on the RUN
-(so a rule can template the body/author). Dedup is by the channel-native message id (the
-poll transport's `Message.ID` = the real comment id; the webhook path's delivery-guid
-fallback): `handleMessage` stamps pending for a message id ONLY if the run has not already
-recorded a `conversation.intent.message-id` == that id (already classified) — so the
-poller's re-read after a restart, and webhook redelivery, re-stamp nothing and re-spawn no
-classifier. Latest-authorized-message-wins: a newer pending message overwrites the pending
-slot (the approval gate expects ONE decision; rapid multiples are rare and the human can
-re-post — noted as an accepted v1 limit). The spawn rule is edge-triggered (RULE_STATE
-fire-once per pending value) so one classifier loop spawns per distinct pending message.
+### D5 — the bridge fact + dedup (an append-set ledger + a self-extinguishing spawn marker)
+`handleMessage` stamps `conversation.message.pending.{message-id,author,body}` on the run
+(the body/author a rule templates to the classifier). Dedup is by the channel-native
+message id against an APPEND-SET ledger `conversation.intent.classified` on the run
+(multi-valued, the `task.attempt.instance` shape — NOT single-valued latest-wins, which
+would forget all but the most recent id and re-classify a redelivered earlier message,
+semstreams MEDIUM-4): `handleMessage` stamps pending for a message id only if it is not in
+the ledger; the classifier adds the id to the ledger when it records the intent. The spawn
+rule uses a self-extinguishing marker `conversation.classifier.dispatched = <message-id>`
+stamped before the publish and guarded on (the `dev.developer.dispatched` pattern —
+`dispatch-developer.json:12` — because `publish_agent` is not idempotent and the run is a
+long-lived, replay-exposed entity; RULE_STATE edge-triggering alone would duplicate-spawn
+on replay, architect M5 / semstreams MEDIUM-4). Latest-authorized-message-wins the pending
+SLOT; the ACCEPTED-AND-NAMED asymmetry (semstreams MEDIUM-5): a rejection dropped in favor
+of a later approval is worse than the reverse — mitigated by the gate-still-open guard
+(D6), the conservative-none default, and the PR-merge backstop, and named in Risks. Making
+`reject` strictly sticky is deferred (OQ2).
 
-### D6 — the deterministic apply lane (one writer, G5) + transparency
+### D6 — the deterministic apply consumer (gate-still-open guard, harness-bound author, one writer)
 A rule fires on `conversation.intent == approve` (or `reject`) on a run at
-`awaiting_approval` and PUBLISHES to the conversation-channel component's apply consumer
-(the R6 station shape: rule publish → component does deterministic work → stamps the
-fact → a rule transitions). The consumer, in Go: (1) re-runs `admission.Authorize` on the
-cited author (the gate is NEVER trusted from the classifier — the classifier proposes,
-the harness re-verifies), (2) POSTS a transparency comment via `Channel.Post`
-("Proceeding based on @author's approval — say so if that's wrong" / "Cancelling this run
-based on @author's rejection"), (3) stamps `run.change.approved` (approve) or
-`run.change.rejected` (reject). `run.change.approved` stays written by `approval-adapter`
-(G5) — the SAME source as the fast-path; both the exact-command path and the NL path
-converge on this one writer method, so there is exactly one code writer per fact.
+`awaiting_approval` — AND with both `run.change.approved` and `run.change.rejected` ABSENT
+(`length_eq 0`) — and PUBLISHES to the conversation-channel component's apply consumer
+(subject `component.conversation-apply.dispatch`; a declared jetstream input port — the R6
+station shape, mirroring `validate-authored-change → component.validation-station.dispatch`).
+The consumer, in Go: (1) re-checks the gate is still OPEN (neither gate fact present — the
+`alreadyApproved` guard extended to both facts, so a second racing classifier is a no-op —
+architect H4a); (2) reads the cited author from `conversation.intent.author` (HARNESS-bound
+per D2, matched to the classified message — NOT the overwrite-prone pending slot, architect
+H4b / semstreams HIGH-2) and RE-RUNS `admission.Authorize` on it (the classifier's judgment
+is never trusted for authorization); (3) POSTS a transparency comment via `Channel.Post`
+("Proceeding based on @author's approval." / "Cancelling this run based on @author's
+rejection.") — honest VISIBILITY, no undo promise; (4) stamps `run.change.approved`
+(approve) or `run.change.rejected` (reject). **Ordering + at-least-once (semstreams
+MEDIUM-6):** Post BEFORE stamp; a `Post` failure returns TRANSIENT and BLOCKS the stamp
+(guard 4 must precede the effect), so redelivery re-Posts (bounded duplicate comments,
+the precedented park-post at-least-once posture) until the stamp lands. The stamp
+(idempotent `ReplaceTriples`) is what the resume/cancel rules key on, not the post. Both
+gate facts stay written by `approval-adapter` (G5): the fast-path and the apply consumer
+call ONE shared writer method, censused (D10).
 
-### D7 — the reject lane cancels the run (rule-owned transition, G2)
-`run.change.rejected` is a new fact; a run-lifecycle rule fires the existing
-`awaiting_approval → cancelled` transition on it (agentrun's state machine already has
-that edge). No Go fires the transition (G2) — the adapter stamps the fact, the rule owns
-the phase move. A cancelled run stops the poller enumerating it (it leaves
-`awaiting_approval`), so no further classification fires. The authored change is
-abandoned; a re-triggered issue starts a fresh run (accepted — a rejection is terminal
-for THIS attempt; keeping the work for a rework loop is a Phase 3 concern).
+### D7 — the reject lane cancels a GATED run only (rule-owned, phase-guarded)
+`run.change.rejected` (writer `approval-adapter`) triggers a run-lifecycle rule that fires
+`awaiting_approval → cancelled`. The rule is PHASE-GUARDED `agent.run.phase == awaiting_approval`
+(mirroring the resume rule, `run-lifecycle/02:9`) — LOAD-BEARING (architect H1): the
+state machine's legal `executing → cancelled` edge means an unguarded reject rule would
+kill an already-approved, executing run. No Go fires the transition (G2). A cancelled run
+leaves `awaiting_approval`, so the poller stops enumerating it and no further
+classification fires. The authored change is abandoned; a re-triggered issue starts a fresh
+run (a rework loop that keeps the change is a Phase 3 concern, OQ2).
 
-### D8 — the false-approval safety posture (the load-bearing invariant)
-An LLM must never manufacture an approval a human did not give. Four independent guards,
-none of which is the LLM's word alone:
-1. **Authorization is deterministic and re-checked.** `Authorize(cited author)` runs in
-   Go BEFORE classification is even triggered (D4) AND again in the apply consumer (D6).
-   The classifier cannot approve on behalf of an unauthorized author.
-2. **The classification is grounded.** The tool records the specific `message-id` +
-   `author` the intent was read from; the apply consumer acts on THAT author. The intent
-   is bound to one real, attributable message, never aggregate thread sentiment.
-3. **The persona is conservative.** The decision contract makes `none` the default for
-   anything short of an explicit directive (no approval from silence, emoji, or "nice").
-4. **Transparency before effect.** semdev POSTS what it inferred before the transition
-   lands (D6), so a misread is visible on the thread and catchable by the human.
-The classification is a routing signal (like `decide`), not a measurement (G3); the
-consequential facts are harness-stamped (G5). The exact-command fast-path (D4) is always
-available as a deterministic, unambiguous channel.
+### D8 — the false-approval safety posture (four pre-landing guards + the downstream backstop)
+An LLM must never manufacture an approval a human did not give. Guards, none the LLM's
+word alone:
+1. **Authorization is deterministic, re-checked, and on a HARNESS-bound author.**
+   `Authorize` runs in Go before pending is stamped (D4) AND on `conversation.intent.author`
+   at apply (D6) — the harness-bound identity, never the model's arg (D2). The classifier
+   cannot approve on behalf of, or attribute approval to, anyone it names.
+2. **Grounded to one real message.** The intent carries the classified message's id +
+   (harness-bound) author; the apply acts on THAT, never aggregate sentiment.
+3. **Conservative persona.** `none` is the default for anything short of an explicit
+   directive (D3).
+4. **Transparency before effect.** semdev POSTS what it inferred before the stamp lands
+   (D6). This is VISIBILITY — the human SEES a misread on the thread. It is NOT reversible
+   via NL (D7 Non-Goal); to that end the wording makes no undo promise.
+5. **The downstream backstop (the real floor).** A false NL-approval resumes development
+   but the run still faces measure → floors → clean-room verify → a PR that semdev OPENS
+   and NEVER auto-merges. So a misread wastes tokens; it cannot ship unreviewed code — the
+   PR merge is a human gate downstream of this one. This is why irreversible-once-landed
+   (D7) is acceptable for v1. The exact command (D4) remains the unambiguous channel.
 
-### D9 — cost + fail-safety
-One model turn per DISTINCT authorized non-command message on a gated run — deduped by
-message id (D5), gated on `awaiting_approval` (no classification once resolved), and never
-fired for chatter or unauthorized authors (D4). The classifier loop is async (spawned by a
-rule, off the transport's ack window), so a slow/failed classification never blocks the
-poller or redelivery; a classification that never completes leaves the run gated (the
-human can re-post or use the exact command). No new paid-token path on the happy
-exact-command flow.
+### D9 — cost + fail-safety; a classifier FAULT is surfaced, not silently stalled
+One model turn per DISTINCT authorized non-command message on a gated run (deduped by the
+ledger D5, gated on `awaiting_approval`, never for chatter/unauthorized/redelivery). The
+classifier loop is async (off the transport ack window), so a slow/failed classification
+never blocks the poller. **A classifier FAULT ≠ a confident `none` (semstreams HIGH-3):** a
+loop that errors or truncates (no `conversation.intent` stamped, `agent.loop.outcome`
+faulted) is a HUMAN-FACING dead-end if silent (the human wrote "ship it" and saw nothing).
+A rule on the faulted classifier terminal POSTS a fallback note ("I couldn't read that as
+approve or reject — reply `/semdev approve` or `/semdev reject`."). A confident `none` stays
+silent (ordinary chatter). No new paid-token path on the exact-command flow.
 
-### D10 — vocabulary + writers
-New canonical predicates (3-seg lower-kebab, `internal/vocab.Register`), each one writer
-(G5): `conversation.message.pending` (writer `conversation-adapter` — the transport that
-observed the message), `conversation.intent` (writer `conversation-classifier` — the
-loop's tool), `run.change.rejected` (writer `approval-adapter` — the same authority that
-writes `run.change.approved`). `conversation.intent` is a routing fact the classifier
-stamps and a rule reads; `agent.run.phase` and `run.issue.ref` are framework/rule facts
-the classifier merely READS. No lifecycle transition is written from Go (G2).
+### D10 — vocabulary + writers (register-before-write; censused single writer)
+New canonical predicates (3-seg lower-kebab, `internal/vocab.Register`), registered in
+group 1 BEFORE any writer (beta.150 fails closed at the graph-write boundary on an
+unregistered predicate — architect M8): `conversation.message.pending` (writer
+`conversation-adapter`), `conversation.intent` + `.classified` ledger (writer
+`conversation-classifier`), `run.change.rejected` (writer `approval-adapter`). `run.change.approved`
+and `run.change.rejected` are written from TWO code sites (the fast-path inline + the apply
+consumer) under the ONE Source `approval-adapter` — the sanctioned "one logical writer,
+multiple realizing sites" precedent (`g5_writers_test.go`, the route-mirror) — which
+REQUIRES both sites call one shared writer method AND a sanctioned-writer census pin so the
+Source cannot drift (D11). `conversation-adapter` becomes a LIVE Source for the first time
+(no live emitter today); the Source split from `conversation-classifier` (same struct family)
+is censused. The classifier READS `agent.run.phase`/`run.issue.ref`; no Go fires a
+transition (G2).
+
+### D11 — the shared-writer census (G5, semstreams confirmed-clean requirement)
+A conformance pin (mirroring `TestOnlySanctionedParkWriters`) asserts the ONLY sources of
+`run.change.approved` / `run.change.rejected` are `approval-adapter`, and that both the
+fast-path and the apply consumer route through one shared writer method — so the two code
+sites cannot drift their Source, preserving one-logical-writer (G5).
 
 ## Risks / Trade-offs
 
-- **[A false NL approval resumes a run the human didn't approve]** → the four guards of
-  D8: deterministic double-Authorize, message-grounding, a conservative `none`-default
-  persona, and a transparency post before the transition. The exact command remains the
-  unambiguous path. The NL-reject and NL-approve journeys pin both directions; a
-  "conservative none" pin asserts ambiguous positivity does NOT approve.
-- **[The LLM classification is net-new nondeterminism on a safety gate]** → it is a
-  ROUTING signal only; every consequential effect (authorization, the fact, the
-  transition) stays deterministic/rule-owned. The classification cannot escape the
-  taxonomy (closed set + `tool_choice: required` + the decide-allowlist metadata pattern).
-- **[Re-classification storm on poll re-read / webhook redelivery]** → dedup by message
-  id (D5) + edge-triggered spawn; a re-read re-stamps nothing and re-spawns nothing.
-- **[Comment text on the graph]** → a bounded string on the run entity (the message body),
-  needed so the rule can template it to the classifier (the firing-entity-triples limit).
-  Acceptable; it is transient run state, cleared/superseded per gate.
-- **[Latest-message-wins loses a rapid earlier message]** → the approval gate expects one
-  decision; documented v1 limit, the human can re-post.
+- **[A false NL approval resumes a run the human didn't approve]** → guards D8.1–4
+  pre-landing + the D8.5 PR-merge backstop (it wastes tokens, it cannot ship unreviewed
+  code). The NL-approve/reject/conservative-none journeys pin all three outcomes.
+- **[The classification is net-new nondeterminism on a safety gate with no floor]** →
+  confirmed unavoidable (approval has no harness ground-truth); mitigated by keeping every
+  consequential effect deterministic/rule-owned and the classification inside a closed set
+  (`tool_choice: required` + the decide-allowlist metadata).
+- **[Concurrent classifiers stamp both approved AND rejected]** → the gate-still-open guard
+  (D6.1) makes the first apply terminal and the second a no-op; the routing rules gate on
+  both-facts-absent. A CONFLICT journey pins "exactly one terminal, never both."
+- **[Safety-asymmetric drop: a rejection lost to a later approval]** (semstreams MEDIUM-5)
+  → named; mitigated by the gate-still-open guard, conservative-none, and the PR-merge
+  backstop. Strict reject-stickiness deferred (OQ2).
+- **[Re-classification storm on restart / redelivery]** → the append-set ledger (D5) +
+  the self-extinguishing spawn marker; a re-read/redelivery re-stamps nothing.
+- **[A classifier fault silently strands the human]** → D9's faulted-terminal fallback note.
+- **[Transparency Post failure]** → transient-return blocks the stamp (D6); bounded
+  duplicate posts (park-post at-least-once precedent).
+- **[Comment body on the graph]** → a bounded string on the run, needed for rule
+  templating; transient run state, superseded per gate.
 
 ## Migration Plan
 
-1. The intent taxonomy (`internal/conversationintent`) + a `conversation` persona
-   fragment tree + the conformance census (taxonomy↔persona↔rules).
-2. The `classify_intent` tool (the `decide` analog) + its schema + unit pins (G3-clean:
-   no outcome field; stamps a routing fact).
-3. `handleMessage`: retain the exact-command fast-path, add `/semdev reject`, add the
-   non-command → `conversation.message.pending` bridge with message-id dedup. Red-first:
-   the webhook/poll exact-command approval stays byte-identical.
-4. The spawn rule (`conversation.message.pending` @ awaiting_approval → inherit classifier
-   loop) + the intent-routing rules (approve/reject → the adapter apply publish).
-5. The adapter apply consumer (re-Authorize + transparency Post + stamp
-   `run.change.approved` / `run.change.rejected`) + the run-lifecycle reject→cancel rule.
-6. The NL-approve + NL-reject bridge-proof e2e journeys (mock classifier fixtures, real
-   docker), and a real-LLM classification probe. The exact-command journeys stay green.
+1. Vocab registration of ALL new predicates (incl. `run.change.rejected`) + the intent
+   taxonomy (`internal/conversationintent`) + the `conversation` persona fragment tree +
+   the taxonomy↔persona census (the routing-rule arm lands in step 4).
+2. `classify_intent` (intent+reason only; subject-override to run; harness-bound
+   author/message-id) + schema + registration; the G3 (no outcome field) + G1 (why-not-decide)
+   pins.
+3. `handleMessage`: the resolver phase getter; retain the exact-command fast-path; add
+   `/semdev reject`; the authorized-non-command → pending bridge with the append-set ledger
+   dedup; the spawn marker. Red-first: the exact-command approval stays byte-identical.
+4. The spawn rule (marker-guarded, phase-guarded, body/author templated) + the two routing
+   rules (gate on both-facts-absent) + the routing-rule arm of the taxonomy census.
+5. The apply consumer (gate-still-open guard + harness-bound Authorize + Post-then-stamp +
+   transient-on-Post-failure) + the phase-guarded reject→cancel rule + the faulted-classifier
+   fallback-note rule + the D11 shared-writer census.
+6. The NL journeys — approve, reject, conservative-none, the CONFLICT terminal, and the
+   fault fallback — plus a real-LLM classification probe (decide the model tier, OQ4). The
+   exact-command journeys stay green.
+7. Spec + docs + full ladder + e2e -race + the censuses (G5/G1/taxonomy) + archive.
 Rollback: additive — the exact-command path is untouched; reverting drops the NL bridge,
 the classifier, and the reject lane.
 
 ## Open Questions
 
-- **OQ1 — classify the single message vs. read the fuller thread?** RESOLVED for v1:
-  the single triggering message (D3) — simpler, safer, self-contained for approve/reject.
-  Thread-context enrichment is a later change if a real run shows single-message intent is
-  too thin.
-- **OQ2 — reject = cancel vs. park-for-rework?** RESOLVED for v1: cancel (D7) — the
-  existing state-machine edge, honest terminal for the attempt. A rework loop (keep the
-  authored change, re-develop against the feedback) is a Phase 3 draft-PR-surface concern.
-- **OQ3 — does the fast-path exact command also post a transparency comment?** RESOLVED:
-  NO — the command is explicit, there is no inference to announce; the transparency post
-  is scoped to the INFERRED (NL) path only (D6).
-- **OQ4 — the classifier model tier.** OPEN: the front-of-arc coordinator runs the
-  configured model; the classifier is a cheap single-turn read — it MAY run a smaller
-  model tier. Decide during implementation against the real-LLM probe (cost vs. accuracy).
+- **OQ1 — single message vs. read the fuller thread?** RESOLVED v1: the single triggering
+  message (D3) — self-contained for approve/reject; multi-turn intent fails SAFE (stays
+  gated). Thread-context enrichment is a later change.
+- **OQ2 — reject = cancel vs. rework; strict reject-stickiness?** RESOLVED v1: cancel a
+  GATED run (D7); NL-approve irreversible-once-landed (D7 Non-Goal, backstopped by the PR
+  merge, D8.5). A rework loop and strict reject-stickiness are deferred (Phase 3).
+- **OQ3 — does the exact-command fast-path post a transparency comment?** RESOLVED: NO —
+  the command is explicit; the post is scoped to the INFERRED (NL) path (D6).
+- **OQ4 — classifier model tier.** OPEN: a cheap single-turn read MAY run a smaller tier;
+  decide during implementation against the real-LLM probe (step 6).
