@@ -105,5 +105,5 @@ review surface (Phase 3), NO non-GitHub `Read`, NO issue-discovery-by-poll, NO
   bounded, read-only G2 enumeration, no new writer/fact), the XOR ownership (no
   double-processing), the shared approval core (webhook byte-identity), the in-memory
   cursor (B-2, not a fact).
-- [ ] 6.3 sync-specs at archive folds the delta (conversation-channel modified;
+- [x] 6.3 sync-specs at archive folds the delta (conversation-channel modified;
   still 12 caps — no new capability).
