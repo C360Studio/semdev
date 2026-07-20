@@ -237,3 +237,54 @@ func (r *natsRunResolver) ResolveRunByRef(ctx context.Context, ref string) (stri
 	}
 	return "", false, fmt.Errorf("run resolution exceeded %d pages", maxRunPages)
 }
+
+// ResolveRunIDsByRef returns EVERY run entity ID carrying run.issue.ref == ref (unordered) —
+// the SET the operator launch driver diffs across its front-door publish to bind the run IT
+// minted, excluding any pre-existing run that already shared the ref (e.g. from a prior webhook
+// wake). A read-only observation (graph prefix query), never a lifecycle write (G2).
+func (r *natsRunResolver) ResolveRunIDsByRef(ctx context.Context, ref string) ([]string, error) {
+	var ids []string
+	cursor := ""
+	for page := 0; page < maxRunPages; page++ {
+		req := graph.PrefixQueryRequest{Prefix: r.prefix, Cursor: cursor}
+		data, err := json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+		respData, err := r.client.RequestClassified(ctx, "graph.ingest.query.prefix", data, 5*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("prefix query: %w", err)
+		}
+		var resp graph.PrefixQueryResponse
+		if err := json.Unmarshal(respData, &resp); err != nil {
+			return nil, fmt.Errorf("decode prefix response: %w", err)
+		}
+		for i := range resp.Entities {
+			e := &resp.Entities[i]
+			for _, tr := range e.Triples {
+				if tr.Predicate == "run.issue.ref" {
+					if s, ok := tr.Object.(string); ok && s == ref {
+						ids = append(ids, e.ID)
+						break
+					}
+				}
+			}
+		}
+		if resp.NextCursor == "" {
+			return ids, nil
+		}
+		cursor = resp.NextCursor
+	}
+	return nil, fmt.Errorf("run-id enumeration exceeded %d pages", maxRunPages)
+}
+
+// NewRunResolver builds the graph-backed ref→run resolver over a live NATS client — the seam
+// the operator launch driver binds through (by observation; it fires no lifecycle transition,
+// G2). org/platform form the 5-part chain namespace {org}.{platform}.agent.chain.execution the
+// prefix query lists. It satisfies both RunResolver (first-match) and the driver's id-set read.
+func NewRunResolver(client *natsclient.Client, org, platform string) *natsRunResolver {
+	return &natsRunResolver{
+		client: client,
+		prefix: fmt.Sprintf("%s.%s.agent.chain.execution", org, platform),
+	}
+}

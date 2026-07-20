@@ -173,13 +173,13 @@ func TestParkRacePublishBeforeFactRedelivers(t *testing.T) {
 }
 
 func TestSplitRef(t *testing.T) {
-	owner, repo, n, err := splitRef("c360studio/semdev-fixture#7")
+	owner, repo, n, err := SplitRef("c360studio/semdev-fixture#7")
 	if err != nil || owner != "c360studio" || repo != "semdev-fixture" || n != 7 {
 		t.Errorf("splitRef = %s/%s#%d (%v)", owner, repo, n, err)
 	}
 	for _, bad := range []string{"", "no-hash", "#7", "owner#7", "o/r#zero", "o/r#0"} {
-		if _, _, _, err := splitRef(bad); err == nil {
-			t.Errorf("splitRef(%q) must error", bad)
+		if _, _, _, err := SplitRef(bad); err == nil {
+			t.Errorf("SplitRef(%q) must error", bad)
 		}
 	}
 }

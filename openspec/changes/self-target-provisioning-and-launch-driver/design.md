@@ -195,6 +195,15 @@ glue and the issue-read method already exists. The e2e journeys' hand-composed m
 stays a pinned, annotated exemption (the driver does not replace them; it makes them
 redundant in production).
 
+**Idempotency + admission bypass (impl review).** The webhook door suppresses a duplicate
+run when the ref already has one; the operator door mirrors that with a PER-REF guard —
+it fails closed (unless `--force`) when the pre-publish snapshot already carries the ref,
+so a double-launch does not silently mint a competitor. The bind additionally fails closed
+on an AMBIGUOUS result (two new runs from a concurrent front door). The door deliberately
+BYPASSES admission (no authorize/opt-in, no `intake.actor.admitted` record) — the operator
+already holds the shell and token, so the actor-authorization gate is moot; documented
+honestly (G10) so a reader knows launched runs carry no admission record.
+
 ### D7: The condition-stamp-after-mint window is benign (evidence label, never routes)
 
 `Launch` publishes → binds → stamps, so the arc starts before the condition label lands.

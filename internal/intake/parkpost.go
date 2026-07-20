@@ -94,7 +94,7 @@ func (p *parkPoster) handleUserResponse(ctx context.Context, payload []byte) err
 			slog.String("run", runEntityID), slog.String("message", message))
 		return nil
 	}
-	owner, repo, number, err := splitRef(ref)
+	owner, repo, number, err := SplitRef(ref)
 	if err != nil {
 		p.logger.Error("park-post: unparseable run.issue.ref; park message stays graph-only",
 			slog.String("ref", ref), slog.Any("error", err))
@@ -130,8 +130,9 @@ func (p *parkPoster) resolveRun(ctx context.Context, entityID string) (string, e
 	return "", fmt.Errorf("firing entity %s carries no agent.run.entity-id anchor", entityID)
 }
 
-// splitRef parses "owner/repo#number".
-func splitRef(ref string) (owner, repo string, number int, err error) {
+// SplitRef parses a host-neutral "owner/repo#number" coordinate into its parts. Exported for
+// the operator launch driver (which needs the issue number to read the issue's content).
+func SplitRef(ref string) (owner, repo string, number int, err error) {
 	hash := strings.LastIndexByte(ref, '#')
 	slash := strings.IndexByte(ref, '/')
 	if hash <= 0 || slash <= 0 || slash > hash {

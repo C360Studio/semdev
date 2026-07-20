@@ -126,6 +126,56 @@ func (c *Client) Permission(ctx context.Context, owner, repo, actor string) (str
 	return "none", nil
 }
 
+// Issue is an issue's authored content — the fields the operator launch driver needs to build
+// a content-bearing coordinator wake. Host-neutral to the caller.
+type Issue struct {
+	Number int
+	Title  string
+	Body   string
+}
+
+// issueResponse is the GitHub shape of GET /repos/{o}/{r}/issues/{n} (the subset we read).
+type issueResponse struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+}
+
+// GetIssue reads issue `number` in owner/repo — its title and body — the authored content the
+// operator launch driver threads into the coordinator wake (the M1 content lane; the webhook
+// front door draws the same content from its payload). It is the direct client read the CLI
+// needs (the framework exposes github_get_issue only as an agentic tool). A blank token is a
+// loud error; any non-200 (including a 404 for a non-existent issue) is an error, so a launch
+// never proceeds against an empty ask (fail closed).
+func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (Issue, error) {
+	if c.token == "" {
+		return Issue{}, fmt.Errorf("github: no token configured; cannot read %s/%s#%d", owner, repo, number)
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+path, nil)
+	if err != nil {
+		return Issue{}, fmt.Errorf("github: build get-issue request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Issue{}, fmt.Errorf("github: get-issue %s/%s#%d: %w", owner, repo, number, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		return Issue{}, fmt.Errorf("github: get-issue %s/%s#%d returned HTTP %d: %s", owner, repo, number, resp.StatusCode, snippet(body))
+	}
+	var ir issueResponse
+	if err := json.Unmarshal(body, &ir); err != nil {
+		return Issue{}, fmt.Errorf("github: decode issue %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return Issue{Number: ir.Number, Title: ir.Title, Body: ir.Body}, nil
+}
+
 // Comment is one issue/PR comment — the fields semdev needs to read a
 // conversation. Host-neutral to the caller (no GitHub-specific shape leaks out).
 type Comment struct {

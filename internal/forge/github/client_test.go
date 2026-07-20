@@ -185,3 +185,44 @@ func TestPermissionEscapesActor(t *testing.T) {
 		t.Errorf("actor was not escaped; path traversal reached the request path: %q", gotPath)
 	}
 }
+
+func TestGetIssueReadsTitleAndBody(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"number":42,"title":"Fix the bug","body":"health check panics on nil"}`))
+	}))
+	defer srv.Close()
+
+	iss, err := NewClient("tok").WithBaseURL(srv.URL).GetIssue(context.Background(), "acme", "widget", 42)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if iss.Number != 42 || iss.Title != "Fix the bug" || iss.Body != "health check panics on nil" {
+		t.Errorf("issue = %+v, want {42, Fix the bug, health check panics on nil}", iss)
+	}
+	if gotPath != "/repos/acme/widget/issues/42" {
+		t.Errorf("request path = %q, want /repos/acme/widget/issues/42", gotPath)
+	}
+}
+
+func TestGetIssueBlankTokenFailsLoud(t *testing.T) {
+	if _, err := NewClient("").GetIssue(context.Background(), "o", "r", 1); err == nil {
+		t.Error("a blank token must fail loud, not silently succeed")
+	}
+}
+
+func TestGetIssueNotFoundFailsClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+	if _, err := NewClient("t").WithBaseURL(srv.URL).GetIssue(context.Background(), "o", "r", 99); err == nil {
+		t.Error("a 404 issue must fail closed — a launch must not proceed against an empty ask")
+	}
+}

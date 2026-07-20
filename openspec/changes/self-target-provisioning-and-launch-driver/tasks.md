@@ -94,35 +94,30 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
 
 ## 5. Operator launch driver (design D6 — composes existing seams)
 
-- [ ] 5.1 Forge issue-read lane (review H1): add `github.Client.GetIssue(ctx, owner, repo, number)`
-  → title+body (beside `ListComments`), token-authed, base-URL-scoped, fail-closed on a missing/
-  unreachable issue. RED pin first (a recorded HTTP double), then implement. This is the content
-  channel the launch driver needs.
-- [ ] 5.2 Export a resolver constructor (review L2): `natsRunResolver` is unexported + built inline in
-  `newApprovalAdapter` — add an exported constructor taking the NATS client + org/platform prefix so
-  the CLI can build its `bindRun`. No behavior change to the approval path.
-- [ ] 5.3 RED: pin the `semdev launch <issue-ref>` path fetches issue content (5.1) and populates
-  `Intake.Event.AuthoredText` from the issue BODY ONLY — matching the webhook's `intake.normalize`
-  (`AuthoredText = Issue.Body`) so the two front doors produce byte-identical wake content (the parity
-  the review flagged); composes `intake.CoordinatorTask` → `PublishToStream(FrontDoorSubject)`, binds
-  the run minted AFTER this publish (review M2), stamps the condition via `experiment.Launch` — asserts
-  the probe→publish→bind→stamp ORDER and that the wake carries the fetched body (not empty).
-- [ ] 5.4 Implement the `launch` subcommand in `cmd/semdev`: NATS connect, `experiment.LoadConfig`,
-  fetch issue content, build probe (semsource readiness, nil for baseline) / publish / bindRun / writer
-  (`NewNATSOwnedFactWriter`), call `experiment.Launch`, print the bound run id + condition. It boots NO
-  components (thin client to the running runtime). GREEN 5.3.
-- [ ] 5.5 FAIL-CLOSED / G2 pins: an unreadable issue aborts before publish (no wake, no run — review H1);
-  a semsource condition with a failing probe aborts BEFORE publish; an unbound run within the window
-  fails loud and stamps NOTHING; the driver writes no lifecycle-advancing fact (the bind is a graph
-  read). Baseline stamps no condition.
-- [ ] 5.6 M2 pins: the driver publishes STRAIGHT to the front door, bypassing the admission gate
-  (document the trusted-operator posture); `bindRun` SNAPSHOTS the run-id set carrying the ref BEFORE
-  publish and binds the NEW id that appears after (clock-independent set-difference, not a wall-clock
-  post-dates check), NOT any pre-existing run sharing the ref (the two-runs-one-ref case). The exported
-  resolver must expose the id SET for a ref, not just the first match. Pin the disambiguation.
-- [ ] 5.7 Pin the driver reuses the SAME wake byte-shape AND content the intake produces (share the
-  helper or pin equivalence; `AuthoredText` body-only per 5.3) so the operator and webhook front doors
-  are not two shapes — a literal wake-equivalence pin for one issue across both doors.
+- [x] 5.1 `github.Client.GetIssue(ctx, owner, repo, number)` → {Number, Title, Body} (beside
+  `ListComments`, same Bearer/api-version headers), fail-closed on blank token / non-200 (a 404 issue
+  errors — no empty-ask launch). Pins `TestGetIssueReadsTitleAndBody` / `-BlankTokenFailsLoud` /
+  `-NotFoundFailsClosed` (httptest double).
+- [x] 5.2 Exported `intake.NewRunResolver(client, org, platform)` + `natsRunResolver.ResolveRunIDsByRef`
+  (returns the run-id SET for a ref, the set-difference bind seam) — approval path unchanged.
+  `intake.splitRef` exported as `SplitRef` (the driver needs the issue NUMBER for GetIssue).
+- [x] 5.3 Driver in `internal/launch` (testable, not buried in cmd): `Launch` reads the issue → sets
+  `Intake.Event.AuthoredText = iss.Body` (BODY-ONLY, matching `normalize.go`'s webhook shape) →
+  `CoordinatorTask` → `PublishToStream(FrontDoorSubject)` → set-difference bind → `experiment.Launch`.
+  Pins: baseline mint-and-bind, wake-carries-body-not-title (parity), condition stamped.
+- [x] 5.4 `semdev launch <ref>` subcommand → `boot.RunLaunch` (thin client: `connectRuntimeNATS`,
+  `loadRuntimeConfig` for platform+condition, builds github client / resolver / writer / semsource
+  probe, calls `launch.Launch`; boots NO components). Parity-scan-safe (`RunLaunch`/`LaunchModel` are
+  not `Run`/`Register`); the single `boot.Run` path is untouched. G1 census + parity green.
+- [x] 5.5 FAIL-CLOSED / G2 pins: `TestLaunchContentlessIssueFailsBeforePublish` (unreadable issue → no
+  publish, no stamp); `TestLaunchBindTimeoutFailsLoudWithoutStamping` (unbound → loud error, zero
+  writes — never invent/advance a run; the bind is a graph READ). Baseline stamps no condition.
+- [x] 5.6 M2 pins: `bindRun` snapshots the ref's run-id set BEFORE publish and binds the NEW id after
+  (clock-independent set-difference); `TestLaunchBindsTheRunItMintedNotAPreExisting` proves a
+  ref-sharing run-old is excluded. Admission-gate bypass documented (trusted-operator front door).
+- [x] 5.7 `TestLaunchWakeCarriesBodyOnly`: the published wake carries the issue BODY and NOT the title —
+  byte-parity with the webhook's body-only normalize (via the shared `intake.CoordinatorTask` +
+  `Intake.Event.AuthoredText`, the one wake builder both doors use).
 
 ## 6. Offline end-to-end + operator lane + docs
 
