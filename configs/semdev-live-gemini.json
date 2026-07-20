@@ -1,0 +1,633 @@
+{
+  "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect.",
+  "version": "0.27.0-live-gemini",
+  "platform": {
+    "org": "c360",
+    "id": "semdev-bootstrap",
+    "type": "bootstrap",
+    "region": "local",
+    "instance_id": "semdev-001",
+    "environment": "development"
+  },
+  "tier": "agentic",
+  "experiment": {
+    "_comment": "The semsource A/B condition (integrate-semsource-ab-harness) \u2014 a semdev-OWNED section the framework loader ignores. condition: \"\" (unconfigured, the baseline DEFAULT \u2014 zero new facts, zero semsource code paths), \"baseline\" (stamps experiment.run.condition=baseline as an evidence label), or \"semsource\" (requires semsource_endpoint; boot swaps the -semsource variant dispatch pack in, constructs the live proxy client, and launch gates on semsource's PER-SIGNAL readiness \u2014 index.ready AND embedding.ready). The condition is an evidence label only: no rule reads experiment.* (conformance-linted).",
+    "condition": "",
+    "semsource_endpoint": ""
+  },
+  "nats": {
+    "urls": [
+      "nats://localhost:4222"
+    ]
+  },
+  "streams": {
+    "AGENT": {
+      "subjects": [
+        "agent.>"
+      ],
+      "storage": "file",
+      "max_age": "24h"
+    },
+    "GITHUB": {
+      "subjects": [
+        "github.event.>"
+      ],
+      "storage": "file",
+      "max_age": "72h",
+      "duplicates": "10m"
+    },
+    "TOOL": {
+      "subjects": [
+        "tool.>"
+      ],
+      "storage": "file",
+      "max_age": "24h"
+    },
+    "USER": {
+      "subjects": [
+        "user.>"
+      ],
+      "storage": "file",
+      "max_age": "1h"
+    }
+  },
+  "model_registry": {
+    "capabilities": {
+      "coordinator": {
+        "preferred": [
+          "gemini"
+        ],
+        "requires_tools": true
+      },
+      "developer": {
+        "preferred": [
+          "gemini"
+        ],
+        "requires_tools": true
+      },
+      "reviewer": {
+        "preferred": [
+          "gemini"
+        ],
+        "requires_tools": true
+      }
+    },
+    "endpoints": {
+      "mock": {
+        "provider": "openai",
+        "url": "http://mock-llm:8080/v1",
+        "model": "mock-model",
+        "supports_tools": true,
+        "tool_format": "openai"
+      },
+      "gemini": {
+        "provider": "gemini",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-3.1-pro-preview",
+        "api_key_env": "GEMINI_API_KEY",
+        "max_tokens": 1048576,
+        "supports_tools": true,
+        "tool_format": "openai",
+        "stream": false,
+        "reasoning_effort": "medium",
+        "wire_backend": "wire",
+        "max_output_tokens": 8192,
+        "request_timeout": "300s",
+        "input_price_per_1m_tokens": 2.0,
+        "output_price_per_1m_tokens": 12.0
+      }
+    },
+    "defaults": {
+      "model": "gemini"
+    }
+  },
+  "services": {
+    "service-manager": {
+      "name": "service-manager",
+      "enabled": true,
+      "config": {
+        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven \u2014 if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
+        "http_port": 18080
+      }
+    },
+    "component-manager": {
+      "name": "component-manager",
+      "enabled": true,
+      "config": {}
+    },
+    "metrics": {
+      "name": "metrics",
+      "enabled": true,
+      "config": {
+        "port": 9091,
+        "path": "/metrics"
+      }
+    }
+  },
+  "components": {
+    "graph-ingest": {
+      "type": "processor",
+      "name": "graph-ingest",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "graph_mutations",
+              "subject": "graph.mutation.>",
+              "type": "nats",
+              "description": "Triple add/remove mutations from semdev's agentic tools and rules"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "entity_states",
+              "subject": "ENTITY_STATES",
+              "type": "kv-write",
+              "description": "Entity state KV bucket"
+            }
+          ]
+        },
+        "enable_hierarchy": true,
+        "enforce_owner_lease": false
+      }
+    },
+    "graph-query": {
+      "type": "processor",
+      "name": "graph-query",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "query_requests",
+              "subject": "graph.query.>",
+              "type": "nats-request"
+            }
+          ],
+          "outputs": []
+        },
+        "request_timeout": "30s",
+        "max_traversal_depth": 5,
+        "max_traversal_nodes": 100
+      }
+    },
+    "rule": {
+      "type": "processor",
+      "name": "rule-processor",
+      "enabled": true,
+      "config": {
+        "entity_watch_buckets": {
+          "ENTITY_STATES": [
+            "*.*.*.*.*.*"
+          ]
+        },
+        "enable_graph_integration": true,
+        "pack_id": "semdev",
+        "rules_files": [
+          "rules/coordinator/01-issue-intake-mint-run.json",
+          "rules/coordinator/02-create-change-spawn.json",
+          "rules/coordinator/03-validate-authored-change.json",
+          "rules/coordinator/04-stamp-issue-ref.json",
+          "rules/agent-run/01-handoff-marker.json",
+          "rules/agent-run/02-dispatched-to-executing.json",
+          "rules/run-lifecycle/01-offer-change-approval.json",
+          "rules/run-lifecycle/02-resume-after-change-approval.json",
+          "rules/run-lifecycle/03-park-awaiting-human.json",
+          "rules/run-lifecycle/04-archive-change-loop-closer.json",
+          "rules/run-lifecycle/05-park-station-failure-run.json",
+          "rules/run-lifecycle/06-park-station-failure-loop.json",
+          "rules/dev-from-task/01-anchor-run-for-dispatch.json",
+          "rules/dev-from-task/02-rewake-coordinator-dev.json",
+          "rules/dev-from-task/03-project-tasks.json",
+          "rules/dev-from-task/04-dispatch-developer.json",
+          "rules/dev-from-task/05-floors-trigger.json",
+          "rules/dev-from-task/06a-route-advance.json",
+          "rules/dev-from-task/06b-route-not-clean.json",
+          "rules/dev-from-task/06e-route-not-clean-floor.json",
+          "rules/dev-from-task/06c-route-retry.json",
+          "rules/dev-from-task/06d-route-escalate.json",
+          "rules/dev-from-task/06f-route-transient-retry.json",
+          "rules/dev-from-task/06g-route-transient-park.json",
+          "rules/dev-from-task/07a-review-approved.json",
+          "rules/dev-from-task/07b-review-retry.json",
+          "rules/dev-from-task/07c-review-park.json",
+          "rules/dev-from-task/07d-review-no-verdict.json",
+          "rules/dev-from-task/08a-delivery-open-pr.json",
+          "rules/dev-from-task/08b-delivery-park.json",
+          "rules/sandbox/01-provision.json",
+          "rules/sandbox/02-park-unprovable.json"
+        ],
+        "inline_rules": []
+      }
+    },
+    "issue-intake": {
+      "type": "processor",
+      "name": "issue-intake",
+      "enabled": true,
+      "config": {
+        "_comment": "The forge-io front door (forge-io-real-lanes): durable consumer on the GITHUB stream (semdev-declared; the framework retired its webhook input in beta.147). DEFAULT POSTURE IS FAIL-CLOSED: receiver disabled (http_port 0 \u2014 journeys publish flattened events straight onto the stream), repo unbound, allowlist empty, no token env populated => allowlist-only admission with an empty allowlist rejects every actor. A live deployment sets http_port + webhook_secret_env + repo + allowlist (or GITHUB_TOKEN via the dotenv lane for collaborator checks).",
+        "ports": {
+          "inputs": [
+            {
+              "name": "github_events",
+              "type": "jetstream",
+              "subject": "github.event.>",
+              "stream_name": "GITHUB",
+              "required": true,
+              "description": "Flattened webhook events (the receiver or an e2e journey publishes them)."
+            },
+            {
+              "name": "user_responses",
+              "type": "jetstream",
+              "subject": "user.response.>",
+              "stream_name": "USER",
+              "required": false,
+              "description": "Park-lane publishes posted as issue comments (forge-io-real-lanes D4)."
+            }
+          ],
+          "outputs": []
+        },
+        "http_port": 0,
+        "repo": "C360Studio/semdev-test",
+        "allowlist": [
+          "cglusky"
+        ],
+        "opt_in_label": "semdev",
+        "opt_in_command": "/semdev",
+        "model": "coordinator",
+        "token_env": "GITHUB_TOKEN"
+      }
+    },
+    "agentic-tools": {
+      "type": "processor",
+      "name": "agentic-tools",
+      "enabled": true,
+      "config": {
+        "stream_name": "TOOL",
+        "timeout": "10s",
+        "allowed_tools": [
+          "decide",
+          "query_entity",
+          "read_loop_result",
+          "scratchpad",
+          "ask_human",
+          "create_change",
+          "render_openspec",
+          "write_change",
+          "github_list_comments",
+          "read_workspace",
+          "read_diff",
+          "apply_patch",
+          "measure_task",
+          "submit_review",
+          "code_context",
+          "code_impact",
+          "code_search",
+          "doc_context"
+        ],
+        "restricted_decide_actions": [],
+        "ports": {
+          "inputs": [
+            {
+              "name": "tool.execute",
+              "type": "jetstream",
+              "subject": "tool.execute.>",
+              "stream_name": "TOOL",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "name": "tool.result",
+              "type": "jetstream",
+              "subject": "tool.result.*",
+              "stream_name": "TOOL",
+              "required": true
+            }
+          ],
+          "kv_read": [
+            {
+              "name": "entity_states",
+              "type": "kv-read",
+              "bucket": "ENTITY_STATES"
+            }
+          ]
+        }
+      }
+    },
+    "agentic-model": {
+      "type": "processor",
+      "name": "agentic-model",
+      "enabled": true,
+      "config": {
+        "stream_name": "AGENT",
+        "timeout": "30s",
+        "retry": {
+          "max_attempts": 3,
+          "backoff": "exponential"
+        },
+        "ports": {
+          "inputs": [
+            {
+              "name": "agent.request",
+              "type": "jetstream",
+              "subject": "agent.request.>",
+              "stream_name": "AGENT",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "name": "agent.response",
+              "type": "jetstream",
+              "subject": "agent.response.*",
+              "stream_name": "AGENT",
+              "required": true
+            }
+          ]
+        }
+      }
+    },
+    "agentic-loop": {
+      "type": "processor",
+      "name": "agentic-loop",
+      "enabled": true,
+      "config": {
+        "max_iterations": 8,
+        "timeout": "300s",
+        "stream_name": "AGENT",
+        "loops_bucket": "AGENT_LOOPS",
+        "ports": {
+          "inputs": [
+            {
+              "name": "agent.task",
+              "type": "jetstream",
+              "subject": "agent.task.*",
+              "stream_name": "AGENT",
+              "required": true
+            },
+            {
+              "name": "agent.response",
+              "type": "jetstream",
+              "subject": "agent.response.>",
+              "stream_name": "AGENT",
+              "required": true
+            },
+            {
+              "name": "tool.result",
+              "type": "jetstream",
+              "subject": "tool.result.>",
+              "stream_name": "TOOL",
+              "required": true
+            },
+            {
+              "name": "agent.approval_response",
+              "type": "jetstream",
+              "subject": "agent.approval_response.*",
+              "stream_name": "AGENT"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "agent.request",
+              "type": "jetstream",
+              "subject": "agent.request.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "tool.execute",
+              "type": "jetstream",
+              "subject": "tool.execute.*",
+              "stream_name": "TOOL"
+            },
+            {
+              "name": "agent.complete",
+              "type": "jetstream",
+              "subject": "agent.complete.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "agent.failed",
+              "type": "jetstream",
+              "subject": "agent.failed.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "agent.approval_pending",
+              "type": "jetstream",
+              "subject": "agent.approval_pending.*",
+              "stream_name": "AGENT"
+            }
+          ],
+          "kv_write": [
+            {
+              "name": "loops",
+              "type": "kv-write",
+              "bucket": "AGENT_LOOPS"
+            },
+            {
+              "name": "trajectories",
+              "type": "kv-write",
+              "bucket": "AGENT_TRAJECTORIES"
+            }
+          ]
+        }
+      }
+    },
+    "agentic-dispatch": {
+      "type": "processor",
+      "name": "agentic-dispatch",
+      "enabled": true,
+      "config": {
+        "default_role": "coordinator",
+        "auto_continue": true,
+        "default_tools": [
+          "decide",
+          "read_loop_result",
+          "scratchpad",
+          "query_entity"
+        ],
+        "stream_name": "USER",
+        "ports": {
+          "inputs": [
+            {
+              "name": "user.message",
+              "type": "jetstream",
+              "subject": "user.message.>",
+              "stream_name": "USER",
+              "required": true
+            },
+            {
+              "name": "agent.complete",
+              "type": "jetstream",
+              "subject": "agent.complete.*",
+              "stream_name": "AGENT",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "name": "agent.task",
+              "type": "jetstream",
+              "subject": "agent.task.*",
+              "stream_name": "AGENT"
+            },
+            {
+              "name": "user.response",
+              "type": "nats",
+              "subject": "user.response.*"
+            },
+            {
+              "name": "agent.approval_response",
+              "type": "jetstream",
+              "subject": "agent.approval_response.*",
+              "stream_name": "AGENT"
+            }
+          ]
+        },
+        "permissions": {
+          "view": [
+            "*"
+          ],
+          "submit_task": [
+            "*"
+          ],
+          "cancel_own": true,
+          "cancel_any": [],
+          "approve": [
+            "*"
+          ]
+        }
+      }
+    },
+    "delivery-station": {
+      "type": "processor",
+      "name": "delivery-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.delivery-station.>",
+              "required": true,
+              "description": "The delivery route's publish target (dev-from-task/08a). The run entity travels as the payload entity_id; the station stamps pr.ref on it."
+            }
+          ]
+        },
+        "forge": {
+          "_comment": "The REAL delivery target (forge-io-real-lanes D5). UNCONFIGURED (empty owner/repo/remote_url) = every delivery FAILS CLOSED and the run PARKS (the local-delivery stub is deleted). Journeys patch a local forge double + file:// bare remote; a live deployment sets owner/repo/remote_url and provides the token via token_env (dotenv lane).",
+          "owner": "C360Studio",
+          "repo": "semdev-test",
+          "remote_url": "https://github.com/C360Studio/semdev-test.git",
+          "base_branch": "main",
+          "api_base": "",
+          "token_env": "GITHUB_TOKEN"
+        }
+      }
+    },
+    "projection-station": {
+      "type": "processor",
+      "name": "projection-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.projection-station.>",
+              "required": true,
+              "description": "The projection rule's publish target (dev-from-task/03). The run is the payload entity_id; the slug travels as a property. The station freezes task.spec."
+            }
+          ]
+        }
+      }
+    },
+    "validation-station": {
+      "type": "processor",
+      "name": "validation-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.validation-station.>",
+              "required": true,
+              "description": "The validate rule's publish target (coordinator/03). Fires on the authoring loop, so run_entity_id + slug travel as properties. The station runs the OpenSpec oracle and stamps openspec.validated."
+            }
+          ]
+        }
+      }
+    },
+    "floors-station": {
+      "type": "processor",
+      "name": "floors-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.floors-station.>",
+              "required": true,
+              "description": "The floors-trigger rule's publish target (dev-from-task/05). Fires on the developer loop L_n, so run_entity_id + task_index travel as properties. The station stamps floor.finding on the run and the route.* mirror on L_n (the dispatch entity_id)."
+            }
+          ]
+        }
+      }
+    },
+    "verify-station": {
+      "type": "processor",
+      "name": "verify-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.verify-station.>",
+              "required": true,
+              "description": "The review-approved route's publish target (dev-from-task/07a). Fires on Quinn's review loop Q_n, so run_entity_id travels as a property. The station cold-proves the committed artifact and stamps verify.result on the run."
+            }
+          ]
+        }
+      }
+    },
+    "provision-station": {
+      "type": "processor",
+      "name": "provision-station",
+      "enabled": true,
+      "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "dispatch",
+              "type": "nats",
+              "subject": "component.provision-station.>",
+              "required": true,
+              "description": "The provision rule's publish target (sandbox/01). Fires on the RUN (after approval + projection), so the run is the payload entity_id and there is no property. The station materializes the checkout, cold-proves the declared image, stands up the warm container, and stamps sandbox.ready/blocked on the run."
+            }
+          ]
+        }
+      }
+    },
+    "sim": {
+      "type": "input",
+      "name": "sim",
+      "enabled": false
+    }
+  },
+  "source": {
+    "forge": {
+      "base_url": "https://github.com",
+      "token_env": "GITHUB_TOKEN"
+    }
+  }
+}

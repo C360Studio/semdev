@@ -148,7 +148,11 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
   all findings applied (standing directive). Focus: the D2 history/base change (fixture regression), the
   no-argv-leak token path, the fail-closed source resolution, and the driver's G2 posture.
 - [x] 7.3 `openspec validate --strict` green; sync-specs at archive folds these three deltas.
-- [ ] 7.4 OPERATOR-GATED, deliberately open (the M0-completion G7 requirement, = forge-io 5.4): ONE
+- [x] 7.4 DONE (2026-07-20 — M0-COMPLETION CLAIMED): ONE recorded live-forge delivery — PR
+  https://github.com/C360Studio/semdev-test/pull/2 (converged, attempts=1, ~$0.178, gemini all roles;
+  cloned C360Studio/semdev-test#1 → developed → cold-verified → delivered the fix-alone diff back to main;
+  pull-first `semdev launch` + stand-in approval). Evidence: docs/evidence-ledger.md M0-completion entry.
+  (Originally: OPERATOR-GATED, the M0-completion G7 requirement, = forge-io 5.4): ONE
   recorded live-forge delivery against the disposable `semdev-test` repo. PULL-FIRST runnable via
   `semdev launch <ref>` (outbound — NO webhook reachability / secret needed; the webhook door remains
   optional). PREREQUISITES: (a) `semdev-test` SEEDED (a buildable project + a declared

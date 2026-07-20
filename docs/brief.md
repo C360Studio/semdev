@@ -124,8 +124,10 @@ until its evidence entry exists and survives the honesty rules.
     from its own coordinate — history preserved — and delivers a PR back to it
     (self-target provisioning); `semdev launch <owner/repo#n>` mints a run
     against a live issue OUTBOUND (pull-first, no webhook secret needed). Proven
-    offline against a local bare remote (the delivered diff is the fix alone);
-    the M2 claim still awaits one recorded live-forge delivery (G7).
+    offline against a local bare remote AND proven live: the first real-forge
+    delivery landed 2026-07-20 (PR against `C360Studio/semdev-test`, the delivered
+    diff the fix alone) — the G7 M0-completion requirement is met. Full dogfood
+    (semdev on its own issues) is the remaining M2 step.
 - **M3+ — harder tiers / sibling repos**: only after M2 evidence is boringly
   repeatable.
 

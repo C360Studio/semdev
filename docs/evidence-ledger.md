@@ -148,14 +148,59 @@ evidence).
 - M1 remains NOT CLAIMED as of this entry. (Claimed the same day by the
   run-2 entry above.)
 
+## Rung: M0-COMPLETION — one recorded live-forge delivery (self-target)
+
+**Status: CLAIMED (2026-07-20).** The G7 M0-completion requirement — at least one
+recorded REAL-forge delivery (forge-io task 5.4 = self-target task 7.4) — is met by
+the live run below: a real GitHub issue, cloned from its own coordinate, developed
+by real Gemini turns, cold-room verified, and delivered as a real evidence-bearing
+pull request. The M2 self-target mechanism is now proven LIVE, not only offline.
+Full M2 *dogfood* (semdev working its OWN issues) remains ahead; this run used a
+disposable target (`C360Studio/semdev-test`).
+
+### 2026-07-20 — first live-forge delivery (M0-completion)   [kind: live-forge]
+
+- Status: **converged** (attempts=1)
+- Target: `C360Studio/semdev-test#1` (a real GitHub repo, seeded with the
+  go-health-class project + the warning-boundary bug), CLONED from its coordinate
+  via the forge-clone source (self-target provisioning)
+- Trigger: `semdev launch C360Studio/semdev-test#1 --model gemini` (operator front
+  door, OUTBOUND / pull-first — no webhook)
+- Approval: pull-first STAND-IN — a `/semdev approve` comment event published to the
+  GITHUB stream, released by the REAL approval adapter (`actor=cglusky`), authorized
+  and attributed; the `semdev approve` CLI is the queued `pull-first-forge` change
+- Run: `c360.semdev-001.agent.chain.execution.990ad0d7-ab81-474a-99c4-8f45dae04273`
+- Delivered PR: **https://github.com/C360Studio/semdev-test/pull/2**
+  (`head=semdev/990ad0d7… base=main`), body carries the evidence summary
+- Change: `fix-health-classify-warning-boundary`; OpenSpec-validated
+  (`sha256:00dfff6f…`)
+- Measured (harness-stamped, in-container): `go test -run TestClassify ./...`
+  exit_code=0 passed=true; commit `ad53f0777df2a82660c1fd4964b9f48779ef8ad8`
+- Floors: rejected=false · Review (Quinn): approved, findings=0 · Clean-room verify:
+  pass (profile go)
+- Delivered diff = the FIX ALONE against main (`case pressure > warningThreshold` →
+  `>=` in health.go); the delivered tip is the verified `attempt.commit.sha` — the
+  bytes measured + cold-verified are the bytes delivered (G4/G7)
+- Model: gemini-3.1-pro-preview via generativelanguage.googleapis.com (provider
+  gemini + wire backend), all roles
+- Cost record (harness token facts; NO `cost-usd` stamped — upstream #584 —
+  reconciled from tokens at the config prices in $2.00/1M, out $12.00/1M):
+  tokens-in 81,924, tokens-out 1,201 → **≈ $0.178**; per-loop: coordinator
+  21,321/747, developer 51,167/367, reviewer 9,436/87
+- Wall: launch 08:56:53 → delivery 08:59:01 (~2m08s incl. the approval wait)
+- Hazards observed: benign `model not in registry, using default context limit`
+  WARNs (the wake names the `coordinator`/`developer`/`reviewer` capability, not an
+  endpoint — context limit defaults to 128000, ample for this task); the probe's
+  hardcoded `max_tokens:64` truncates gemini-3.1-pro's reasoning before the tool
+  call (re-probed at 512 tokens → clean `ping` — a probe artifact, not a fault)
+
 ## Rung: M2 — dogfood (self-target foundation)
 
-**Status: NOT CLAIMED — foundation proven offline; the claim awaits one recorded
-live-forge delivery** (self-target-provisioning-and-launch-driver task 7.4 =
-forge-io-real-lanes task 5.4, operator-gated). The M2 mechanism — a run provisions
-its sandbox by CLONING the real target from its own coordinate (`run.issue.ref`),
-develops in the clone, and delivers a PR back to it — is bridge-proven against a
-local bare remote with zero paid tokens.
+**Status: FOUNDATION PROVEN (offline + one live delivery above).** The M2 mechanism
+— a run provisions its sandbox by CLONING the real target from its own coordinate
+(`run.issue.ref`), develops in the clone, and delivers a PR back to it — is
+bridge-proven against a local bare remote with zero paid tokens AND proven live
+(the M0-completion entry above). Full dogfood (semdev on its OWN issues) is next.
 
 | Journey (evidence ref: `test/e2e/selftarget_journey_test.go`) | Kind | Status | Artifact verified | What it proves |
 |---|---|---|---|---|
