@@ -62,6 +62,17 @@ message carries one identity (its author), and the same admission gate (allowlis
 push-capable collaborator) governs it. An approval signal from an unauthorized author
 SHALL NOT release the gate.
 
+The poll transport reads a comment's CURRENT body, so it MAY honor an approval that
+was edited into a comment (attributed by the host to that comment's author, which the
+admission gate governs); the webhook transport acts only on comment creation. This
+edit divergence is accepted and documented, not a byte-identical guarantee across
+transports.
+
+The deployment SHALL make the active inbound mode observable: enabling the poller
+without an inbound webhook, or configuring neither, SHALL be surfaced at boot (a loud
+mode log, and an assembly-time coherence check) rather than presenting as a healthy
+component that silently never releases the gate.
+
 #### Scenario: A polled approval releases the gate with no webhook
 - **WHEN** a run is awaiting approval on a deployment with no webhook receiver and polling enabled
 - **AND** an authorized author posts the approval signal on the run's thread
