@@ -98,9 +98,9 @@ review surface (Phase 3), NO non-GitHub `Read`, NO issue-discovery-by-poll, NO
 
 ## 6. Verification + review + evidence
 
-- [ ] 6.1 Full offline ladder green (`task check`) + full `task e2e -race` uncached
+- [x] 6.1 Full offline ladder green (`task check`) + full `task e2e -race` uncached
   (all journeys incl. the new by-poll) + `openspec validate --strict`.
-- [ ] 6.2 Adversarial review — BOTH reviewers (go + semstreams), zero blocking/high,
+- [x] 6.2 Adversarial review — BOTH reviewers (go + semstreams), zero blocking/high,
   all findings applied. Focus: the poll transport's fail-safety (idempotent re-read,
   bounded, read-only G2 enumeration, no new writer/fact), the XOR ownership (no
   double-processing), the shared approval core (webhook byte-identity), the in-memory

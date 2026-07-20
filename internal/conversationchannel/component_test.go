@@ -60,9 +60,9 @@ func TestPollIntervalDefaultsAndFloor(t *testing.T) {
 		in   string
 		want time.Duration
 	}{
-		{"", 15 * time.Second},   // unset → default
-		{"3s", 5 * time.Second},  // sub-floor → clamped
-		{"5s", 5 * time.Second},  // at floor
+		{"", 15 * time.Second},    // unset → default
+		{"3s", 5 * time.Second},   // sub-floor → clamped
+		{"5s", 5 * time.Second},   // at floor
 		{"30s", 30 * time.Second}, // above floor → as-authored
 	}
 	for _, c := range cases {
