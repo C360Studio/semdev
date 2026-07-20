@@ -185,4 +185,77 @@ gets an entry too — honest failures are evidence.
   front-of-arc wedge recurs WITHOUT an "address already in use" error, the
   consumer-not-active storm was independent — reopen
   adopt-reason-aware-escalate task 7.4b before trusting further paid runs.
+
+## 8. Live-target run (self-target, PULL-FIRST)
+
+§1–7 drive the **fixture** arc (`SandboxSourceDir` → the committed
+`go-health-class` tree). The live-target run instead develops a **real
+repository** the run CLONES from its own coordinate (self-target
+provisioning-and-launch-driver). This is the shape the M0-completion claim
+requires (one recorded real-forge delivery — task 5.4 / 7.4). PULL-FIRST:
+`semdev launch` is OUTBOUND, so the host needs NO inbound webhook reachability
+and NO webhook secret.
+
+**Prerequisite — SEED the target first.** An empty repo has no default branch to
+clone and no issue to develop; `Materialize` fails closed with "no commits — seed
+it first" (enforced in code, `runspace` group 2). The disposable target
+(`semdev-test`) must carry: a buildable project, a declared
+`.devcontainer/Dockerfile` (per the sandbox spec), and an authored issue.
+
+**Config — select CLONE mode.** Add a `source.forge` block to the bootstrap
+config the runtime boots (design D5; absent → the fixture default):
+
+```jsonc
+"source": {
+  "forge": {
+    "base_url": "https://github.com",
+    "token_env": "GITHUB_TOKEN"   // empty ⇒ unauthenticated (public repos only)
+  }
+}
+```
+
+The config file carries only the forge source; the both-set fail-closed guard
+(design D5) protects the internal `RunOptions` seam (exercised by the e2e tests),
+so a config-file operator cannot trip it. `GITHUB_TOKEN` authenticates the clone,
+the issue read, and the PR push; it rides the token ENV, never argv (D3).
+
+**Run it** — two shells:
+
+```sh
+# shell 1: bring up the runtime (resets NATS, loads .env for GITHUB_TOKEN)
+task serve
+
+# shell 2: mint one run against the live issue (thin outbound client)
+task launch REF=owner/semdev-test#<n> MODEL=<model_registry key>
+# sidecar (repeat every 30–60s), same wallclock rule as §5:
+task launch:status
+```
+
+`MODEL` is the running runtime's `model_registry` key — `mock` for a mock
+runtime (a zero-token dry run of the launch seam), the gemini key for the paid
+live run. The webhook door (if the host is reachable) remains an optional latency
+accelerator; `semdev launch` needs neither it nor its secret.
+
+`task serve` is a FRESH-STATE boot (its `nats:reset` dep wipes durable NATS):
+restarting the daemon mid-run discards the in-flight run's state — the documented
+restart-safety gap (design D2 review H3: `Provision` no-ops once `sandbox.ready`
+is stamped, and no durable base fact exists yet). Do not restart `serve` during a
+live run.
+
+**Approval caveat (read before the live run).** On a webhook-UNREACHABLE host the
+change-approval gate still needs a non-webhook approval. Until the queued
+`pull-first-forge` change lands the `semdev approve` CLI + the `/semdev approve`
+comment-poller + the proposal review-surface, approval on such a host is a
+STAND-IN write (the exact `run.change.approved` fact, Source `approval-adapter`).
+A webhook-reachable host can approve with a real `/semdev approve` comment today
+(proven by `TestBridgeProofWebhookIssueToApprovedRun`).
+
+**What the offline journey does and does NOT cover** (honesty, ledger it): the
+`TestBridgeProofSelfTargetForgeCloneToPR` mock journey proves the
+clone→develop→diff→deliver MECHANICS against a local bare remote with zero paid
+tokens — the delivered PR diff is the fix alone, history preserved. It does NOT
+exercise the D3 no-argv token path (file:// transport never prompts for
+credentials — only the `clone` unit pin and this live run do) nor a moved
+server-side merge-base. Record the live run in the ledger per §6 (kind:
+`live-forge`), including the delivered PR URL.
 - A `(cached)` e2e result is not a green ladder. `-count=1`.

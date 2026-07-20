@@ -147,7 +147,7 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
 	h := &handler{
 		deps: provisionsandbox.ProvisionDeps{
-			Sources:     sources, // StaticSource (fixture) or the forge-clone Source (real target)
+			Sources:     sources,   // StaticSource (fixture) or the forge-clone Source (real target)
 			Checkouts:   checkouts, // *runspace.Checkouts implements Materialize (provision Checkouts)
 			Manifests:   runspace.Manifests{},
 			Warmers:     sandboxes, // *runspace.Sandboxes implements Provision (provision Warmers)

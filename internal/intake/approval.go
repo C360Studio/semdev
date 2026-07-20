@@ -67,7 +67,7 @@ type approvalAdapter struct {
 func newApprovalAdapter(client *natsclient.Client, cfg ComponentConfig, checker PermissionChecker, platform component.PlatformMeta, logger *slog.Logger) *approvalAdapter {
 	a := &approvalAdapter{cfg: cfg, checker: checker, logger: logger}
 	if client != nil {
-		a.resolver = &natsRunResolver{
+		a.resolver = &NATSRunResolver{
 			client: client,
 			prefix: fmt.Sprintf("%s.%s.agent.chain.execution", platform.Org, platform.Platform),
 		}
@@ -176,10 +176,10 @@ func hasApprovalCommand(command, text string) bool {
 	return false
 }
 
-// natsRunResolver resolves ref→run over the graph's paginated prefix query
+// NATSRunResolver resolves ref→run over the graph's paginated prefix query
 // (the framework's lesson-reader pattern): list this platform's
 // chain-execution entities, match run.issue.ref.
-type natsRunResolver struct {
+type NATSRunResolver struct {
 	client *natsclient.Client
 	// prefix is the 5-part chain namespace {org}.{platform}.agent.chain.execution.
 	prefix string
@@ -188,7 +188,10 @@ type natsRunResolver struct {
 // maxRunPages bounds the pagination defensively (a page is 1000 entities).
 const maxRunPages = 16
 
-func (r *natsRunResolver) ResolveRunByRef(ctx context.Context, ref string) (string, bool, error) {
+// ResolveRunByRef returns the run entity ID carrying run.issue.ref == ref (with
+// its run.change.approved state), "" when none exists yet, or an error on a
+// transport fault — the RunResolver contract, over the graph prefix query.
+func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (string, bool, error) {
 	cursor := ""
 	for page := 0; page < maxRunPages; page++ {
 		req := graph.PrefixQueryRequest{Prefix: r.prefix, Cursor: cursor}
@@ -242,7 +245,7 @@ func (r *natsRunResolver) ResolveRunByRef(ctx context.Context, ref string) (stri
 // the SET the operator launch driver diffs across its front-door publish to bind the run IT
 // minted, excluding any pre-existing run that already shared the ref (e.g. from a prior webhook
 // wake). A read-only observation (graph prefix query), never a lifecycle write (G2).
-func (r *natsRunResolver) ResolveRunIDsByRef(ctx context.Context, ref string) ([]string, error) {
+func (r *NATSRunResolver) ResolveRunIDsByRef(ctx context.Context, ref string) ([]string, error) {
 	var ids []string
 	cursor := ""
 	for page := 0; page < maxRunPages; page++ {
@@ -282,8 +285,8 @@ func (r *natsRunResolver) ResolveRunIDsByRef(ctx context.Context, ref string) ([
 // the operator launch driver binds through (by observation; it fires no lifecycle transition,
 // G2). org/platform form the 5-part chain namespace {org}.{platform}.agent.chain.execution the
 // prefix query lists. It satisfies both RunResolver (first-match) and the driver's id-set read.
-func NewRunResolver(client *natsclient.Client, org, platform string) *natsRunResolver {
-	return &natsRunResolver{
+func NewRunResolver(client *natsclient.Client, org, platform string) *NATSRunResolver {
+	return &NATSRunResolver{
 		client: client,
 		prefix: fmt.Sprintf("%s.%s.agent.chain.execution", org, platform),
 	}

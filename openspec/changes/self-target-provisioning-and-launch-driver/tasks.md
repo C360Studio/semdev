@@ -121,7 +121,7 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
 
 ## 6. Offline end-to-end + operator lane + docs
 
-- [ ] 6.1 A `-race` docker journey that provisions from the forge-clone source against a LOCAL bare git
+- [x] 6.1 A `-race` docker journey that provisions from the forge-clone source against a LOCAL bare git
   remote seeded WITH history: clone → develop the arc → the cumulative diff is the FIX ALONE (not the
   history) → deliver → the delivered PR-equivalent diff is the fix (reuses the forge-io bare-remote +
   recording-double harness). Proves self-target end-to-end with zero paid tokens. HONESTY ANNOTATION
@@ -130,24 +130,24 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
   GitHub's server-side merge-base — so this journey proves clone→develop→diff→deliver MECHANICS for the
   static full-clone case; token-auth + moved-base are covered by the unit pin + the operator-gated live
   run. State this in the ledger.
-- [ ] 6.2 Taskfile operator lane for `semdev launch` (launch/status shape, mirroring the `realllm:`
+- [x] 6.2 Taskfile operator lane for `semdev launch` (launch/status shape, mirroring the `realllm:`
   lane); runbook gains the live-target sequence, PULL-FIRST framed (operator picks a disposable repo,
   sets `GITHUB_TOKEN` + the `source.forge` config; NO webhook secret needed — `semdev launch` is
   outbound). NOTE the approval caveat: on a webhook-unreachable host the change-approval gate still
   needs a non-webhook approval (a stand-in write today; the `semdev approve` CLI + `/semdev approve`
   poller + the proposal-review-surface land in the queued `pull-first-forge` change — see design
   Non-Goals + [[pull-first-forge-deployment]]).
-- [ ] 6.3 Docs match reality (G10): `docs/brief.md` milestone status, CLAUDE.md status line,
+- [x] 6.3 Docs match reality (G10): `docs/brief.md` milestone status, CLAUDE.md status line,
   `docs/port-manifest.md` if a new port is implied; update the memory pointers.
 
 ## 7. Verification + review + evidence
 
-- [ ] 7.1 Full offline ladder green (`task check` — build + lint + unit `-race`, censuses) + full
+- [x] 7.1 Full offline ladder green (`task check` — build + lint + unit `-race`, censuses) + full
   `task e2e` green `-race` uncached (the prior journeys UNCHANGED + the new self-target journey).
-- [ ] 7.2 Adversarial review — BOTH reviewers (go-reviewer + semstreams-reviewer), zero blocking/high,
+- [x] 7.2 Adversarial review — BOTH reviewers (go-reviewer + semstreams-reviewer), zero blocking/high,
   all findings applied (standing directive). Focus: the D2 history/base change (fixture regression), the
   no-argv-leak token path, the fail-closed source resolution, and the driver's G2 posture.
-- [ ] 7.3 `openspec validate --strict` green; sync-specs at archive folds these three deltas.
+- [x] 7.3 `openspec validate --strict` green; sync-specs at archive folds these three deltas.
 - [ ] 7.4 OPERATOR-GATED, deliberately open (the M0-completion G7 requirement, = forge-io 5.4): ONE
   recorded live-forge delivery against the disposable `semdev-test` repo. PULL-FIRST runnable via
   `semdev launch <ref>` (outbound — NO webhook reachability / secret needed; the webhook door remains

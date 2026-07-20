@@ -97,7 +97,20 @@ the `local-delivery:` stub is DELETED, `openpr.Delivery` pushes the RECORDED ver
 protocol-faithful local forge double + a REAL bare-git-remote push, and an unconfigured
 forge fails closed into the station-failure park. Both reviewers approve zero
 blocking/high, all findings applied. The M0-completion claim still awaits the ONE
-recorded live-forge delivery — operator-gated, tracked as task 5.4). ARCHIVED
+recorded live-forge delivery — operator-gated, tracked as task 5.4), and
+`self-target-provisioning-and-launch-driver` (M2's dogfood FOUNDATION, groups 1–6
+DONE, group 7 verify pending): the run PROVISIONS by CLONING the real target from
+its own `run.issue.ref` — history preserved as the in-repo diff base `refs/semdev/base`
+so a real PR diffs to the fix ALONE, the fixture path stays byte-identical —
+config-selected via the `source.forge` block, fail-closed on ambiguity [design D5];
+and `semdev launch <owner/repo#n>` mints one run against a live issue OUTBOUND through
+`experiment.Launch` [pull-first — no webhook secret needed; NO Go lifecycle write, G2].
+Bridge-proven OFFLINE by `TestBridgeProofSelfTargetForgeCloneToPR` [webhook front →
+forge-clone provision → full arc → deliver back to the SAME bare remote → the delivered
+diff `main..semdev/<suffix>` is the fix alone, history preserved; zero paid tokens, green
+`-race` ~29s]; both reviewers APPROVE zero blocking/high (false-green impossibility
+verified against real git). Its task 7.4 IS forge-io's 5.4 — the ONE operator-gated
+live-forge delivery that claims M0-completion and opens the M2 rung. ARCHIVED
 (implemented + specs synced): `station-failure-parks` (M2's first unattended-safety
 floor: `station.dispatch.failed` harness-stamped on retries-exhausted, the run-/loop-fired
 park rules, the dispatch-entity census, the RED-first `TestBridgeProofStationFailureParks`

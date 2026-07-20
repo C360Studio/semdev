@@ -148,6 +148,44 @@ evidence).
 - M1 remains NOT CLAIMED as of this entry. (Claimed the same day by the
   run-2 entry above.)
 
+## Rung: M2 — dogfood (self-target foundation)
+
+**Status: NOT CLAIMED — foundation proven offline; the claim awaits one recorded
+live-forge delivery** (self-target-provisioning-and-launch-driver task 7.4 =
+forge-io-real-lanes task 5.4, operator-gated). The M2 mechanism — a run provisions
+its sandbox by CLONING the real target from its own coordinate (`run.issue.ref`),
+develops in the clone, and delivers a PR back to it — is bridge-proven against a
+local bare remote with zero paid tokens.
+
+| Journey (evidence ref: `test/e2e/selftarget_journey_test.go`) | Kind | Status | Artifact verified | What it proves |
+|---|---|---|---|---|
+| `TestBridgeProofSelfTargetForgeCloneToPR` | mock + forge-clone | pass | yes — in-arc cold clean-room verify of the committed artifact | the run clones a real target (history preserved via `refs/semdev/base`), develops, and delivers a PR back to the SAME repo whose diff (`main..semdev/<suffix>`) is the FIX ALONE, history excluded |
+
+The front of the arc drives from a flattened webhook event so `coordinator/04`
+stamps `run.issue.ref` (the coordinate the forge-clone source reads); the run
+provisions with `RunOptions.ForgeSource` set and `SandboxSourceDir` unset, so a
+fixture fallback is structurally unreachable (verified in review). Proven green
+**with `-race`** (~29s), zero paid tokens.
+
+HONESTY (task 6.1 review M3): the clone runs over file:// transport, which never
+prompts for credentials, so the D3 no-argv-leak token path is NOT exercised here —
+only the `clone.TestResolveTokenRidesEnvNotArgv` unit pin and the operator-gated
+live run do. The local bare remote (clone source == delivery target) cannot
+reproduce a moved server-side merge-base. This journey proves the
+clone→develop→diff→deliver MECHANICS for the full-clone case; token-auth + a moved
+base remain covered by the unit pin + the live-forge run.
+
+The operator launch driver (`semdev launch <owner/repo#n>`) mints one run against a
+live issue OUTBOUND through `experiment.Launch` (pull-first; no webhook secret).
+Runnable via `task serve` + `task launch` (runbook §8); the live-forge delivery
+that would claim this rung is deliberately unrun (it spends real forge state, and
+the target must be SEEDED first — enforced in code).
+
+Reviewers: go-reviewer + semstreams-reviewer both APPROVE (zero blocking/high; the
+false-green impossibility verified against real git — fixture-fallback is
+structurally unreachable when `ForgeSource` is set, and the merge-base + name-only
+assertions are independently load-bearing).
+
 ## Experiment conditions (semsource A/B — integrate-semsource-ab-harness)
 
 Runs minted under a declared experiment condition carry

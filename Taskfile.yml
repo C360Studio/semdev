@@ -124,3 +124,47 @@ tasks:
       - grep -E "real-llm (station|milestone|TERMINAL)|EVIDENCE|LEDGER|--- (PASS|FAIL|SKIP)" /tmp/realllm-run.log | tail -5 || true
       - grep -iE "error|failed|panic" /tmp/realllm-run.log | tail -3 || true
       - docker run --rm --network compose_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"
+
+  serve:
+    desc: >-
+      Bring up the semdev runtime (NATS + docker + every component) — the daemon
+      `semdev launch` and the (optional) webhook door talk to. Loads .env
+      (GITHUB_TOKEN authenticates the issue read + PR delivery); the config's
+      `source.forge` block selects self-target CLONE mode (absent → the fixture
+      default, self-target-provisioning-and-launch-driver D5). Run this in ONE
+      shell, then `task launch REF=owner/repo#N MODEL=<key>` in another. Ctrl-C
+      stops it. PULL-FIRST: no inbound webhook reachability is required.
+    deps: [nats:reset]
+    cmds:
+      - go run ./cmd/semdev
+
+  launch:
+    desc: >-
+      Operator front door (self-target-provisioning-and-launch-driver): mint ONE
+      run against a live issue through the sanctioned experiment.Launch seam — a
+      thin CLIENT of an ALREADY-RUNNING runtime (start it with `task serve` in
+      another shell). PULL-FIRST: `semdev launch` is OUTBOUND, so no webhook
+      reachability or secret is needed. The target repo MUST be SEEDED first (a
+      buildable project + a declared Dockerfile/devcontainer per the sandbox spec
+      + the authored issue) — an empty repo has no default branch to clone and no
+      issue to develop. MODEL is the running runtime's model_registry key (REQUIRED
+      — no default; `mock` for a mock runtime, the gemini key for a paid one).
+      Pass FORCE=--force to mint past the per-ref idempotency guard.
+    preconditions:
+      - sh: test -n "{{.REF}}"
+        msg: "REF is empty — usage: task launch REF=owner/repo#number MODEL=<model_registry key> [FORCE=--force]"
+      - sh: test -n "{{.MODEL}}"
+        msg: "MODEL is empty — pass the running runtime's model_registry key, e.g. MODEL=mock or MODEL=gemini (LaunchModel requires it)."
+      - sh: test -n "$GITHUB_TOKEN"
+        msg: "GITHUB_TOKEN is empty — the issue read + PR delivery need it (cp .env.example .env or export it)."
+    cmds:
+      - go run ./cmd/semdev launch {{.REF}} --model {{.MODEL}} {{.FORCE}}
+
+  launch:status:
+    desc: >-
+      One sidecar poll for a launched run (run every 30–60s in a second shell
+      while the arc is in flight): the AUTHORITATIVE fact-store state via nats-box
+      (the NATS image ships no nats CLI). Wallclock rule: any station with no new
+      fact for >2× its expected step time is wedged — abort rather than wait.
+    cmds:
+      - docker run --rm --network compose_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep -E "chain.execution" || echo "no run entity yet"

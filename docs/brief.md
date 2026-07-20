@@ -120,6 +120,12 @@ until its evidence entry exists and survives the honesty rules.
   bounded cost, watch/liveness in place.
 - **M2 — dogfood**: semdev works its own GitHub issues. This is the first
   real target and the standing one: the product improves the product.
+  - *Foundation in place (not yet the claim):* the run CLONES the real target
+    from its own coordinate — history preserved — and delivers a PR back to it
+    (self-target provisioning); `semdev launch <owner/repo#n>` mints a run
+    against a live issue OUTBOUND (pull-first, no webhook secret needed). Proven
+    offline against a local bare remote (the delivered diff is the fix alone);
+    the M2 claim still awaits one recorded live-forge delivery (G7).
 - **M3+ — harder tiers / sibling repos**: only after M2 evidence is boringly
   repeatable.
 
