@@ -76,13 +76,13 @@ review surface (Phase 3), NO non-GitHub `Read`, NO issue-discovery-by-poll, NO
 
 ## 4. The by-poll journey (regression guard for the new transport)
 
-- [ ] 4.1 RED: `TestBridgeProofApprovalByPollNoWebhook` — a bootstrap with
+- [x] 4.1 RED: `TestBridgeProofApprovalByPollNoWebhook` — a bootstrap with
   issue-intake `http_port 0` (no receiver) + conversation-channel `poll.enabled true`;
   a run minted via the front-door publish, parked at approval; a `/semdev approve`
   comment posted to the thread's forge double is read by the POLLER (no webhook, no
   stand-in write) and releases the gate; the run resumes. Uses the protocol-faithful
   forge double's `ListComments`.
-- [ ] 4.2 The existing webhook/park/approval journeys pass byte-for-byte (webhook mode
+- [x] 4.2 The existing webhook/park/approval journeys pass byte-for-byte (webhook mode
   unchanged) — no journey rewired; the poll journey is ADDED.
 
 ## 5. Spec + docs

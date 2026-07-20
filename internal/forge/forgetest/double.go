@@ -25,7 +25,7 @@ import (
 
 // Request is one recorded call.
 type Request struct {
-	// Kind is "find_pr" | "create_pr" | "create_comment" | "permission".
+	// Kind is "find_pr" | "create_pr" | "create_comment" | "list_comments" | "permission".
 	Kind string
 	// Method + Path are the raw HTTP surface.
 	Method string
@@ -47,24 +47,41 @@ type PR struct {
 	URL    string `json:"html_url"`
 }
 
-// Comment is a recorded issue comment.
+// Comment is a recorded issue comment. ID + Author are carried so the poll
+// transport (pull-first-transport) can Read them back via ListComments — a park
+// post leaves Author empty (the bot posts), an AddComment sets the human author.
 type Comment struct {
+	ID          int64
 	IssueNumber int
+	Author      string
 	Body        string
 }
 
 // Double is the recording forge.
 type Double struct {
-	mu       sync.Mutex
-	server   *httptest.Server
-	requests []Request
-	prs      []PR
-	comments []Comment
-	nextPR   int
+	mu          sync.Mutex
+	server      *httptest.Server
+	requests    []Request
+	prs         []PR
+	comments    []Comment
+	nextPR      int
+	nextComment int64
 
 	// Permissions maps actor login → permission level for the permission
 	// endpoint ("" → 404/none). Set before use; read under the lock.
 	Permissions map[string]string
+}
+
+// AddComment seeds a comment ON an issue thread — a human's comment the poll
+// transport Reads (via ListComments) to drive the /semdev approve gate. It assigns
+// the next monotonic comment id (the poll cursor key) and returns it.
+func (d *Double) AddComment(issueNumber int, author, body string) int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.nextComment++
+	id := d.nextComment
+	d.comments = append(d.comments, Comment{ID: id, IssueNumber: issueNumber, Author: author, Body: body})
+	return id
 }
 
 // Start builds and starts the double.
@@ -129,6 +146,9 @@ func (d *Double) route(w http.ResponseWriter, r *http.Request) {
 	case pullsRe.MatchString(r.URL.Path) && r.Method == http.MethodPost:
 		d.record("create_pr", r, decoded)
 		d.handleCreatePR(w, r, decoded)
+	case commentsRe.MatchString(r.URL.Path) && r.Method == http.MethodGet:
+		d.record("list_comments", r, decoded)
+		d.handleListComments(w, r)
 	case commentsRe.MatchString(r.URL.Path) && r.Method == http.MethodPost:
 		d.record("create_comment", r, decoded)
 		d.handleCreateComment(w, r, decoded)
@@ -186,8 +206,46 @@ func (d *Double) handleCreateComment(w http.ResponseWriter, r *http.Request, bod
 	_, _ = fmt.Sscanf(m[3], "%d", &number)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.comments = append(d.comments, Comment{IssueNumber: number, Body: str(body["body"])})
-	writeJSON(w, http.StatusCreated, map[string]any{"id": len(d.comments)})
+	d.nextComment++
+	id := d.nextComment
+	d.comments = append(d.comments, Comment{ID: id, IssueNumber: number, Body: str(body["body"])})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+// handleListComments serves GET /repos/{o}/{r}/issues/{n}/comments in the GitHub
+// shape the semdev client decodes (id, body, created_at, html_url, user.login) —
+// the poll transport's Read source. Comments are returned oldest-first (append
+// order), the order GitHub uses and the numeric cursor relies on.
+func (d *Double) handleListComments(w http.ResponseWriter, r *http.Request) {
+	m := commentsRe.FindStringSubmatch(r.URL.Path)
+	var number int
+	_, _ = fmt.Sscanf(m[3], "%d", &number)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	type userT struct {
+		Login string `json:"login"`
+	}
+	type item struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		CreatedAt string `json:"created_at"`
+		HTMLURL   string `json:"html_url"`
+		User      userT  `json:"user"`
+	}
+	out := []item{}
+	for _, c := range d.comments {
+		if c.IssueNumber != number {
+			continue
+		}
+		out = append(out, item{
+			ID:        c.ID,
+			Body:      c.Body,
+			CreatedAt: "2026-07-20T12:00:00Z",
+			HTMLURL:   fmt.Sprintf("%s/issues/%d#comment-%d", d.server.URL, number, c.ID),
+			User:      userT{Login: c.Author},
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (d *Double) handlePermission(w http.ResponseWriter, r *http.Request) {
