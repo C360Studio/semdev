@@ -108,17 +108,17 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
 
 ## 6. Verification + review + evidence
 
-- [ ] 6.1 The webhook/park/approval journeys pass **byte-for-byte** (the regression
+- [x] 6.1 The webhook/park/approval journeys pass **byte-for-byte** (the regression
   guard) on the re-homed adapter — same facts, same phases, same webhook transport. NO
   new journey is added (this change introduces no new behavior; the approval-by-poll
   journey belongs to `pull-first-transport`).
-- [ ] 6.2 Full offline ladder green (`task check` — build + lint + unit `-race`,
+- [x] 6.2 Full offline ladder green (`task check` — build + lint + unit `-race`,
   censuses) + full `task e2e -race` uncached + `openspec validate --strict`.
-- [ ] 6.3 Adversarial review — BOTH reviewers (go + semstreams), zero blocking/high, all
+- [x] 6.3 Adversarial review — BOTH reviewers (go + semstreams), zero blocking/high, all
   findings applied (standing directive). Focus: the G5 single-writer reassignment + the
   G10 capability moves, the neutral-`Message` carve (no `githubwebhook` on the arc path),
   the `admission` sub-package extraction blast radius, and both-binary registration.
-- [ ] 6.4 sync-specs at archive folds the two deltas (forge-io narrows,
+- [x] 6.4 sync-specs at archive folds the two deltas (forge-io narrows,
   conversation-channel added → 12 caps).
 
 ## Follow-on (NOT this change): `pull-first-transport`

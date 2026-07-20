@@ -4,8 +4,10 @@
 
 Defines the channel-agnostic code-host seam: issues enter as normalized facts
 gated to authorized, opted-in actors; delivery opens a real, evidence-bearing
-pull request idempotently; and human communication rides issue/PR comments
-through a swappable adapter, with GitHub as the v1 implementation.
+pull request idempotently; and the forge provides the run's source at its
+coordinate and an issue's authored content on demand — through a swappable
+adapter, with GitHub as the v1 implementation. (Human communication rides the
+separate `conversation-channel` capability's `Channel` port.)
 ## Requirements
 ### Requirement: Host-agnostic issue intake
 
@@ -106,37 +108,6 @@ not the completion claim.
 - **THEN** it exercises the real adapter request shapes against a protocol-faithful local forge double
 - **AND** no journey depends on a live forge
 
-### Requirement: Human communication rides the seam
-
-Questions to humans SHALL be posted as issue/PR comments through the adapter, and
-a human reply SHALL re-enter as a normalized `human.opt.signal` fact keyed to the
-run. The arc SHALL NOT contain a bespoke chat surface.
-
-The change-approval human gate SHALL be operable from the issue: an authorized
-actor's approval signal (the v1 signal is settled in the design; it binds to
-ITS actor per the admission Event invariant) SHALL land as `run.change.approved`
-on the run through the approval adapter — the same fact, source, and placement
-the resume rule already consumes. A parked run's `run.awaiting.human` message
-SHALL reach the human as an issue comment through the adapter.
-
-#### Scenario: ask_human posts a comment and resumes on reply
-- **WHEN** the `ask_human` action fires for a parked run
-- **THEN** the adapter posts the question as an issue/PR comment
-- **AND** a human reply re-enters as a `human.opt.signal` fact that lets a rule resume the run
-
-#### Scenario: An authorized approval on the issue releases the gate
-- **WHEN** an authorized actor issues the approval signal on the admitted issue
-- **THEN** the approval adapter records `run.change.approved` on the run
-- **AND** the existing resume rule advances the run with no journey stand-in write
-
-#### Scenario: An unauthorized approval signal is ignored
-- **WHEN** an actor without authorization issues the approval signal
-- **THEN** no `run.change.approved` lands and the run stays gated
-
-#### Scenario: A parked run surfaces its message on the issue
-- **WHEN** a run records `run.awaiting.human`
-- **THEN** the adapter posts the park message as an issue comment naming what the human must decide
-
 ### Requirement: Intake is gated to authorized, opted-in actors
 
 The system SHALL create a run, spend budget, or steer an existing run only in
@@ -149,7 +120,9 @@ the explicit escape hatch for any actor the operator trusts regardless of repo
 permission. Admission SHALL be a deterministic, zero-token check recorded
 as `intake.actor.admitted` that runs before any run is created and before any paid
 token is spent; a rejected event creates no run and, by default, receives no
-reply.
+reply. The SAME authorization gate governs steering an existing run's human gate,
+enforced at the conversation-channel seam (see the `conversation-channel`
+capability) — this capability owns issue/PR intake and budget admission.
 
 #### Scenario: Authorized, opted-in issue is admitted
 - **WHEN** an issue is labeled `semdev` (or carries a `/semdev` command) by a push-capable repository collaborator or allowlisted actor
@@ -163,10 +136,6 @@ reply.
 #### Scenario: Authorized but not opted in does not start a run
 - **WHEN** an authorized actor opens an issue without the `semdev` label or `/semdev` command
 - **THEN** no run is created
-
-#### Scenario: Only the authorizing requester steers a run's human gate
-- **WHEN** a comment answering a run's `ask_human` question arrives from an actor other than that run's authorized requester
-- **THEN** it is not routed to the run's human-response gate
 
 ### Requirement: The forge provides the run's source at its coordinate
 
