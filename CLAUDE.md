@@ -54,19 +54,25 @@ shape. **Read these three documents before changing anything:**
 
 ## Status
 
-**IN FLIGHT — Phase 1 `conversation-channel-seam` (the pure carve), groups 1–4
-IMPLEMENTED + reviewed + committed; groups 5–6 (spec/docs coherence + full-suite
-verify/archive) in progress.** The conversation half of the arc is carved behind a
-channel-neutral `Channel` port (`Post`/`ResolveThread` + a neutral `Message`): the
-GitHub v1 impl in `internal/forge/conversation`, a shared `internal/intake/admission`
-core, and a new `conversation-channel` component (`internal/conversationchannel`)
-owning the `/semdev approve` comment lane + park-post — carved out of a NARROWED
-`issue-intake` (now the issue lane + webhook receiver only). Byte-identical arc
-behavior (a refactor behind stable facts): the webhook+parks e2e journeys pass on
-real docker, both adversarial reviewers APPROVE. `human.opt.signal`'s writer moved
-to the channel-neutral `conversation-adapter` (G5 pivot); `human.opt.signal` +
-`run.change.approved` capability tags → `conversation-channel`. The poll transport
-is a deferred follow-on (`pull-first-transport`); NL intent is Phase 2.
+**Phase 1 `conversation-channel-seam` (the pure carve) COMPLETE + ARCHIVED, and its
+`pull-first-transport` follow-on COMPLETE + ARCHIVED (2026-07-20).** The conversation
+half of the arc is carved behind a channel-neutral `Channel` port
+(`Post`/`ResolveThread`/`Read` + a neutral `Message`): the GitHub v1 impl in
+`internal/forge/conversation`, a shared `internal/intake/admission` core, and a
+`conversation-channel` component (`internal/conversationchannel`) owning the
+`/semdev approve` comment lane + park-post — carved out of a NARROWED `issue-intake`
+(now the issue lane + webhook receiver only). `human.opt.signal`'s writer is the
+channel-neutral `conversation-adapter` (G5 pivot); `human.opt.signal` +
+`run.change.approved` capability tags → `conversation-channel`. **pull-first-transport**
+added the port's `Read` verb + a POLLER so a webhook-unreachable deployment drives the
+approval gate by polling each awaiting-approval run's thread (in-memory cursor B-2,
+poll↔webhook XOR B-1, `Message.Author` auth H-1, a boot LOUD-WARN on the http_port-0 +
+poll-off dead-lane combo); the webhook transport stays byte-identical and an optional
+latency accelerator. Both changes: every group red-first, both adversarial reviewers
+APPROVE (zero blocking/high), full `task e2e -race` GREEN (incl.
+`TestBridgeProofApprovalByPollNoWebhook` on real docker), synced (conversation-channel
+MODIFIED, still 12 caps). NL intent is Phase 2 (`nl-conversation-intent`); the
+draft-PR review surface is Phase 3.
 
 M0 walking skeleton COMPLETE end-to-end (mock-LLM, real containers), now on
 **semstreams beta.154** (on the beta.147 breaking canonical-predicate + entity-ID wave;
