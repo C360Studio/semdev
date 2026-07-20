@@ -32,6 +32,7 @@ import (
 	"github.com/c360studio/semdev/internal/station/validation"
 	stationverify "github.com/c360studio/semdev/internal/station/verify"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
+	"github.com/c360studio/semdev/internal/tools/classifyintent"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/hydratechange"
 	"github.com/c360studio/semdev/internal/tools/listcomments"
@@ -282,6 +283,25 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// Execute fails loudly if either is missing.
 	if err := reg.RegisterExecutor(submitreview.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
+	}
+
+	// classify_intent (nl-conversation-intent, D2) is the conversation-classifier's
+	// ROUTING gate at the change-approval seam: an inherit-scoped classifier loop reads
+	// ONE authorized human message off the run's conversation.pending.* triples and
+	// records its reading — one intent from the closed {approve,reject,none} taxonomy
+	// plus an inert reason. The MODEL supplies only its judgment (validated against the
+	// taxonomy; a hallucinated value cannot route); the HARNESS binds identity (the
+	// classified message's id + author are COPIED from pending, never the model's word).
+	// It reads via the shared changefacts.Reader and writes via the shared
+	// OwnedFactWriter (its own Source, conversation-classifier — G5-safe), stamping
+	// conversation.intent.* on the RUN (subject-override, so handleMessage's dedup and
+	// the routing rule can read it). It is the decide SHAPE (a routing classification),
+	// NOT a floored verdict (G3): approval has no harness ground-truth, so the
+	// consequential gate fact is stamped deterministically downstream (approval-adapter),
+	// never here, and no lifecycle transition fires (G2). Both nil in the census
+	// (schema-only); Execute fails loudly if either is missing.
+	if err := reg.RegisterExecutor(classifyintent.New(factReader, changeWriter, deps.Logger)); err != nil {
+		return fmt.Errorf("register %s: %w", classifyintent.ToolName, err)
 	}
 
 	// (verify_artifact, check_floors, open_pr, and provision_sandbox were CONVERTED to the

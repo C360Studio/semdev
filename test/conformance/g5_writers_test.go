@@ -3,10 +3,12 @@ package conformance
 import (
 	"testing"
 
+	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
+	"github.com/c360studio/semdev/internal/tools/classifyintent"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/measuretask"
 	"github.com/c360studio/semdev/internal/tools/openpr"
@@ -54,6 +56,11 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"measure_task", measuretask.Source, "measurement.result.passed"},
 		{"submit_review", submitreview.Source, "review.verdict.value"},
 		{"submit_review", submitreview.Source, "review.findings.value"},
+		// classify_intent stamps the routing intent under conversation-classifier
+		// (nl-conversation-intent D2/D10) — the tie between the tool's Source const
+		// and the single writer vocab declares for the conversation.intent.* namespace.
+		{"classify_intent", classifyintent.Source, conversationintent.IntentValuePredicate},
+		{"classify_intent", classifyintent.Source, conversationintent.IntentClassifiedPredicate},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.rejected"},
 		// The route mirror (design R1): check_floors + submit_review both stamp the route.*

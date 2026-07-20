@@ -36,19 +36,23 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 2. `classify_intent` — model supplies judgment, harness supplies identity (design D2)
 
-- [ ] 2.1 RED: `TestClassifyIntentTakesNoAuthorOrMessageID` — the tool schema exposes ONLY
+- [x] 2.1 RED: `TestClassifyIntentTakesNoAuthorOrMessageID` — the tool schema exposes ONLY
   `intent` + `reason`; it takes NO `author` and NO `message_id` (the identity is
   harness-bound, not model-supplied — HIGH-2/H3). The G3 outcome-field census passes (no
   outcome boolean, no measurement fact).
-- [ ] 2.2 RED: `TestClassifyIntentStampsOnRunFromPending` — the tool subject-overrides to
+- [x] 2.2 RED: `TestClassifyIntentStampsOnRunFromPending` — the tool subject-overrides to
   the RUN and stamps `conversation.intent`, `.message-id` + `.author` COPIED from the run's
   `conversation.pending.*` (matched by pending id), `.reason` (model echo), and
   appends the id to `conversation.intent.classified` — all on the run, none on the loop (H2).
-- [ ] 2.3 RED: `TestClassifyIntentRejectsOffTaxonomy` — an `intent` outside the closed set
+- [x] 2.3 RED: `TestClassifyIntentRejectsOffTaxonomy` — an `intent` outside the closed set
   is rejected (the decide-allowlist pattern), so a hallucinated value cannot route.
-- [ ] 2.4 Implement `internal/tools/classifyintent` + schema + `boot.RegisterTools`
+- [x] 2.4 Implement `internal/tools/classifyintent` + schema + `boot.RegisterTools`
   registration (Source `conversation-classifier`, G5). Doc the G1 why-not-`decide` note
   (no message-id grounding; `decide`'s Source would collide with the coordinator lane).
+  (Review folds: added `TestClassifyIntentIgnoresModelSuppliedIdentity` [H3 security
+  regression pin — smuggled author/message_id in args is ignored] +
+  `TestClassifyIntentDedupIsIdempotentOnRedelivery` [L2]; documented the load-bearing
+  single-writer-per-run ledger invariant serialized by the grp4 spawn marker [M1].)
 
 ## 3. `handleMessage`: resolver phase getter, fast-path retained, NL bridge (design D4, D5)
 

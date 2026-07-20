@@ -313,6 +313,34 @@ Template:
 - **Registry entry:** `submit_review` (`tool`)
 - **Change:** m0-walking-skeleton-spine
 
+## classify-intent-tool
+
+- **Primitive considered:** the framework `decide` tool (semdev already reads
+  intent with it — the coordinator persona reads an issue and returns one action
+  from a closed taxonomy, `decide` stamps `coordinator.decision.next-action`, a
+  rule routes), or a rule / persona owning the approval directly.
+- **Why it cannot express this:** a rule cannot read natural language, so the
+  classification needs a model turn — but `decide` is the wrong model turn on two
+  counts. (a) It carries NO message grounding: its args are
+  action/reason/subtopics/retry_hint, so it cannot bind the intent to the ONE
+  authorized message the harness must re-authorize (D2 — an LLM-supplied author
+  would be an approval-injection hole). (b) It stamps under Source
+  `coordinator-decide` on the coordinator's routing lane; reusing it for the
+  approval gate would give `conversation.intent.*` a SECOND writer and collide
+  with the coordinator's own decisions (G5). The grounding fields (id + author
+  copied from `conversation.pending.*`) plus a distinct fact/writer
+  (`conversation-classifier`) force a separate tool. It is the `decide` SHAPE —
+  a routing classification the harness records — NOT the `submit_review` shape:
+  approval has no executable ground-truth, so no measurement floor is possible
+  and the tool takes no outcome field (G3). The consequential gate fact
+  (`run.change.approved`/`rejected`) is stamped deterministically downstream by
+  `approval-adapter` (one G5 writer), never by this tool; it fires no lifecycle
+  transition (G2). It subject-overrides to the RUN (not the classifier loop the
+  framework `decide` would target) because the dedup and the routing rule both
+  read the run (a rule templates only the firing entity's own triples — H2).
+- **Registry entry:** `classify_intent` (`tool`)
+- **Change:** nl-conversation-intent
+
 ## verify-artifact-tool
 
 - **Primitive considered:** a rule that reads a build/test fact and stamps

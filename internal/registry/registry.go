@@ -61,6 +61,11 @@ var Entries = []Entry{
 	{Name: "github_list_comments", Kind: KindTool, Capability: "forge-io", AlignmentNote: "github-list-comments-tool"},
 	{Name: "measure_task", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "measurement-tool"},
 	{Name: "submit_review", Kind: KindTool, Capability: "harness-measurement", AlignmentNote: "submit-review-tool"},
+	// classify_intent (nl-conversation-intent): the conversation-classifier's routing
+	// gate — reads one authorized human message off the run's conversation.pending.* and
+	// records one intent (approve/reject/none) + reason. Model supplies judgment, harness
+	// binds identity; the decide shape (routing, not a floored verdict — G3).
+	{Name: "classify_intent", Kind: KindTool, Capability: "conversation-channel", AlignmentNote: "classify-intent-tool"},
 	{Name: "apply_patch", Kind: KindTool, Capability: "sandbox", AlignmentNote: "apply-patch-tool"},
 	// read_workspace / read_diff (the reshape, group 4): the developer/reviewer loops are
 	// bounded multi-turn; no framework primitive can put checkout bytes (read_workspace) or
