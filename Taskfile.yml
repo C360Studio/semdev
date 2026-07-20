@@ -87,7 +87,7 @@ tasks:
         curl -sS https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
         -H "Authorization: Bearer $GEMINI_API_KEY"
         -H "content-type: application/json"
-        -d '{"model": "gemini-3.1-pro-preview", "max_tokens": 64,
+        -d '{"model": "gemini-3.1-pro-preview", "max_tokens": 512,
              "messages": [{"role": "user", "content": "Call the ping tool."}],
              "tools": [{"type": "function", "function": {"name": "ping", "description": "reply check", "parameters": {"type": "object", "properties": {}}}}],
              "tool_choice": "required"}' | head -c 2000; echo
