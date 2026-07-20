@@ -130,9 +130,13 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
   GitHub's server-side merge-base — so this journey proves clone→develop→diff→deliver MECHANICS for the
   static full-clone case; token-auth + moved-base are covered by the unit pin + the operator-gated live
   run. State this in the ledger.
-- [ ] 6.2 Taskfile operator lane for `semdev launch` (probe/launch/status shape, mirroring the
-  `realllm:` lane); `docs/real-llm-runbook.md` (or a sibling) gains the live-target launch sequence
-  (operator picks a disposable repo, sets `GITHUB_TOKEN` + webhook secret + the source-mode/forge config).
+- [ ] 6.2 Taskfile operator lane for `semdev launch` (launch/status shape, mirroring the `realllm:`
+  lane); runbook gains the live-target sequence, PULL-FIRST framed (operator picks a disposable repo,
+  sets `GITHUB_TOKEN` + the `source.forge` config; NO webhook secret needed — `semdev launch` is
+  outbound). NOTE the approval caveat: on a webhook-unreachable host the change-approval gate still
+  needs a non-webhook approval (a stand-in write today; the `semdev approve` CLI + `/semdev approve`
+  poller + the proposal-review-surface land in the queued `pull-first-forge` change — see design
+  Non-Goals + [[pull-first-forge-deployment]]).
 - [ ] 6.3 Docs match reality (G10): `docs/brief.md` milestone status, CLAUDE.md status line,
   `docs/port-manifest.md` if a new port is implied; update the memory pointers.
 
@@ -145,9 +149,11 @@ symmetric). The ONE paid live-forge delivery stays operator-gated (forge-io 5.4)
   no-argv-leak token path, the fail-closed source resolution, and the driver's G2 posture.
 - [ ] 7.3 `openspec validate --strict` green; sync-specs at archive folds these three deltas.
 - [ ] 7.4 OPERATOR-GATED, deliberately open (the M0-completion G7 requirement, = forge-io 5.4): ONE
-  recorded live-forge delivery against the disposable `semdev-test` repo — now END-TO-END RUNNABLE via
-  EITHER front door (webhook: label an issue `semdev`, content from the payload; OR `semdev launch <ref>`,
-  content read from the forge issue lane). PREREQUISITE: `semdev-test` is currently EMPTY and must be
-  SEEDED first (a buildable project + a declared Dockerfile/devcontainer per the sandbox spec + an
-  authored issue) — an empty repo has no default branch to clone and no issue to develop. This change
-  makes the run runnable; it does not run it. Cross-link forge-io task 5.4.
+  recorded live-forge delivery against the disposable `semdev-test` repo. PULL-FIRST runnable via
+  `semdev launch <ref>` (outbound — NO webhook reachability / secret needed; the webhook door remains
+  optional). PREREQUISITES: (a) `semdev-test` SEEDED (a buildable project + a declared
+  Dockerfile/devcontainer per the sandbox spec + an authored issue) — an empty repo has no default
+  branch to clone and no issue to develop; (b) the change-approval gate needs a non-webhook approval on
+  a webhook-unreachable host — a stand-in write until `pull-first-forge` lands the `semdev approve` CLI.
+  This change makes the run runnable; it does not run it. Cross-link forge-io task 5.4 +
+  [[pull-first-forge-deployment]].

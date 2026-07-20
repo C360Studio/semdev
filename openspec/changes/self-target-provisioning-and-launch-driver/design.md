@@ -47,6 +47,13 @@ already exist (`intake.RunResolver`, `intake.CoordinatorTask`).
   beats speed at M2; a warm mirror is a later optimization).
 - A long-running operator daemon or web UI — the driver is a one-shot CLI that
   publishes to an already-running runtime and reports.
+- The pull-first APPROVAL path. `semdev launch` is semdev's FIRST pull-based (outbound)
+  front door and removes the webhook assumption for the run TRIGGER — but the human
+  approval gate (`/semdev approve`) is still webhook-inbound-only. Making semdev fully
+  webhook-optional (a `semdev approve` CLI + a `/semdev approve` comment-poller) is a
+  SEPARATE queued M2 change (`pull-first-forge`, user decision 2026-07-20), out of scope
+  here. Until it lands, an operator-launched run on a webhook-unreachable host still needs
+  a non-webhook approval (a stand-in write, as the journeys use) to proceed past the gate.
 
 ## Decisions
 
