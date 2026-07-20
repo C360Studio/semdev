@@ -23,16 +23,20 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
 
 ## 2. GitHub v1 implementation (design D1–D3)
 
-- [ ] 2.1 RED: `TestGitHubChannelPostResolvesThreadAndComments` — `Post` resolves the
+- [x] 2.1 RED: `TestGitHubChannelPostResolvesThreadAndComments` — `Post` resolves the
   work coordinate via `SplitRef` and calls `github.Client.CreateComment(owner,repo,
-  number,body)`; `ResolveThread(workRef)` is identity (`ThreadRef==workRef`).
-- [ ] 2.2 RED: `TestGitHubChannelNormalizeContainsCommentEvent` — the impl's
+  number,body)`; `ResolveThread(workRef)` is identity (`ThreadRef==workRef`). [Also pins
+  fail-closed: nil-commenter (wiring) + malformed-thread + transport-error propagation.]
+- [x] 2.2 RED: `TestGitHubChannelNormalizeContainsCommentEvent` — the impl's
   (unexported) normalize maps a `githubwebhook.CommentEvent` to a neutral `Message`,
-  preserving today's `sender == author` attribution guard; the downstream consumer
-  sees `Message`, never `CommentEvent` (coupling point 2 dissolved at the seam).
-- [ ] 2.3 Implement the GitHub `ConversationChannel` over `github.Client` (Post→
-  CreateComment; the CommentEvent→Message normalize contained here). Reuse the existing
-  `github.Client` token path (no-argv reuse; no new lane).
+  preserving today's `sender == author` attribution guard (EqualFold, both accept +
+  reject sides pinned); the downstream consumer sees `Message`, never `CommentEvent`
+  (coupling point 2 dissolved at the seam). [`ok` collapses old `Relevant && Attributable`
+  — proven byte-identical for the sole consumer.]
+- [x] 2.3 Implement the GitHub `Channel` over `github.Client` (Post→CreateComment; the
+  CommentEvent→Message normalize contained/unexported; `NormalizeInboundComment([]byte)`
+  the neutral boundary). Reuses the existing `github.Client` CreateComment path; `SplitRef`
+  imported from `internal/intake` (grp4 repoints to `internal/intake/admission`).
 
 ## 3. Vocab: single writer + capability coherence (design D5; G5/G9/G10)
 
@@ -55,12 +59,24 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
   RED-first: a parity pin proves `internal/launch` still builds + the single `boot.Run`
   path is intact.
 - [ ] 4.2 RED: `TestParkPostPostsViaPort` — `parkpost` posts the `run.awaiting.human`
-  message through `ConversationChannel.Post` (not `Commenter.CreateComment`); the
-  bounded-retry / never-block-the-park contract is preserved.
+  message through `Channel.Post` (not `Commenter.CreateComment`); the bounded-retry /
+  never-block-the-park contract is preserved. GRP2-REVIEW CARRY-FORWARDS (the consumer
+  owns the definitive-skip — `Channel.Post` fails closed on ALL error classes, so the
+  park consumer must reproduce today's `parkpost` degrades, NOT redeliver them to
+  exhaustion): (a) NO forge client → graph-only skip + definitive ack (the channel is
+  built with a nil commenter in allowlist-only/journey boots; the consumer skips `Post`
+  or maps its wiring error to a definitive ack); (b) unparseable `run.issue.ref` →
+  graph-only skip + ack (today's `parkpost.go:97-102`), not a `Post`-error redeliver.
 - [ ] 4.3 RED: `TestApprovalReadsNeutralMessage` — the approval adapter authorizes +
   releases the gate from a neutral `Message` (not a `CommentSignal`); the `/semdev
   approve` exact-command match is UNCHANGED; `run.change.approved` (writer
-  `approval-adapter`) is untouched.
+  `approval-adapter`) is untouched. GRP2-REVIEW CARRY-FORWARDS: (a) the admission
+  `Event{Actor,Owner,Repo,AuthoredText}` is rebuilt from `Message.Author` + `SplitRef(thread)`
+  (byte-identical to the old `Event.Actor=Sender` / `Repository.Owner/Name` — proven
+  equivalent because `ok` requires `sender==author` and `FullName==owner/name`); (b) a
+  DECODE failure from `NormalizeInboundComment` (err != nil) must be logged + ACKED, not
+  redelivered (today's `approval.go:85-88` definitive skip — the receiver only publishes
+  shapes it flattened itself).
 - [ ] 4.4 Extract the `conversation-channel` component: it owns comment `Post`,
   approval-from-`Message`, park-post, and the `user.response.>` USER-stream consumer;
   it consumes `github.event.comment` from the (unchanged) webhook-fed GITHUB stream and
