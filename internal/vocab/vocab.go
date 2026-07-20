@@ -95,7 +95,11 @@ var Predicates = []Predicate{
 	// is invisible to the loop's conditions, so the marker is the extinguisher;
 	// ref-first ordering per the station-failure-parks park-first lesson).
 	{"run.issue.stamped", "issue-ref-rule", "forge-io", forgeIO},
-	{"run.change.approved", "approval-adapter", "forge-io", m0},
+	// run.change.approved's WRITER stays approval-adapter (read by run-lifecycle/02);
+	// its CAPABILITY tag moved forge-io → conversation-channel to match where its
+	// production is now spec'd — the conversation seam owns the human-approval lane
+	// (conversation-channel-seam D5, G10 census coherence). A paper cap-tag move.
+	{"run.change.approved", "approval-adapter", "conversation-channel", m0},
 	// experiment.run.condition is the A/B EVIDENCE LABEL (integrate-semsource-ab-harness, D3):
 	// stamped once on the run at mint by the launch path (writer experiment-intake, G5) from
 	// the operator's boot-config condition. NEVER a routing input — a whole-document conformance
@@ -103,7 +107,13 @@ var Predicates = []Predicate{
 	// referencing an experiment.* field, so no deterministic channel can act on the label; only
 	// the ledger reads it. Unconfigured boots stamp nothing (baseline default, zero new facts).
 	{"experiment.run.condition", "experiment-intake", "semsource-ab", semsourceAB},
-	{"human.opt.signal", "comment-adapter", "forge-io", m0},
+	// human.opt.signal's writer moved comment-adapter → conversation-adapter (the
+	// channel-neutral G5 writer — channel impls plug in BEHIND the one adapter, so N
+	// channels stay single-writer-legal) and its capability forge-io →
+	// conversation-channel (conversation-channel-seam D5). It has NO writer/reader
+	// today (the ask_human-reply/resume lane is unimplemented), so this is a paper
+	// reassignment of the DECLARED vocab entry — no two-writer hazard.
+	{"human.opt.signal", "conversation-adapter", "conversation-channel", m0},
 	{"run.awaiting.human", "park-rule", "run-lifecycle", m0},
 	// station.dispatch.failed is the harness-stamped TERMINAL dispatch outcome
 	// (station-failure-parks D1): the generic station base (internal/station)

@@ -5,7 +5,46 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/c360studio/semdev/internal/vocab"
 )
+
+// The G5 single-writer PIVOT (conversation-channel-seam D5): human.opt.signal is
+// written by the channel-neutral `conversation-adapter`, NOT the GitHub-specific
+// `comment-adapter` — so N channels stay G5-legal (one writer, impls behind it).
+// Its capability home, and run.change.approved's, move from `forge-io` to
+// `conversation-channel` to match where their production is now spec'd (G10 census
+// coherence). run.change.approved's WRITER stays `approval-adapter` (read by
+// run-lifecycle/02 — a paper cap-tag move, not a writer change). This pin flips red
+// until the internal/vocab reassignment lands, and guards against a re-coupling.
+func TestConversationChannelVocabReassignment(t *testing.T) {
+	byName := make(map[string]vocab.Predicate, len(vocab.Predicates))
+	for _, p := range vocab.Predicates {
+		byName[p.Name] = p
+	}
+
+	optSignal, ok := byName["human.opt.signal"]
+	if !ok {
+		t.Fatal("human.opt.signal absent from the vocab census")
+	}
+	if optSignal.Writer != "conversation-adapter" {
+		t.Errorf("human.opt.signal writer = %q, want conversation-adapter (the channel-neutral G5 writer, not comment-adapter)", optSignal.Writer)
+	}
+	if optSignal.Capability != "conversation-channel" {
+		t.Errorf("human.opt.signal capability = %q, want conversation-channel", optSignal.Capability)
+	}
+
+	approved, ok := byName["run.change.approved"]
+	if !ok {
+		t.Fatal("run.change.approved absent from the vocab census")
+	}
+	if approved.Capability != "conversation-channel" {
+		t.Errorf("run.change.approved capability = %q, want conversation-channel (spec'd home moved)", approved.Capability)
+	}
+	if approved.Writer != "approval-adapter" {
+		t.Errorf("run.change.approved writer = %q, want approval-adapter UNCHANGED (read by run-lifecycle/02)", approved.Writer)
+	}
+}
 
 // The conversation seam's EXPORTED surface must never name a githubwebhook type —
 // the whole point of the carve (conversation-channel-seam D2/D4). The GitHub impl's

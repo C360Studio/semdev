@@ -40,15 +40,19 @@ NO poll transport (that is the follow-on `pull-first-transport`), NO NL intent
 
 ## 3. Vocab: single writer + capability coherence (design D5; G5/G9/G10)
 
-- [ ] 3.1 RED: G5 writer census pin — `human.opt.signal`'s writer is
+- [x] 3.1 RED: G5 writer census pin — `human.opt.signal`'s writer is
   `conversation-adapter` (NOT `comment-adapter`); the writer-census conformance test
-  flips red until the reassignment lands.
-- [ ] 3.2 Reassign in `internal/vocab`: `human.opt.signal` writer
+  flips red until the reassignment lands. [`TestConversationChannelVocabReassignment`
+  — verified red pre-change, green after; also pins run.change.approved's writer UNCHANGED.]
+- [x] 3.2 Reassign in `internal/vocab`: `human.opt.signal` writer
   `comment-adapter`→`conversation-adapter`, capability `forge-io`→`conversation-channel`.
   Move `run.change.approved`'s capability tag `forge-io`→`conversation-channel` (writer
   `approval-adapter` UNCHANGED — it is read by `run-lifecycle/02`). NO new predicate.
-- [ ] 3.3 RED: G10 mapping pin — the vocab/architecture census reflects both capability
-  moves (the fact's spec'd home == its capability tag), so no G10 drift.
+  [Paper reassignment: no code stamps human.opt.signal; conversation-adapter needs no Source.]
+- [x] 3.3 RED: G10 mapping pin — the vocab/architecture census reflects both capability
+  moves (the fact's spec'd home == its capability tag), so no G10 drift. [architecture.md
+  Fact-vocabulary rows updated; TestDocsVocabularyMatchesRegistry + G9 provenance green
+  (conversation-channel declared by the change's specs/conversation-channel/ dir).]
 
 ## 4. Extract the admission surface + the conversation-channel component (design D8; M-4)
 

@@ -19,9 +19,9 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `intake.event.ref` | admission-check | forge-io |
 | `run.issue.ref` | issue-ref-rule | forge-io |
 | `run.issue.stamped` | issue-ref-rule | forge-io |
-| `run.change.approved` | approval-adapter | forge-io |
+| `run.change.approved` | approval-adapter | conversation-channel |
 | `experiment.run.condition` | experiment-intake | semsource-ab |
-| `human.opt.signal` | comment-adapter | forge-io |
+| `human.opt.signal` | conversation-adapter | conversation-channel |
 | `run.awaiting.human` | park-rule | run-lifecycle |
 | `station.dispatch.failed` | station-harness | run-lifecycle |
 | `station.park.routed` | park-rule | run-lifecycle |
