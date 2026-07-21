@@ -93,3 +93,19 @@ and records an intent; a rule owns the transition).
 #### Scenario: Classification is scoped to the approval gate
 - **WHEN** a message arrives on a run that is not awaiting approval
 - **THEN** no classification is triggered
+
+#### Scenario: A classifier that produces no reading tells the human
+
+- **WHEN** a classifier loop for an authorized message reaches a terminal without
+  recording a classification — it errored, truncated, exhausted its iteration cap, or
+  DELIBERATELY REFUSED because the pending slot moved off the message it was dispatched
+  for — and the run has no gate decision
+- **THEN** semdev SHALL post a fallback note on the thread telling the human it could not
+  read the message as approve or reject, and naming the exact commands
+- **AND** the gate SHALL be left untouched, so the human's deterministic controls stay live
+- **AND** a classification that DID land SHALL post no such note
+
+The discriminator is the ABSENCE of a recorded classification on the classifier loop, NOT
+the loop's outcome. A tool returning an error does not fail its loop, so a classifier that
+refuses to classify still terminates successfully — an outcome-keyed rule never fires, which
+is how this lane shipped silent and was caught only by an end-to-end journey.

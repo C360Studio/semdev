@@ -154,6 +154,22 @@ func (p *parkPoster) handleUserNote(ctx context.Context, payload []byte) error {
 		p.logger.Warn("fault-note: run entity absent; nothing to post", slog.String("run", runEntityID))
 		return nil
 	}
+	// A DECISION ALREADY LANDED → say nothing (grp6-review M3). The note and the
+	// apply consumer's transparency post are both human-facing, and together they
+	// can contradict: "✅ Approving this change based on @jo's decision" immediately
+	// followed by "🤔 I couldn't read that". That pair is worse than noise — the
+	// transparency post is the ENTIRE visibility case for a gate with no harness
+	// floor (D8 guard 4), so teaching the human those announcements are unreliable
+	// undermines the guard itself. Two shapes reach here: a mirror that failed after
+	// its classification landed, and a classifier terminal that arrives after the
+	// gate was released by something else (rule 05 cannot guard on gate facts —
+	// its conditions are loop-scoped). Both are correctly silent: a decision was
+	// applied AND announced, so a note about not understanding is simply wrong.
+	if landed := decidedGateFact(run); landed != "" {
+		p.logger.Info("fault-note: a gate decision already landed and was announced; suppressing the note",
+			slog.String("run", runEntityID), slog.String("decided", landed))
+		return nil
+	}
 	ref := entityTriple(run, "run.issue.ref")
 	if ref == "" {
 		p.logger.Warn("fault-note: run has no run.issue.ref; the classifier fault stays graph-only",

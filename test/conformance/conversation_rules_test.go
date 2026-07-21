@@ -471,8 +471,37 @@ func TestClassifierFaultPostsFallbackNote(t *testing.T) {
 	if c, ok := note.condition("agent.loop.role"); !ok || c.Operator != "eq" || c.Value != "conversation" {
 		t.Error("the fault note must be scoped to the conversation role — every other role's failures have their own lanes")
 	}
-	if c, ok := note.condition("agent.loop.outcome"); !ok || c.Operator != "eq" || c.Value != "failed" {
-		t.Error(`the fault note must fire on agent.loop.outcome == "failed" — a confident none (success) stays SILENT (ordinary chatter), and cancelled means the run is going away`)
+	// THE DISCRIMINATOR, and the reason this pin exists in its current form. Keying
+	// on agent.loop.outcome == "failed" is WRONG and shipped broken: a tool that
+	// returns a ToolResult error does NOT fail its loop, so a classifier that
+	// deliberately refused to classify (the read-once binding fault) terminated
+	// outcome=success and the human was told nothing. The complete test is the
+	// ABSENCE of a recorded classification.
+	// hasAbsenceGuard checks length_eq AND Value == 0; the hand-rolled operator-only
+	// check passed a polarity INVERSION (length_eq 1 = note-on-success,
+	// silence-on-fault) — grp6-review M5.
+	if !note.hasAbsenceGuard(conversationintent.ClassifierRecordedPredicate) {
+		t.Errorf("the fault note must fire on the ABSENCE of %s (length_eq 0) — that is the only condition covering every no-reading terminal (binding fault, model error, truncation, cap exhaustion). An agent.loop.outcome-keyed condition NEVER fires for a refusing classifier, because a tool error does not fail its loop",
+			conversationintent.ClassifierRecordedPredicate)
+	}
+	// A terminal must still be required, and a cancelled run must not draw a note.
+	var sawTerminal, sawNotCancelled bool
+	for _, c := range note.Conditions {
+		if c.Field != "agent.loop.outcome" || c.Operator != "ne" {
+			continue
+		}
+		if c.Value == "" {
+			sawTerminal = true
+		}
+		if c.Value == "cancelled" {
+			sawNotCancelled = true
+		}
+	}
+	if !sawTerminal {
+		t.Error(`the fault note must require a TERMINAL (agent.loop.outcome ne "") — otherwise it fires on a classifier still in flight`)
+	}
+	if !sawNotCancelled {
+		t.Error(`the fault note must exclude the cancelled terminal (agent.loop.outcome ne "cancelled") — the run is going away, so a note is noise`)
 	}
 	if c, ok := note.condition("agent.run.entity-id"); !ok || c.Operator != "ne" {
 		t.Error("the fault note needs the run anchor present (ne \"\") — the note consumer resolves the thread through it")
@@ -864,5 +893,64 @@ func TestNatsPortMatchesComposeDefault(t *testing.T) {
 			t.Errorf("%s dials %q but compose publishes %s — on this host that does not fail to connect, it connects to WHICHEVER stack owns the dialed port, and semdev then reads and writes another project's KV and streams",
 				name, cfg.NATS.URLs[0], want)
 		}
+	}
+}
+
+// TestLiveConfigCarriesTheNLLane pins task 6.6. The NL lane needs THREE things in
+// the live config, and each one fails DIFFERENTLY silent if missing:
+//
+//   - the conversation rules_files: absent → no rule fires, so a human's message
+//     is bridged onto the run and then nothing at all happens;
+//   - classify_intent in allowed_tools: absent → the classifier loop boots and
+//     dies at runtime with "tool not allowed", burning a paid turn per message;
+//   - a `conversation` model_registry capability: absent → NOT an error. An
+//     unknown capability silently falls back to defaults.model, so the classifier
+//     runs on whatever the default is, misrouted rather than dead.
+//
+// The bootstrap census pins the MOCK config only, so without this the paid lane
+// could ship dead while every offline test and every journey stayed green.
+func TestLiveConfigCarriesTheNLLane(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "configs", "semdev-live-gemini.json"))
+	if err != nil {
+		t.Fatalf("read live config: %v", err)
+	}
+	var cfg struct {
+		ModelRegistry struct {
+			Capabilities map[string]struct {
+				Preferred []string `json:"preferred"`
+			} `json:"capabilities"`
+		} `json:"model_registry"`
+		Components struct {
+			Rule struct {
+				Config struct {
+					RulesFiles []string `json:"rules_files"`
+				} `json:"config"`
+			} `json:"rule"`
+			AgenticTools struct {
+				Config struct {
+					AllowedTools []string `json:"allowed_tools"`
+				} `json:"config"`
+			} `json:"agentic-tools"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode live config: %v", err)
+	}
+
+	listed := make(map[string]bool)
+	for _, rel := range cfg.Components.Rule.Config.RulesFiles {
+		listed[filepath.ToSlash(rel)] = true
+	}
+	for _, rel := range conversationRuleFiles {
+		if !listed[rel] {
+			t.Errorf("live config does not load %q — the NL lane is DEAD in the paid config: a human's message bridges onto the run and nothing fires", rel)
+		}
+	}
+	if !slices.Contains(cfg.Components.AgenticTools.Config.AllowedTools, "classify_intent") {
+		t.Error("live config does not allow classify_intent — the classifier loop boots and dies with \"tool not allowed\", burning a paid turn per message")
+	}
+	if _, ok := cfg.ModelRegistry.Capabilities["conversation"]; !ok {
+		t.Error("live config declares no `conversation` model capability — this does NOT fail loudly: an unknown capability silently falls back to defaults.model, so the classifier runs misrouted rather than dead")
 	}
 }

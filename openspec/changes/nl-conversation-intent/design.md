@@ -247,16 +247,31 @@ word alone:
    PR merge is a human gate downstream of this one. This is why irreversible-once-landed
    (D7) is acceptable for v1. The exact command (D4) remains the unambiguous channel.
 
-### D9 — cost + fail-safety; a classifier FAULT is surfaced, not silently stalled
+### D9 — cost + fail-safety; a classifier that produces NO READING is surfaced, not silently stalled
 One model turn per DISTINCT authorized non-command message on a gated run (deduped by the
 ledger D5, gated on `awaiting_approval`, never for chatter/unauthorized/redelivery). The
 classifier loop is async (off the transport ack window), so a slow/failed classification
-never blocks the poller. **A classifier FAULT ≠ a confident `none` (semstreams HIGH-3):** a
-loop that errors or truncates (no `conversation.intent` stamped, `agent.loop.outcome`
-faulted) is a HUMAN-FACING dead-end if silent (the human wrote "ship it" and saw nothing).
-A rule on the faulted classifier terminal POSTS a fallback note ("I couldn't read that as
-approve or reject — reply `/semdev approve` or `/semdev reject`."). A confident `none` stays
-silent (ordinary chatter). No new paid-token path on the exact-command flow.
+never blocks the poller. **A classifier that produces no reading ≠ a confident `none`
+(semstreams HIGH-3):** a loop that errors, truncates, exhausts its cap, or DELIBERATELY
+REFUSES (the D2 read-once binding check) stamps no `conversation.intent` and is a
+HUMAN-FACING dead-end if silent — the human wrote "ship it" and saw nothing. A rule
+(`conversation/05`) posts a fallback note ("I couldn't read that as approve or reject —
+reply `/semdev approve` or `/semdev reject`."). A confident `none` stays silent (ordinary
+chatter). No new paid-token path on the exact-command flow.
+
+**THE DISCRIMINATOR IS THE ABSENCE OF A RECORDED CLASSIFICATION, NOT THE LOOP OUTCOME —
+corrected in group 6 after the journeys proved the original premise false.** This design
+originally specified "a rule on the FAULTED classifier terminal (`agent.loop.outcome`
+faulted)". That rule can never fire for the case it exists for: a tool returning a
+`ToolResult` error does NOT fail its loop — the error goes back to the model and the loop
+terminates NORMALLY. Observed end-to-end: the refusing classifier ended `outcome=success`
+with `iterations=1`, the terminal-release rule wiped the pending slot, and the human was
+told nothing. So `classify_intent` now stamps `conversation.classifier.recorded` on ITS OWN
+LOOP (the `submit_review` route-mirror shape) when a classification lands, and the note
+fires on that fact's ABSENCE at a non-`cancelled` terminal. A loop-local witness is the only
+thing available: rule conditions read only the FIRING entity, and the run's
+`conversation.intent.*` is unreachable from a loop-fired rule. The mirror is derived BEFORE
+the run write so a mis-wired platform faults CLOSED (nothing routes) rather than open.
 
 ### D10 — vocabulary + writers (register-before-write; censused single writer)
 New canonical predicates (3-seg lower-kebab, `internal/vocab.Register`), registered in
@@ -266,7 +281,9 @@ unregistered predicate — architect M8): `conversation.pending.{message-id,auth
 the `conversation.intent.classified` ledger (writer `conversation-classifier`),
 `conversation.classifier.dispatched` (the spawn rule's self-extinguishing marker — a
 rule `add_triple`, hence a graph write that MUST be registered; writer
-`conversation-spawn-rule`), and `run.change.rejected` (writer `approval-adapter`). `run.change.approved`
+`conversation-spawn-rule`), `conversation.classifier.recorded` (group 6 — the LOOP-scoped
+witness that a classification landed, writer `conversation-classifier`; the fault note keys
+on its ABSENCE, see D9), and `run.change.rejected` (writer `approval-adapter`). `run.change.approved`
 and `run.change.rejected` are written from TWO code sites (the fast-path inline + the apply
 consumer) under the ONE Source `approval-adapter` — the sanctioned "one logical writer,
 multiple realizing sites" precedent (`g5_writers_test.go`, the route-mirror) — which

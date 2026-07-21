@@ -83,6 +83,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `conversation.intent.reason` | conversation-classifier | conversation-channel |
 | `conversation.intent.classified` | conversation-classifier | conversation-channel |
 | `conversation.classifier.dispatched` | conversation-spawn-rule | conversation-channel |
+| `conversation.classifier.recorded` | conversation-classifier | conversation-channel |
 | `run.change.rejected` | approval-adapter | conversation-channel |
 
 ## Components

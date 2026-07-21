@@ -70,6 +70,12 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		// and the single writer vocab declares for the conversation.intent.* namespace.
 		{"classify_intent", classifyintent.Source, conversationintent.IntentValuePredicate},
 		{"classify_intent", classifyintent.Source, conversationintent.IntentClassifiedPredicate},
+		// The LOOP mirror: classify_intent stamps conversation.classifier.recorded on
+		// its own loop entity when a classification lands. Same Source, a DIFFERENT
+		// entity type — G5 is per-predicate, so one logical writer still holds, and
+		// this row is what ties the vocab string to the Source the code actually
+		// stamps (grp6-review).
+		{"classify_intent", classifyintent.Source, conversationintent.ClassifierRecordedPredicate},
 		// conversation.pending.*: the NL bridge (handleMessage, group 3) stamps the
 		// authorized human message under conversation-adapter — a DISTINCT Source from
 		// the gate writer (approval-adapter) the same struct also emits. The tie

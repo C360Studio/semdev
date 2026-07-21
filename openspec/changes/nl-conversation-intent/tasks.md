@@ -163,20 +163,27 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 6. The NL bridge-proof journeys (regression guard for the intent lane)
 
-- [ ] 6.1 RED: `TestBridgeProofNLApprovalReleasesGate` — a run parked at `awaiting_approval`;
+- [x] 6.1 RED: `TestBridgeProofNLApprovalReleasesGate` — a run parked at `awaiting_approval`;
   an authorized author posts a NON-command NL approval to the forge double; the mock
   classifier reads approve; the transparency comment posts; `run.change.approved` lands; the
   run resumes — no exact command, no stand-in.
-- [ ] 6.2 RED: `TestBridgeProofNLRejectionCancelsRun` — a NL rejection → the transparency
+- [x] 6.2 RED: `TestBridgeProofNLRejectionCancelsRun` — a NL rejection → the transparency
   comment posts, `run.change.rejected` lands, the run reaches `cancelled`.
-- [ ] 6.3 RED: `TestConservativeNoneDoesNotApprove` — an ambiguous authorized message
+- [x] 6.3 RED: `TestConservativeNoneDoesNotApprove` — an ambiguous authorized message
   ("thanks!", 👍) classifies `none`; the run stays gated, no gate fact.
-- [ ] 6.4 RED: `TestConflictingIntentsResolveToOneTerminal` — two authorized NL messages, one
+- [x] 6.4 RED: `TestConflictingIntentsResolveToOneTerminal` — two authorized NL messages, one
   approve + one reject, both classified; the run reaches EXACTLY ONE of resumed-or-cancelled
   and carries EXACTLY ONE gate fact, never both (the H4 gate-still-open guard end-to-end).
-- [ ] 6.5 The existing exact-command approval journeys (webhook + poll) pass byte-for-byte —
+- [x] 6.5 The existing exact-command approval journeys (webhook + poll) pass byte-for-byte —
   no journey rewired; the NL journeys are ADDED.
-- [ ] 6.6 A real-LLM classification probe (env-gated `SEMDEV_REAL_LLM=1`): the persona
+- [x] 6.6a WIRE the NL lane into `configs/semdev-live-gemini.json` — DONE: the five (six
+  files) `rules/conversation/*` entries, `classify_intent` in `allowed_tools`, and a
+  `conversation` model_registry capability at the gemini tier (OQ4 decided: same tier as the
+  other roles — classification is a short, cheap, high-stakes read, so it does not get a
+  weaker model than the work it gates). Pinned by `TestLiveConfigCarriesTheNLLane`, because
+  each missing piece fails differently silent (dead rules / "tool not allowed" per message /
+  a capability fallback that misroutes rather than errors).
+- [ ] 6.6b A real-LLM classification probe (env-gated `SEMDEV_REAL_LLM=1`): the persona
   classifies a real approval + rejection + ambiguous message correctly against the live
   model; recorded per the runbook. Decide the classifier model tier (OQ4) — and WIRE the
   NL lane into `configs/semdev-live-gemini.json` with it (grp4-review MEDIUM-2/L5: the
@@ -187,6 +194,11 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 7. Spec + docs + verification + review + archive
 
+- [ ] 7.1a RECORD in the change docs: `conversation/05` publishes a HUMAN-VISIBLE comment
+  with no self-extinguish marker, so on RULE_STATE loss every still-matching historical
+  conversation loop re-posts the fallback note to its thread (rule 04 shares the unguarded
+  shape but its actions are idempotent removes). Decide deliberately between a marker and
+  accepting the replay exposure alongside the 04 replay note.
 - [ ] 7.1 The `conversation-channel` delta matches the code. Docs: the NL-intent gate in the
   runbook (approve in prose; the exact command still works; a rejection cancels a GATED run;
   NL-approve is not reversible via NL — the PR merge is the downstream stop). grp4-review

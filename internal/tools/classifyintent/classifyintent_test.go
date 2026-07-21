@@ -7,6 +7,7 @@ import (
 
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semstreams/agentic"
+	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -16,6 +17,10 @@ type fakeReader struct {
 	facts []message.Triple
 	err   error
 }
+
+// testPlatform is the org/platform the loop-entity id is derived from (the
+// recorded mirror). Matches the journeys' platform so ids read realistically.
+var testPlatform = component.PlatformMeta{Org: "c360", Platform: "semdev-001"}
 
 func (r *fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.Triple, error) {
 	if r.err != nil {
@@ -114,7 +119,7 @@ func stampedObjects(w *fakeWriter, pred string) []string {
 // is harness-bound, not model-supplied (HIGH-2 / H3) — and no outcome-shaped
 // field (G3).
 func TestClassifyIntentTakesNoAuthorOrMessageID(t *testing.T) {
-	defs := New(nil, nil, nil).ListTools()
+	defs := New(nil, nil, testPlatform, nil).ListTools()
 	if len(defs) != 1 {
 		t.Fatalf("ListTools returned %d defs, want 1", len(defs))
 	}
@@ -157,7 +162,7 @@ func TestClassifyIntentStampsOnRunFromPending(t *testing.T) {
 		classifiedFact("issuecomment-7"),  // a prior classification the append-set must preserve
 	}
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call("approve", "the author said to ship it"))
+	res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call("approve", "the author said to ship it"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -230,7 +235,7 @@ func TestClassifyIntentIgnoresModelSuppliedIdentity(t *testing.T) {
 	c.Arguments["message-id"] = "forged-99"
 	c.Arguments["approved"] = true
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -264,7 +269,7 @@ func TestClassifyIntentDedupIsIdempotentOnRedelivery(t *testing.T) {
 		classifiedFact("issuecomment-42"), // already classified — the redelivery case
 	}
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call("approve", "ship it"))
+	res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call("approve", "ship it"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -300,7 +305,7 @@ func TestClassifyIntentFaultsWhenPendingSlotMoved(t *testing.T) {
 	}
 	for name, facts := range cases {
 		w := &fakeWriter{}
-		res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call("approve", "ship it"))
+		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call("approve", "ship it"))
 		if err != nil {
 			t.Fatalf("%s: execute: %v", name, err)
 		}
@@ -326,7 +331,7 @@ func TestClassifyIntentRejectsOffTaxonomy(t *testing.T) {
 	}
 	for _, bad := range []string{"ship_it", "approved", "yes", ""} {
 		w := &fakeWriter{}
-		res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call(bad, "looks good"))
+		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call(bad, "looks good"))
 		if err != nil {
 			t.Fatalf("execute(%q): %v", bad, err)
 		}
@@ -349,4 +354,110 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// TestClassifyIntentMirrorsRecordedOnItsLoop pins the loop mirror that makes the
+// fallback note possible at all.
+//
+// The fault-note rule fires on the classifier LOOP, and rule conditions can only
+// read the FIRING entity's own facts — the run's conversation.intent.* is
+// unreachable from there. So "did this classifier produce a reading?" has to be
+// answerable from the loop, and this mirror is that answer.
+//
+// The alternative the design originally assumed — key the note on
+// agent.loop.outcome == "failed" — shipped broken: a tool returning a ToolResult
+// error does NOT fail its loop, so a classifier that deliberately refused to
+// classify terminated outcome=success and the human was told nothing. Hence the
+// discriminator is the ABSENCE of this fact, which makes its presence-on-success
+// and absence-on-refusal both load-bearing.
+const testLoopID = "classifier-loop-1"
+
+// loopCall is call() plus a LoopID, so the recorded mirror is reachable. The
+// default call() carries none, which exercises the documented skip path.
+func loopCall(intent, reason string) agentic.ToolCall {
+	c := call(intent, reason)
+	c.LoopID = testLoopID
+	return c
+}
+
+func TestClassifyIntentMirrorsRecordedOnItsLoop(t *testing.T) {
+	t.Run("a landed classification stamps the mirror on the LOOP", func(t *testing.T) {
+		facts := []message.Triple{
+			pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-42"),
+			pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
+			pendingFact(conversationintent.PendingPrefix+"body", "yes, let's ship this"),
+			dispatchedFact("issuecomment-42"),
+		}
+		w := &fakeWriter{}
+		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), loopCall("approve", "ship it"))
+		if err != nil || res.Error != "" {
+			t.Fatalf("Execute: err=%v result.Error=%q", err, res.Error)
+		}
+		wantLoop, lerr := agentic.TryLoopExecutionEntityID(testPlatform.Org, testPlatform.Platform, testLoopID)
+		if lerr != nil {
+			t.Fatalf("derive loop entity id: %v", lerr)
+		}
+		var mirrored *message.Triple
+		for ci, batch := range w.replaces {
+			for i, tr := range batch {
+				if tr.Predicate == conversationintent.ClassifierRecordedPredicate {
+					mirrored = &w.replaces[ci][i]
+				}
+			}
+		}
+		if mirrored == nil {
+			t.Fatalf("no %s stamped — without it the fault-note rule cannot tell a landed classification from a refused one, and EVERY successful classification would draw a spurious note",
+				conversationintent.ClassifierRecordedPredicate)
+		}
+		if mirrored.Subject != wantLoop {
+			t.Errorf("mirror stamped on %q, want the LOOP entity %q (a rule firing on the loop cannot read the run)", mirrored.Subject, wantLoop)
+		}
+		// The ENTITY the write was addressed to is the load-bearing half
+		// (grp6-review M4): asserting only the triple's Subject field passes even if
+		// ReplaceTriples is called with runEntityID, which in production leaves the
+		// loop bare and fires the note on EVERY classification — the exact bug under
+		// repair, reintroduced and invisible.
+		var addressedLoop bool
+		for _, id := range w.entityIDs {
+			if id == wantLoop {
+				addressedLoop = true
+			}
+		}
+		if !addressedLoop {
+			t.Errorf("no ReplaceTriples was ADDRESSED to the loop entity %q (got %v) — the mirror must be written to the loop, not merely carry it as a Subject", wantLoop, w.entityIDs)
+		}
+		if mirrored.Object != "issuecomment-42" {
+			t.Errorf("mirror object = %v, want the classified message id %q", mirrored.Object, "issuecomment-42")
+		}
+		if mirrored.Source != conversationintent.ClassifierSource {
+			t.Errorf("mirror Source = %q, want %q", mirrored.Source, conversationintent.ClassifierSource)
+		}
+	})
+
+	t.Run("a REFUSED classification stamps no mirror (so the note fires)", func(t *testing.T) {
+		// The read-once binding fault: the pending slot moved off the dispatched
+		// marker, so the tool refuses rather than misattribute. Nothing may be
+		// stamped — the absent mirror is exactly what summons the fallback note.
+		facts := []message.Triple{
+			pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-99"), // the slot MOVED
+			pendingFact(conversationintent.PendingAuthorPredicate, "someone-else"),
+			pendingFact(conversationintent.PendingPrefix+"body", "a newer message"),
+			dispatchedFact("issuecomment-42"), // this loop was dispatched for 42
+		}
+		w := &fakeWriter{}
+		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), loopCall("approve", "ship it"))
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if res.Error == "" {
+			t.Fatal("a moved pending slot must be refused (the misattribution guard)")
+		}
+		for _, batch := range w.replaces {
+			for _, tr := range batch {
+				if tr.Predicate == conversationintent.ClassifierRecordedPredicate {
+					t.Errorf("a REFUSED classification stamped %s — the fault-note rule keys on its absence, so stamping it here restores the exact silence this whole lane exists to remove", tr.Predicate)
+				}
+			}
+		}
+	})
 }

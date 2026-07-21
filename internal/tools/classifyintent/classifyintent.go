@@ -44,6 +44,7 @@ import (
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semstreams/agentic"
+	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
@@ -61,19 +62,23 @@ const Source = conversationintent.ClassifierSource
 // identity) and stamps the classifier's routing intent (conversation.intent.*)
 // on the RUN.
 type Executor struct {
-	reader changefacts.Reader
-	writer agentictools.OwnedFactWriter
-	logger *slog.Logger
+	reader   changefacts.Reader
+	writer   agentictools.OwnedFactWriter
+	platform component.PlatformMeta
+	logger   *slog.Logger
 }
 
 // New builds the classify_intent executor. reader/writer may be nil for
 // schema-only registration (the tool censuses inspect ListTools without a live
-// NATS client); Execute fails loudly if either is nil.
-func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+// NATS client); Execute fails loudly if either is nil. platform supplies the
+// org/platform the classifier LOOP entity id is derived from for the recorded
+// mirror — a wrong value faults the call closed (before anything routes) rather
+// than silently mirroring onto an entity no rule reads.
+func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, platform component.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{reader: reader, writer: writer, logger: logger}
+	return &Executor{reader: reader, writer: writer, platform: platform, logger: logger}
 }
 
 type payload struct {
@@ -178,8 +183,68 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 	ledger := ledgerWith(objectsOf(classified, conversationintent.IntentClassifiedPredicate), pendingID)
 
+	// THE LOOP MIRROR, PART 1 — resolve the target BEFORE anything routes.
+	//
+	// The fault-note rule (conversation/05) fires on the classifier LOOP, and rule
+	// conditions read only the FIRING entity's facts — the run's
+	// conversation.intent.* is unreachable from there. So the note needs a
+	// loop-local witness, and its ABSENCE is the complete "produced no reading"
+	// discriminator: it covers the read-once binding refusal above, a model error,
+	// a truncation, and cap exhaustion alike. Keying the note on
+	// agent.loop.outcome == "failed" is WRONG and was the shipped bug — a tool
+	// returning a ToolResult error does not fail its loop, so a classifier that
+	// deliberately refused still terminated outcome=success and the human was told
+	// nothing (observed end-to-end, not theorized).
+	//
+	// ORDERING IS A SAFETY PROPERTY (grp6-review M1). Deriving the loop id here,
+	// ahead of stampIntent, makes a mis-wired platform or a missing LoopID fault
+	// CLOSED: nothing is stamped, so no route fires and no gate releases. Doing it
+	// after the run write — which is what submit_review's shape looks like at a
+	// glance — would be fail-OPEN here: the routing fact would already be on the
+	// run, 03a/03b would already have fired, the gate might already have released,
+	// and the only remaining effect would be a contradictory note. Same code shape,
+	// opposite safety direction, because submit_review's mirror IS the chaining
+	// signal while this one is only a witness.
+	var loopEntityID string
+	if call.LoopID == "" {
+		// Unit-test construction only; a dispatched loop always carries one.
+		e.logger.Warn("classify_intent: no loop_id on the tool call — skipping the recorded mirror; a fallback note may be posted for a classification that DID land",
+			slog.String("run_entity_id", runEntityID), slog.String("message_id", pendingID))
+	} else {
+		var lerr error
+		loopEntityID, lerr = agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
+		if lerr != nil {
+			return errResult(call, agentic.ToolErrorInternal, "classify_intent: construct classifier loop entity id: %v", lerr)
+		}
+	}
+
 	if err := e.stampIntent(ctx, runEntityID, p.Intent, pendingID, pendingAuthor, p.Reason, ledger); err != nil {
 		return errResult(call, changefacts.ReadErrorKind(err), "classify_intent: stamp %s on %s: %v", conversationintent.IntentValuePredicate, runEntityID, err)
+	}
+
+	// THE LOOP MIRROR, PART 2 — record that a classification actually landed.
+	//
+	// FAILURE POSTURE (grp6-review M2, corrected). errResult carries no StopLoop, so
+	// a mirror failure gives the model ANOTHER TURN, and pass 2 can return a
+	// DIFFERENT intent whose stampIntent replaces the value pass 1 may already have
+	// routed on. The writes are idempotent; the judgment is not. What actually keeps
+	// that safe is downstream and deterministic — 03a/03b dispatch only while BOTH
+	// gate facts are absent, and the apply consumer re-checks the gate is still open
+	// before stamping — NOT anything the mirror does. The residual effect of a
+	// mirror failure is a spurious fallback note on a classification that landed,
+	// which the note consumer suppresses once a gate fact exists (parkpost.go).
+	if loopEntityID != "" {
+		mirror := message.Triple{
+			Subject:    loopEntityID,
+			Predicate:  conversationintent.ClassifierRecordedPredicate,
+			Object:     pendingID,
+			Source:     conversationintent.ClassifierSource,
+			Timestamp:  time.Now().UTC(),
+			Confidence: 1.0,
+		}
+		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, []message.Triple{mirror}, nil); merr != nil {
+			return errResult(call, changefacts.ReadErrorKind(merr), "classify_intent: stamp %s on %s: %v", conversationintent.ClassifierRecordedPredicate, loopEntityID, merr)
+		}
 	}
 
 	e.logger.Info("classify_intent recorded intent",

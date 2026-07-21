@@ -66,3 +66,16 @@ const ClassifierSource = "conversation-classifier"
 // the old message's text. The terminal-release rule then retires the slot and
 // the marker, and the fallback-note lane surfaces the miss to the human.
 const ClassifierDispatchedPredicate = "conversation.classifier.dispatched"
+
+// ClassifierRecordedPredicate is stamped by classify_intent on ITS OWN LOOP
+// entity (not the run) when a classification actually lands; its object is the
+// classified message id. The fault-note rule (conversation/05) fires on the LOOP
+// and so can only read loop-local facts — the run's conversation.intent.* is
+// unreachable from there — which makes the ABSENCE of this fact at a terminal the
+// complete discriminator for "this classifier produced no reading".
+//
+// It replaced an agent.loop.outcome == "failed" condition that could not work: a
+// tool returning a ToolResult error does NOT fail its loop, so a classifier that
+// deliberately refused to classify (the read-once binding fault) terminated
+// outcome=success and the human got silence. Writer: conversation-classifier.
+const ClassifierRecordedPredicate = "conversation.classifier.recorded"

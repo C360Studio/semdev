@@ -316,6 +316,18 @@ var Predicates = []Predicate{
 	// closed) — the writer is the rule subsystem label (rules carry the engine Source; the
 	// sanctioned-rule census keeps the realization honest, like route.attempt.routed).
 	{"conversation.classifier.dispatched", "conversation-spawn-rule", "conversation-channel", nlIntent},
+	// conversation.classifier.recorded is stamped by classify_intent on ITS OWN LOOP
+	// entity (the submit_review route-mirror shape) when a classification actually
+	// lands, carrying the classified message id. It exists because the fault-note
+	// rule fires on the LOOP, where rule conditions can only read the firing
+	// entity's own facts — the run's conversation.intent.* is unreachable from
+	// there. Its ABSENCE at a conversation-loop terminal is the honest, complete
+	// discriminator for "this classifier produced no reading", covering the
+	// read-once binding fault, a model error, a truncation, and cap exhaustion
+	// alike. Keying the note on agent.loop.outcome instead does NOT work: a tool
+	// that returns a ToolResult error does not fail its loop, so a classifier that
+	// refused to classify still terminates outcome=success (observed, not assumed).
+	{"conversation.classifier.recorded", "conversation-classifier", "conversation-channel", nlIntent},
 	{"run.change.rejected", "approval-adapter", "conversation-channel", nlIntent},
 }
 

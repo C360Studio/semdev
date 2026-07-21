@@ -77,6 +77,12 @@
           "gemini"
         ],
         "requires_tools": true
+      },
+      "conversation": {
+        "preferred": [
+          "gemini"
+        ],
+        "requires_tools": true
       }
     },
     "endpoints": {
@@ -205,6 +211,12 @@
           "rules/run-lifecycle/05-park-station-failure-run.json",
           "rules/run-lifecycle/06-park-station-failure-loop.json",
           "rules/run-lifecycle/07-cancel-after-change-rejection.json",
+          "rules/conversation/01-anchor-gated-run.json",
+          "rules/conversation/02-spawn-classifier.json",
+          "rules/conversation/03a-route-intent-approve.json",
+          "rules/conversation/03b-route-intent-reject.json",
+          "rules/conversation/04-classifier-terminal-release.json",
+          "rules/conversation/05-classifier-fault-note.json",
           "rules/dev-from-task/01-anchor-run-for-dispatch.json",
           "rules/dev-from-task/02-rewake-coordinator-dev.json",
           "rules/dev-from-task/03-project-tasks.json",
@@ -336,7 +348,8 @@
           "code_context",
           "code_impact",
           "code_search",
-          "doc_context"
+          "doc_context",
+          "classify_intent"
         ],
         "restricted_decide_actions": [],
         "ports": {
