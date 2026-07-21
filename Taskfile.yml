@@ -5,6 +5,10 @@ version: "3"
 # so a shell export overrides the file.
 dotenv: ['.env']
 
+includes:
+  clean:
+    taskfile: ./taskfiles/clean.yml
+
 tasks:
   build:
     desc: Build all binaries and packages
@@ -88,6 +92,11 @@ tasks:
     desc: Mock-LLM spine journey — zero paid tokens (mock ladder must be green)
     deps: [nats:reset]
     cmds:
+      # defer: runs even when the journey FAILS or is interrupted, which is exactly
+      # when containers get stranded — in-process teardown only covers the graceful
+      # path. Without this, every red e2e run leaves a sandbox container, its cache
+      # volumes, and a multi-GB semdev-sandbox image behind.
+      - defer: { task: clean:docker }
       - go test -race -tags=e2e ./test/e2e/...
 
   check:
@@ -132,6 +141,10 @@ tasks:
       - sh: test -n "$GEMINI_API_KEY"
         msg: "GEMINI_API_KEY is empty — cp .env.example .env and fill it in (or export it; runbook §0)."
     cmds:
+      # Runs even when the paid journey fails or is aborted mid-arc — the runbook's
+      # abort criteria mean this lane is EXPECTED to be killed sometimes, which is
+      # exactly when sandboxes and multi-GB images get stranded.
+      - defer: { task: clean:docker }
       - >-
         SEMDEV_REAL_LLM=1 go test -tags=e2e -count=1 -timeout 80m
         -run 'TestRealLLMJourneyIssueToPR$' -v ./test/e2e/ 2>&1
@@ -161,6 +174,11 @@ tasks:
       stops it. PULL-FIRST: no inbound webhook reachability is required.
     deps: [nats:reset]
     cmds:
+      # Ctrl-C is how this daemon is always ended, and defer runs on that path. The
+      # runtime already reaps warm sandboxes on a graceful Stop — this covers when it
+      # cannot get there (SIGKILL, the known StopAll wedge, semstreams #508) plus the
+      # sandbox IMAGES, which the runtime never removes at all.
+      - defer: { task: clean:docker }
       - go run ./cmd/semdev
 
   launch:
