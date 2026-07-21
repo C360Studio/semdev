@@ -56,6 +56,20 @@ const (
 	DecisionReject  = "reject"
 )
 
+// LastTransitionAtPredicate is the FRAMEWORK-written RFC3339Nano timestamp of a run's
+// most recent lifecycle transition (agentrun's audit spec — `AuditPredicates.At`, stamped
+// by the lifecycle manager on create AND on every transition). semdev READS it, never
+// writes it (G2).
+//
+// While a run's phase IS awaiting_approval, its last transition is by definition the one
+// that ENTERED awaiting_approval — so this fact is exactly "when the change-approval gate
+// opened", which is the D12a watermark. It is deliberately preferred over the phase
+// triple's own `Timestamp` metadata field: this is a first-class declared fact with a
+// documented format and a single framework writer, whereas triple metadata is incidental
+// bookkeeping that no contract obliges any writer to populate. A watermark is a security
+// guard; it must read something that is promised, not something that happens to be there.
+const LastTransitionAtPredicate = "agent.run.last-transition-at"
+
 // RunState is what the resolver reports about the run bound to an issue ref. It is a
 // STRUCT rather than a return tuple because the callers need three independent facts
 // about the run (its identity, whether the gate is already decided, and where it is in
@@ -73,6 +87,12 @@ type RunState struct {
 	// Phase is the run's agent.run.phase — the M7 getter the NL bridge gates on
 	// (awaiting_approval). semdev READS it, never writes it (G2).
 	Phase string
+	// GateOpenedAt is the moment this run entered awaiting_approval — the D12a
+	// watermark. It is set ONLY while Phase is awaiting_approval: a "gate opened at"
+	// carrying some other transition's time would be a lie the moment a caller compares
+	// a message timestamp against it. Zero on a gated run means the watermark could NOT
+	// be established, which callers MUST treat as fail-closed, never as "no lower bound".
+	GateOpenedAt time.Time
 }
 
 // Decided reports whether the change-approval gate already carries a decision.
@@ -120,7 +140,6 @@ const maxRunPages = 16
 // Every page is scanned before choosing; the loop no longer returns early.
 func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (RunState, error) {
 	var best RunState
-	var bestGateOpen time.Time
 	found := false
 
 	cursor := ""
@@ -142,7 +161,7 @@ func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (RunS
 			e := &resp.Entities[i]
 			var refMatch bool
 			var cand RunState
-			var gateOpen time.Time
+			var lastTransition time.Time
 			for _, tr := range e.Triples {
 				switch tr.Predicate {
 				case "run.issue.ref":
@@ -158,14 +177,11 @@ func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (RunS
 					// gates on (awaiting_approval). semdev READS it, never writes it (G2).
 					if s, ok := tr.Object.(string); ok {
 						cand.Phase = s
-						// The phase triple's timestamp is the moment the run entered
-						// its CURRENT phase (replace-by-predicate). That is the moment
-						// the gate opened ONLY while the phase is awaiting_approval, so
-						// it is recorded only then — a "gate opened at" value carrying
-						// some other transition's time would be a lie the moment a
-						// caller compares a message timestamp against it (D12a).
-						if s == PhaseAwaitingApproval {
-							gateOpen = tr.Timestamp
+					}
+				case LastTransitionAtPredicate:
+					if s, ok := tr.Object.(string); ok {
+						if at, perr := time.Parse(time.RFC3339Nano, s); perr == nil {
+							lastTransition = at
 						}
 					}
 				}
@@ -174,8 +190,13 @@ func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (RunS
 				continue
 			}
 			cand.EntityID = e.ID
-			if !found || preferRun(cand, gateOpen, best, bestGateOpen) {
-				best, bestGateOpen, found = cand, gateOpen, true
+			// The last transition is the GATE OPENING only while the run is still at
+			// the gate (see GateOpenedAt).
+			if cand.Phase == PhaseAwaitingApproval {
+				cand.GateOpenedAt = lastTransition
+			}
+			if !found || preferRun(cand, best) {
+				best, found = cand, true
 			}
 		}
 		if resp.NextCursor == "" {
@@ -204,14 +225,14 @@ func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (RunS
 // preferRun reports whether candidate cand beats the incumbent best under the D12b
 // ordering: at-the-gate first, then most-recently-opened gate, then entity ID (a total
 // order, so the winner does not depend on page arrival).
-func preferRun(cand RunState, candGateOpen time.Time, best RunState, bestGateOpen time.Time) bool {
+func preferRun(cand, best RunState) bool {
 	candGated := cand.Phase == PhaseAwaitingApproval
 	bestGated := best.Phase == PhaseAwaitingApproval
 	if candGated != bestGated {
 		return candGated
 	}
-	if !candGateOpen.Equal(bestGateOpen) {
-		return candGateOpen.After(bestGateOpen)
+	if !cand.GateOpenedAt.Equal(best.GateOpenedAt) {
+		return cand.GateOpenedAt.After(best.GateOpenedAt)
 	}
 	return cand.EntityID < best.EntityID
 }

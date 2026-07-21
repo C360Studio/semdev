@@ -209,11 +209,15 @@ station-panic, and evidence-ledger findings belong to their OWN changes — they
 scope for this one. The four below are defects in what THIS change built. Archiving without
 them would sync a spec asserting behavior the code lacks (G10).
 
-- [ ] 8.1 RED-first: the **gate-open watermark** (D12). **(b) LANDED** with 8.2 (they share
+- [x] 8.1 RED-first: the **gate-open watermark** (D12). **(b) LANDED** with 8.2 (they share
   the resolver): deterministic active-run resolution + `RunState`, pinned by
-  `TestResolverPrefersTheActiveGatedRun` and mutation-verified. **(a) the watermark itself is
-  NOT done** — and note the sequencing hazard the review named: (b) alone makes a historical
-  comment deterministically target the FRESH gated run, so (a) must land before any deploy. `ResolveRunByRef` additionally
+  `TestResolverPrefersTheActiveGatedRun` and mutation-verified. **(a) DONE** — the sequencing hazard the
+  review named is closed. The watermark reads the FRAMEWORK's declared
+  `agent.run.last-transition-at` audit fact, NOT the phase triple's `Timestamp` metadata: a
+  security guard must read something a contract promises is populated, or it degrades
+  silently and in the fail-OPEN direction. A 30s `gateWatermarkSkew` covers the poll path's
+  cross-clock comparison (code-host `created_at` vs a semdev-stamped gate-open). Fails CLOSED
+  on an unestablishable watermark or an untimestamped message. All pins mutation-verified. `ResolveRunByRef` additionally
   returns `gateOpenedAt` (the `agent.run.phase` triple's `Timestamp` while the phase is
   `awaiting_approval`) and resolves DETERMINISTICALLY to the active run (awaiting-approval
   preferred, newest gate-open next, entity ID as a stable tiebreak) instead of first-match-in-

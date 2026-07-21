@@ -146,17 +146,22 @@ func TestListRunsAwaitingApprovalTransportErrorPropagates(t *testing.T) {
 	}
 }
 
-// runEntityAt is runEntity with an explicit phase-transition timestamp — the value
-// preferRun's second tier orders on, and (D12a) the gate-open watermark.
+// runEntityAt is runEntity plus the FRAMEWORK's last-transition-at audit fact — the value
+// preferRun's second tier orders on and (D12a) the gate-open watermark.
+//
+// Note it seeds an RFC3339Nano OBJECT, not the triple's Timestamp metadata field. That is
+// the contract the resolver reads, deliberately: the audit predicate is a declared fact
+// with a documented format and a single framework writer, whereas triple metadata is
+// incidental bookkeeping. A fixture seeding the metadata would pass against an
+// implementation that read it and silently stop proving anything when the source changed —
+// which is exactly what happened to an earlier draft of this helper.
 func runEntityAt(id, phase, ref string, at time.Time) graph.EntityState {
-	e := graph.EntityState{ID: id}
-	if phase != "" {
-		e.Triples = append(e.Triples, message.Triple{
-			Subject: id, Predicate: agentrun.PhasePredicate, Object: phase, Timestamp: at})
-	}
-	if ref != "" {
-		e.Triples = append(e.Triples, message.Triple{Subject: id, Predicate: "run.issue.ref", Object: ref})
-	}
+	e := runEntity(id, phase, ref)
+	e.Triples = append(e.Triples, message.Triple{
+		Subject:   id,
+		Predicate: LastTransitionAtPredicate,
+		Object:    at.Format(time.RFC3339Nano),
+	})
 	return e
 }
 
@@ -269,4 +274,62 @@ func TestResolverReturnsAMatchFoundBeforePageExhaustion(t *testing.T) {
 	if got.EntityID != "run-gated" {
 		t.Fatalf("resolved %q, want run-gated", got.EntityID)
 	}
+}
+
+// TestResolverSurfacesGateOpenedAt pins the D12a watermark SOURCE.
+//
+// It is read from the framework's declared audit fact (agent.run.last-transition-at,
+// RFC3339Nano) rather than the phase triple's Timestamp metadata, because a security
+// guard must read something a contract PROMISES is populated, not something that happens
+// to be there. And it is surfaced ONLY while the run is at the gate: "gate opened at"
+// carrying some other transition's time is a lie the moment a caller compares a message
+// timestamp against it.
+func TestResolverSurfacesGateOpenedAt(t *testing.T) {
+	opened := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("a gated run reports when its gate opened", func(t *testing.T) {
+		page := mustPage(t, graph.PrefixQueryResponse{Entities: []graph.EntityState{
+			runEntityAt("run-1", PhaseAwaitingApproval, "acme/widgets#1", opened),
+		}})
+		got, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+			ResolveRunByRef(context.Background(), "acme/widgets#1")
+		if err != nil {
+			t.Fatalf("ResolveRunByRef: %v", err)
+		}
+		if !got.GateOpenedAt.Equal(opened) {
+			t.Fatalf("GateOpenedAt = %v, want %v — without it every inbound message fails "+
+				"closed and the gate is unreachable", got.GateOpenedAt, opened)
+		}
+	})
+
+	t.Run("a run NOT at the gate reports no gate-open time", func(t *testing.T) {
+		page := mustPage(t, graph.PrefixQueryResponse{Entities: []graph.EntityState{
+			runEntityAt("run-2", "executing", "acme/widgets#2", opened),
+		}})
+		got, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+			ResolveRunByRef(context.Background(), "acme/widgets#2")
+		if err != nil {
+			t.Fatalf("ResolveRunByRef: %v", err)
+		}
+		if !got.GateOpenedAt.IsZero() {
+			t.Fatalf("GateOpenedAt = %v on a run at %q, want zero — the last transition is "+
+				"the gate opening ONLY while the run is still at the gate", got.GateOpenedAt, got.Phase)
+		}
+	})
+
+	t.Run("an unparseable timestamp yields zero, which fails closed downstream", func(t *testing.T) {
+		e := runEntity("run-3", PhaseAwaitingApproval, "acme/widgets#3")
+		e.Triples = append(e.Triples, message.Triple{
+			Subject: "run-3", Predicate: LastTransitionAtPredicate, Object: "not-a-timestamp"})
+		page := mustPage(t, graph.PrefixQueryResponse{Entities: []graph.EntityState{e}})
+		got, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+			ResolveRunByRef(context.Background(), "acme/widgets#3")
+		if err != nil {
+			t.Fatalf("ResolveRunByRef: %v", err)
+		}
+		if !got.GateOpenedAt.IsZero() {
+			t.Fatal("a malformed timestamp must yield ZERO (fail closed downstream), never a " +
+				"partially-parsed or defaulted time that would admit historical messages")
+		}
+	})
 }

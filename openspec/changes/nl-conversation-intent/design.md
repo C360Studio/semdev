@@ -425,11 +425,32 @@ Two runs sharing one ref is reachable."*
 
 **The fix — two halves.**
 
-**(a) A per-run watermark.** `ResolveRunByRef` additionally returns `gateOpenedAt` — the
-`Timestamp` of the run's `agent.run.phase` triple while that phase is `awaiting_approval`
-(replace-by-predicate makes it exactly the moment the gate opened, and it correctly ADVANCES
-on the legal `executing → awaiting_approval` re-entry). Both inbound paths then require
-`msg.At > gateOpenedAt`. A message at or before the watermark is DEFINITIVELY dropped
+**(a) A per-run watermark.** `ResolveRunByRef` additionally returns `GateOpenedAt`, read
+from the FRAMEWORK's declared audit fact `agent.run.last-transition-at` (RFC3339Nano,
+stamped by the lifecycle manager on create and on every transition). While a run's phase IS
+`awaiting_approval`, its last transition is by definition the one that entered
+`awaiting_approval` — so that fact is exactly the moment the gate opened, and it correctly
+advances on the legal `executing → awaiting_approval` re-entry. Both inbound paths then
+require `msg.At` to be after it.
+
+**Read the declared FACT, not the triple's `Timestamp` metadata.** An earlier draft of this
+decision used the `agent.run.phase` triple's `Timestamp` field. That is incidental
+bookkeeping which no contract obliges a writer to populate; `last-transition-at` is a
+declared predicate with a documented format and a single framework writer. A watermark is a
+security guard, so it must read something that is PROMISED, not something that happens to be
+there — otherwise the guard degrades silently the day a writer stops filling the field, and
+degrades in the fail-OPEN direction. `GateOpenedAt` is populated ONLY while the phase is
+`awaiting_approval`, because a "gate opened at" carrying some other transition's time
+becomes a lie the moment a caller compares a message timestamp against it.
+
+**A bounded skew tolerance, because the two transports use different clocks.** The poll
+transport timestamps a message with the CODE HOST's `created_at`; the webhook transport uses
+semdev's own receive time. The gate-open moment is stamped by semdev, so the poll path is a
+CROSS-CLOCK comparison and a strict comparison would silently drop legitimate approvals
+whenever semdev's clock ran slightly ahead. `gateWatermarkSkew` (30s) is the margin: orders
+of magnitude below the separation between two runs' gates (a full author→validate→gate arc
+of model turns), and orders of magnitude above realistic NTP skew. It is a named constant
+rather than a config knob — it describes clock reality, not a deployment preference. A message at or before the watermark is DEFINITIVELY dropped
 (acked, counted, logged) — never redelivered, because redelivery cannot make it newer.
 
 **It applies to the EXACT COMMAND too (decided with the operator).** A stale

@@ -212,6 +212,12 @@ func (a *approvalAdapter) releaseGate(ctx context.Context, msg conversation.Mess
 		return nil
 	}
 
+	// D12a — the message must have been written FOR this gate.
+	if !a.freshForGate(msg, run, thread) {
+		atomic.AddInt64(&a.ignored, 1)
+		return nil
+	}
+
 	landed, err := a.stampDecision(ctx, run.EntityID, decision)
 	if err != nil {
 		return fmt.Errorf("approval: stamp %s on %s: %w", decision, run.EntityID, err)
@@ -233,6 +239,65 @@ func (a *approvalAdapter) releaseGate(ctx context.Context, msg conversation.Mess
 		slog.String("ref", string(thread)), slog.String("actor", ev.Actor),
 		slog.String("run", run.EntityID), slog.String("decision", decision))
 	return nil
+}
+
+// gateWatermarkSkew is how far BEFORE the gate opened a message may still be honored.
+//
+// It exists because the two transports timestamp a message from DIFFERENT CLOCKS. The poll
+// path carries the code host's `created_at` (GitHub's clock); the webhook path carries
+// semdev's own receive time. The watermark compares that against a gate-open moment stamped
+// by semdev, so the poll path is a CROSS-CLOCK comparison and a strict `>` would drop a
+// legitimate approval whenever semdev's clock ran slightly ahead — silently, since a dropped
+// message gets no reply.
+//
+// The tolerance is safe against what the watermark actually defends: a comment written for a
+// DIFFERENT, EARLIER gate. Those are separated by at least a full run arc (author → validate
+// → gate, several model turns), which is orders of magnitude more than this margin, while
+// realistic NTP skew is sub-second. Deliberately a named constant, not a config knob — it is
+// a property of clock reality, not of a deployment.
+const gateWatermarkSkew = 30 * time.Second
+
+// freshForGate reports whether msg was written FOR the gate that is currently open on run —
+// the D12a watermark (external review #1).
+//
+// THE DEFECT IT CLOSES: the poll cursor is in-memory and starts EMPTY, so any restart
+// re-reads a thread from the top. Dedup for the NL lane reads a ledger ON THE RUN, and the
+// exact path's decided-check is per-run too — so a SECOND run on a reused issue begins with
+// an empty ledger and an undecided gate, and a months-old "ship it" (or an old
+// `/semdev approve`) would decide a proposal the human never saw. D12b made that WORSE
+// before this landed: resolving deterministically to the active gated run turned a
+// probabilistic mis-target into a certain one.
+//
+// The rule is uniform across the NL bridge AND the exact command (the D12 decision): a
+// message authored at or before the gate opened does not decide that gate. It is DEFINITIVE
+// — redelivery cannot make a message newer — and it is LOUD, because a silently dropped
+// human instruction is the failure mode this project keeps paying for.
+//
+// It FAILS CLOSED when no watermark can be established. A gated run always carries the
+// framework's last-transition-at, so a zero here means something is wrong with the run's
+// audit facts — and a missing lower bound must never read as "no lower bound", which would
+// honor every historical comment on the thread.
+func (a *approvalAdapter) freshForGate(msg conversation.Message, run admission.RunState, thread conversation.ThreadRef) bool {
+	if run.GateOpenedAt.IsZero() {
+		a.logger.Error("approval: gated run carries no readable gate-open time; REFUSING the message (fail closed)",
+			slog.String("ref", string(thread)), slog.String("run", run.EntityID),
+			slog.String("predicate", admission.LastTransitionAtPredicate))
+		return false
+	}
+	if msg.At.IsZero() {
+		a.logger.Error("approval: message carries no timestamp; REFUSING it (the watermark cannot be applied)",
+			slog.String("ref", string(thread)), slog.String("run", run.EntityID),
+			slog.String("message_id", msg.ID))
+		return false
+	}
+	if !msg.At.After(run.GateOpenedAt.Add(-gateWatermarkSkew)) {
+		a.logger.Warn("approval: message predates the gate it would decide; ignored (D12a watermark)",
+			slog.String("ref", string(thread)), slog.String("run", run.EntityID),
+			slog.String("message_id", msg.ID), slog.String("author", msg.Author),
+			slog.Time("message_at", msg.At), slog.Time("gate_opened_at", run.GateOpenedAt))
+		return false
+	}
+	return true
 }
 
 // stampDecision writes the run's SINGLE-VALUED change-approval decision under the one
@@ -370,6 +435,13 @@ func (a *approvalAdapter) bridgeNonCommand(ctx context.Context, msg conversation
 		a.logger.Info("approval: run is gated but already decided; no NL bridge (the classification could not route)",
 			slog.String("ref", string(thread)), slog.String("run", run.EntityID),
 			slog.String("decision", run.Decision))
+		return nil
+	}
+	// D12a — the same watermark the exact command carries. Applied BEFORE Authorize so a
+	// replayed thread costs zero code-host permission calls, matching the phase gate's
+	// rationale (grp3-review M1).
+	if !a.freshForGate(msg, run, thread) {
+		atomic.AddInt64(&a.ignored, 1)
 		return nil
 	}
 	runEntityID := run.EntityID

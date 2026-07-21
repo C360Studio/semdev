@@ -25,8 +25,15 @@ type fakeResolver struct {
 	err      error
 }
 
+// ResolveRunByRef reports a gate opened an hour ago for a gated run, so the D12a
+// watermark admits a message sent NOW. A fixture wanting the watermark to BITE uses
+// fakeGraph with an explicit gateOpenedAt.
 func (f *fakeResolver) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
-	return admission.RunState{EntityID: f.runID, Decision: f.decision, Phase: f.phase}, f.err
+	st := admission.RunState{EntityID: f.runID, Decision: f.decision, Phase: f.phase}
+	if st.Phase == admission.PhaseAwaitingApproval {
+		st.GateOpenedAt = time.Now().Add(-time.Hour)
+	}
+	return st, f.err
 }
 
 // fakeIntentReader scripts the classified-ledger read handleMessage's NL bridge
@@ -90,14 +97,22 @@ func (f *fakeWriter) ReadOwnedPredicates(context.Context, string, string) ([]str
 // vacuous green (the grp5 lesson: assert reachability, never trust a fake that cannot
 // fail).
 type fakeGraph struct {
-	runID  string
-	phase  string
-	facts  []message.Triple
-	writes int
+	runID string
+	phase string
+	// gateOpenedAt is the D12a watermark. Zero would mean "watermark unavailable",
+	// which fails CLOSED — so fixtures that want a normal gated run must set it.
+	gateOpenedAt time.Time
+	facts        []message.Triple
+	writes       int
 }
 
 func (f *fakeGraph) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
-	return admission.RunState{EntityID: f.runID, Decision: f.objectOf(admission.DecisionPredicate), Phase: f.phase}, nil
+	return admission.RunState{
+		EntityID:     f.runID,
+		Decision:     f.objectOf(admission.DecisionPredicate),
+		Phase:        f.phase,
+		GateOpenedAt: f.gateOpenedAt,
+	}, nil
 }
 
 func (f *fakeGraph) ReadFacts(_ context.Context, _ string, prefix string) ([]message.Triple, error) {
@@ -172,7 +187,7 @@ func newTestApprovalOnGraph(g *fakeGraph, checker admission.PermissionChecker) *
 // The assertion is deliberately on the CELL SPACE, not on a predicate name: the run must
 // carry EXACTLY ONE gate-decision fact no matter which verbs arrive in which order.
 func TestOppositeCommandsCannotWedgeTheGate(t *testing.T) {
-	g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval}
+	g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval, gateOpenedAt: time.Now().Add(-time.Hour)}
 	a := newTestApprovalOnGraph(g, nil)
 	ctx := context.Background()
 
@@ -244,7 +259,7 @@ func TestExactCommandOnUngatedRunIsIgnored(t *testing.T) {
 // it spawns produces an intent the routing rules (which require the gate undecided) can
 // never route. That is a real model turn spent on a guaranteed-dead result.
 func TestGatedButDecidedRunSpendsNoClassifier(t *testing.T) {
-	g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval}
+	g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval, gateOpenedAt: time.Now().Add(-time.Hour)}
 	g.facts = append(g.facts, message.Triple{Predicate: admission.DecisionPredicate, Object: admission.DecisionApprove})
 	a := newTestApprovalOnGraph(g, nil)
 	before := g.writes
@@ -368,7 +383,7 @@ func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
 func TestPollAuthorizesMessageAuthorNotAllowlisted(t *testing.T) {
 	writer := &fakeWriter{}
 	a := newTestApproval(&fakeResolver{runID: "run-x", phase: admission.PhaseAwaitingApproval}, writer, admission.AllowlistOnlyChecker{})
-	msg := conversation.Message{ID: "1", Author: "mallory", Body: "/semdev approve"}
+	msg := conversation.Message{ID: "1", Author: "mallory", Body: "/semdev approve", At: time.Now()}
 	if err := a.handleMessage(context.Background(), msg, conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("unauthorized poll message is definitive: %v", err)
 	}
@@ -459,7 +474,7 @@ func TestUnattributableCommandIsNoSignal(t *testing.T) {
 // window a competing decision lands in, so a test that only seeds the resolver would
 // prove the wrong guard.
 func TestApprovalReplayIsIdempotent(t *testing.T) {
-	g := &fakeGraph{runID: "run-x", phase: admission.PhaseAwaitingApproval}
+	g := &fakeGraph{runID: "run-x", phase: admission.PhaseAwaitingApproval, gateOpenedAt: time.Now().Add(-time.Hour)}
 	g.facts = append(g.facts, message.Triple{Predicate: admission.DecisionPredicate, Object: admission.DecisionApprove})
 	a := newTestApprovalOnGraph(g, nil)
 	before := g.writes
@@ -581,7 +596,7 @@ func TestExactApproveCommandStillDeterministic(t *testing.T) {
 	a.reader = reader
 
 	if err := a.handleMessage(context.Background(),
-		conversation.Message{ID: "1", Author: "cglusky", Body: "/semdev approve"},
+		conversation.Message{ID: "1", Author: "cglusky", Body: "/semdev approve", At: time.Now()},
 		conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("handleMessage: %v", err)
 	}
@@ -609,7 +624,7 @@ func TestExactRejectCommandStampsRejected(t *testing.T) {
 	a.reader = reader
 
 	if err := a.handleMessage(context.Background(),
-		conversation.Message{ID: "2", Author: "cglusky", Body: "/semdev reject"},
+		conversation.Message{ID: "2", Author: "cglusky", Body: "/semdev reject", At: time.Now()},
 		conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("handleMessage: %v", err)
 	}
@@ -634,7 +649,7 @@ func TestExactRejectRefusedOnApprovedRun(t *testing.T) {
 	a := newTestApprovalOnGraph(g, nil)
 	before := g.writes
 	if err := a.handleMessage(context.Background(),
-		conversation.Message{ID: "3", Author: "cglusky", Body: "/semdev reject"},
+		conversation.Message{ID: "3", Author: "cglusky", Body: "/semdev reject", At: time.Now()},
 		conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("handleMessage: %v", err)
 	}
@@ -657,7 +672,7 @@ func TestNonCommandAuthorizedGatedMessageStampsPending(t *testing.T) {
 	// Authorized author, gated run, fresh id → three pending triples on the run.
 	writer := &fakeWriter{}
 	a := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, writer, nil)
-	msg := conversation.Message{ID: "msg-42", Author: "cglusky", Body: "yes, please ship this"}
+	msg := conversation.Message{ID: "msg-42", Author: "cglusky", Body: "yes, please ship this", At: time.Now()}
 	if err := a.handleMessage(ctx, msg, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("authorized gated non-command: %v", err)
 	}
@@ -682,7 +697,7 @@ func TestNonCommandAuthorizedGatedMessageStampsPending(t *testing.T) {
 	// Unauthorized author → zero writes, zero model turns.
 	uWriter := &fakeWriter{}
 	ua := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, uWriter, admission.AllowlistOnlyChecker{})
-	if err := ua.handleMessage(ctx, conversation.Message{ID: "m", Author: "mallory", Body: "approve it"}, conversation.ThreadRef(thread)); err != nil {
+	if err := ua.handleMessage(ctx, conversation.Message{ID: "m", Author: "mallory", Body: "approve it", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("unauthorized non-command: %v", err)
 	}
 	if len(uWriter.calls) != 0 {
@@ -692,7 +707,7 @@ func TestNonCommandAuthorizedGatedMessageStampsPending(t *testing.T) {
 	// Non-gated run (phase != awaiting_approval) → zero writes.
 	nWriter := &fakeWriter{}
 	na := newTestApproval(&fakeResolver{runID: "run-1", phase: "executing"}, nWriter, nil)
-	if err := na.handleMessage(ctx, conversation.Message{ID: "m2", Author: "cglusky", Body: "looks good"}, conversation.ThreadRef(thread)); err != nil {
+	if err := na.handleMessage(ctx, conversation.Message{ID: "m2", Author: "cglusky", Body: "looks good", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("non-gated non-command: %v", err)
 	}
 	if len(nWriter.calls) != 0 {
@@ -715,7 +730,7 @@ func TestPendingDedupByAppendSetLedger(t *testing.T) {
 	dWriter := &fakeWriter{}
 	da := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, dWriter, nil)
 	da.reader = &fakeIntentReader{facts: ledger}
-	if err := da.handleMessage(ctx, conversation.Message{ID: "old-2", Author: "cglusky", Body: "re-read"}, conversation.ThreadRef(thread)); err != nil {
+	if err := da.handleMessage(ctx, conversation.Message{ID: "old-2", Author: "cglusky", Body: "re-read", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("already-classified message: %v", err)
 	}
 	if len(dWriter.calls) != 0 {
@@ -726,7 +741,7 @@ func TestPendingDedupByAppendSetLedger(t *testing.T) {
 	nWriter := &fakeWriter{}
 	na := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, nWriter, nil)
 	na.reader = &fakeIntentReader{facts: ledger}
-	if err := na.handleMessage(ctx, conversation.Message{ID: "new-3", Author: "cglusky", Body: "ship it"}, conversation.ThreadRef(thread)); err != nil {
+	if err := na.handleMessage(ctx, conversation.Message{ID: "new-3", Author: "cglusky", Body: "ship it", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("new message: %v", err)
 	}
 	if len(nWriter.calls) != 1 {
@@ -741,11 +756,140 @@ func TestNonCommandLedgerReadFaultRedelivers(t *testing.T) {
 	a := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, writer, nil)
 	a.reader = &fakeIntentReader{err: errors.New("graph read blip")}
 	if err := a.handleMessage(context.Background(),
-		conversation.Message{ID: "x", Author: "cglusky", Body: "ship it"},
+		conversation.Message{ID: "x", Author: "cglusky", Body: "ship it", At: time.Now()},
 		conversation.ThreadRef("c360studio/semdev-fixture#7")); err == nil {
 		t.Fatal("a ledger read fault must redeliver (return error), not silently drop the message")
 	}
 	if len(writer.calls) != 0 {
 		t.Errorf("a read fault stamped %d facts, want 0", len(writer.calls))
+	}
+}
+
+// TestHistoricalMessageCannotDecideANewGate is the D12a watermark pin (external review
+// #1, the worst of the four in-scope blockers).
+//
+// THE DEFECT: the poll cursor is an in-memory map built EMPTY, so any restart re-reads a
+// thread from the top. NL dedup reads a ledger ON THE RUN and the exact path's
+// decided-check is per-run — so a SECOND run over a reused issue starts with an empty
+// ledger and an undecided gate, and a months-old "ship it" or `/semdev approve` would
+// decide a proposal the human never saw. D12b sharpened it: resolving deterministically to
+// the ACTIVE gated run turned a probabilistic mis-target into a certain one.
+//
+// The rule is UNIFORM across both inbound shapes — that is the whole point of D12, and the
+// reason this is table-driven over the NL message and the exact commands together.
+func TestHistoricalMessageCannotDecideANewGate(t *testing.T) {
+	gateOpened := time.Now().Add(-10 * time.Minute)
+
+	for _, body := range []string{"/semdev approve", "/semdev reject", "yes, ship it"} {
+		t.Run(body, func(t *testing.T) {
+			g := &fakeGraph{
+				runID:        "c360.semdev-001.agent.chain.execution.r2",
+				phase:        admission.PhaseAwaitingApproval,
+				gateOpenedAt: gateOpened,
+			}
+			a := newTestApprovalOnGraph(g, nil)
+
+			// Authored for a PREVIOUS run's gate, hours before this one opened.
+			stale := conversation.Message{
+				ID: "issuecomment-1", Author: "cglusky", Body: body,
+				At: gateOpened.Add(-3 * time.Hour),
+			}
+			if err := a.handleMessage(context.Background(), stale,
+				conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
+				t.Fatalf("a stale message must be DEFINITIVE (acked), got %v — redelivery cannot "+
+					"make a message newer", err)
+			}
+			if g.writes != 0 {
+				t.Fatalf("a message authored %v BEFORE the gate opened produced %d write(s) — it would "+
+					"decide a proposal its author never saw", gateOpened.Sub(stale.At), g.writes)
+			}
+		})
+	}
+
+	// The same thread, same run, a message written AFTER the gate opened: honored.
+	t.Run("a message written for THIS gate still decides it", func(t *testing.T) {
+		g := &fakeGraph{
+			runID:        "c360.semdev-001.agent.chain.execution.r2",
+			phase:        admission.PhaseAwaitingApproval,
+			gateOpenedAt: gateOpened,
+		}
+		a := newTestApprovalOnGraph(g, nil)
+		fresh := conversation.Message{
+			ID: "issuecomment-2", Author: "cglusky", Body: "/semdev approve",
+			At: gateOpened.Add(30 * time.Second),
+		}
+		if err := a.handleMessage(context.Background(), fresh,
+			conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
+			t.Fatalf("handleMessage: %v", err)
+		}
+		if got := g.objectOf(admission.DecisionPredicate); got != admission.DecisionApprove {
+			t.Fatalf("decision = %q, want %q — the watermark must not block a message written "+
+				"for the gate that is actually open", got, admission.DecisionApprove)
+		}
+	})
+}
+
+// TestWatermarkFailsClosedWithoutAGateOpenTime — a gated run always carries the framework's
+// last-transition-at, so a missing one means the run's audit facts are wrong. A missing
+// LOWER BOUND must never read as "no lower bound": that would honor every historical
+// comment on the thread, which is the exact defect the watermark exists to close.
+func TestWatermarkFailsClosedWithoutAGateOpenTime(t *testing.T) {
+	g := &fakeGraph{
+		runID: "c360.semdev-001.agent.chain.execution.r1",
+		phase: admission.PhaseAwaitingApproval,
+		// gateOpenedAt deliberately ZERO.
+	}
+	a := newTestApprovalOnGraph(g, nil)
+
+	if err := a.handleCommentEvent(context.Background(),
+		flattenedComment(t, "cglusky", "cglusky", "/semdev approve")); err != nil {
+		t.Fatalf("handleCommentEvent: %v", err)
+	}
+	if g.writes != 0 {
+		t.Fatalf("a run with no readable gate-open time accepted a decision (%d writes) — "+
+			"an unestablishable watermark must FAIL CLOSED, never fall open", g.writes)
+	}
+}
+
+// TestWatermarkToleratesClockSkew pins the deliberate margin. The poll transport timestamps
+// a message with the CODE HOST's clock while the gate-open moment is stamped with semdev's,
+// so a strict comparison drops legitimate approvals whenever semdev runs slightly ahead —
+// silently, since a dropped message gets no reply. The margin is far below the separation
+// between two runs' gates (a full author→validate→gate arc) and far above real NTP skew.
+func TestWatermarkToleratesClockSkew(t *testing.T) {
+	gateOpened := time.Now()
+	g := &fakeGraph{
+		runID:        "c360.semdev-001.agent.chain.execution.r1",
+		phase:        admission.PhaseAwaitingApproval,
+		gateOpenedAt: gateOpened,
+	}
+	a := newTestApprovalOnGraph(g, nil)
+
+	// Authored "before" the gate only because the two clocks disagree slightly.
+	skewed := conversation.Message{
+		ID: "issuecomment-9", Author: "cglusky", Body: "/semdev approve",
+		At: gateOpened.Add(-gateWatermarkSkew / 2),
+	}
+	if err := a.handleMessage(context.Background(), skewed,
+		conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+	if got := g.objectOf(admission.DecisionPredicate); got != admission.DecisionApprove {
+		t.Errorf("decision = %q, want %q — a sub-skew timestamp difference is clock noise, "+
+			"not a replayed message", got, admission.DecisionApprove)
+	}
+
+	// Well outside the margin is still a replay.
+	g2 := &fakeGraph{runID: g.runID, phase: g.phase, gateOpenedAt: gateOpened}
+	a2 := newTestApprovalOnGraph(g2, nil)
+	old := skewed
+	old.At = gateOpened.Add(-10 * gateWatermarkSkew)
+	if err := a2.handleMessage(context.Background(), old,
+		conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+	if g2.writes != 0 {
+		t.Errorf("a message %v before the gate was honored — the tolerance is for clock noise, "+
+			"not a replay window", 10*gateWatermarkSkew)
 	}
 }
