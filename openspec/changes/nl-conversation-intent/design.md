@@ -136,6 +136,48 @@ of a later approval is worse than the reverse — mitigated by the gate-still-op
 (D6), the conservative-none default, and the PR-merge backstop, and named in Risks. Making
 `reject` strictly sticky is deferred (OQ2).
 
+**Delivered mechanism (group 4 — the marker is RELEASED-AND-RE-ARMED, not never-removed,
+and two rules the pre-impl sketch did not name are load-bearing; grp4 review folded):**
+- **`conversation/01-anchor-gated-run`.** A run entity NEVER carries the bare
+  `agent.loop.run` triple before `dev-from-task/01` fires at executing+approved, and
+  `publish_agent` inherit reads exactly that triple off the firing entity's snapshot — so
+  the gate-time spawn needs its own anchor rule (the dev-from-task/01+02 two-rule split;
+  a same-rule `add_triple` is invisible to a same-rule inherit). The early stamp is inert:
+  every other reader of the run's anchor also requires `run.change.approved`, and
+  dev-from-task/01 is idempotently superseded (its `length_eq 0` guard; identical value).
+- **`conversation/04-classifier-terminal-release`.** The `dev.developer.dispatched` shape
+  (marker never removed) would close the NL lane after ONE classification — but the
+  conflict journey (6.4) and the none-then-approve human flow need the run's NEXT message
+  to classify. So the marker LIFECYCLE is: spawn stamps it (before the publish) → the
+  classifier loop terminal — clean OR faulted — clears the pending slot and then the
+  marker, re-arming the spawn. Removal order `author → body → message-id → marker` is
+  doubly load-bearing (each action = its own KV revision): id-before-marker prevents the
+  re-spawn revision; author/body-before-id prevents a concurrent bridge write being torn
+  into an id-present/author-absent slot that spawns a fault-only classifier. The durable
+  dedup is the classified LEDGER (untouched by the release), never the marker.
+- **Read-once binding (grp4 semstreams HIGH-1).** The pending slot is latest-wins, so a
+  second authorized message can replace it DURING the model turn. `classify_intent`
+  therefore reads the marker VALUE (the message id the loop was dispatched for) and
+  FAULTS — stamping and deduping nothing — when the slot no longer matches, instead of
+  binding the newcomer's identity to a judgment of the old text. Inside the flight window
+  latest-wins becomes latest-LOSES: the newcomer is retired unclassified and UN-deduped,
+  the faulted terminal drives the D9 fallback note (surfaced, not silent), and a re-nudge
+  or the exact command recovers. Bounded to one model turn.
+- **The engine's per-action firing cap (grp4 go H1).** Actions default to a cap of 3
+  fires per rule+entity (RULE_STATE-persisted). The spawn and the two routes are the
+  repo's first rules designed to re-fire indefinitely on ONE entity (the run), so all
+  their actions carry explicit `max_iterations: 0` — under the default the run's 4th
+  authorized message would be silently skipped (the dead-lane class). The spend stays
+  bounded by the ledger dedup + the marker + the release + the spawn's gate-facts-absent
+  guards (grp4 go M1: a gate-fact-bearing run spends no classifier turn).
+- **Best-effort action execution (grp4 go M3 / semstreams MEDIUM-1, honest limit).** A
+  failed action logs, bumps `actionFailuresTotal`, and the engine CONTINUES — so a failed
+  pending-removal degrades to one bounded duplicate turn, and a failed MARKER-removal (or
+  a publish that fails after the marker stamp, or a never-terminal classifier — go M4:
+  `publish_agent` is not a station dispatch, no park fires) closes the NL lane silently
+  for that run; the exact command recovers. The orderings narrow these windows; closing
+  them wants an upstream atomic multi-remove / abort-on-first-failure ask (tasks 7.1).
+
 ### D6 — the deterministic apply consumer (gate-still-open guard, harness-bound author, one writer)
 A rule fires on `conversation.intent == approve` (or `reject`) on a run at
 `awaiting_approval` — AND with both `run.change.approved` and `run.change.rejected` ABSENT

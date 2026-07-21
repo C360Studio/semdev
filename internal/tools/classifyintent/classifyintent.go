@@ -130,6 +130,31 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		return errResult(call, agentic.ToolErrorInternal, "classify_intent: no pending message id/author on %s — the classifier was spawned without a grounded message (got id=%q author=%q)", runEntityID, pendingID, pendingAuthor)
 	}
 
+	// READ-ONCE BINDING (grp4-review HIGH-1): the pending slot is latest-wins and
+	// can be overwritten by a second authorized message DURING this loop's model
+	// turn — but this loop's prompt carried, and its judgment is of, the ONE
+	// message the spawn rule dispatched it for, whose id the rule stamped as the
+	// conversation.classifier.dispatched marker. If the slot no longer holds that
+	// id, stamping would bind the NEW message's identity (and permanently dedup
+	// it in the ledger) to a judgment of the OLD message's text — a
+	// misattribution the D8.2 grounding guard exists to prevent. Fault instead
+	// (no stamp, no ledger entry): the terminal-release rule retires the slot and
+	// the marker, and the fallback-note lane surfaces the miss so the human
+	// re-nudges or uses the exact command. A missing marker is the same fault
+	// fail-closed: this loop was spawned outside the sanctioned spawn rule, or
+	// its slot was already released.
+	dispatched, err := e.reader.ReadFacts(ctx, runEntityID, conversationintent.ClassifierDispatchedPredicate)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "classify_intent: read %s on %s: %v", conversationintent.ClassifierDispatchedPredicate, runEntityID, err)
+	}
+	dispatchedID := firstObject(dispatched, conversationintent.ClassifierDispatchedPredicate)
+	if dispatchedID == "" {
+		return errResult(call, agentic.ToolErrorInternal, "classify_intent: no %s marker on %s — this loop was not dispatched by the sanctioned spawn rule (or its slot was already released); refusing to classify", conversationintent.ClassifierDispatchedPredicate, runEntityID)
+	}
+	if dispatchedID != pendingID {
+		return errResult(call, agentic.ToolErrorInternal, "classify_intent: the pending slot moved mid-flight — dispatched for message %q but the slot now holds %q; refusing to bind the new message's identity to a judgment of the old message's text (the release retires the slot; the fallback note surfaces it)", dispatchedID, pendingID)
+	}
+
 	// The append-set dedup ledger (D5): read the ids already classified, then
 	// re-stamp the full set plus this one. OwnedFactWriter.ReplaceTriples is
 	// replace-by-predicate, so an append is expressed as read-all-then-write-all

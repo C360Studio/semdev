@@ -1,6 +1,6 @@
 {
   "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect.",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -66,6 +66,12 @@
         "requires_tools": true
       },
       "reviewer": {
+        "preferred": [
+          "mock"
+        ],
+        "requires_tools": true
+      },
+      "conversation": {
         "preferred": [
           "mock"
         ],
@@ -200,7 +206,12 @@
           "rules/dev-from-task/08a-delivery-open-pr.json",
           "rules/dev-from-task/08b-delivery-park.json",
           "rules/sandbox/01-provision.json",
-          "rules/sandbox/02-park-unprovable.json"
+          "rules/sandbox/02-park-unprovable.json",
+          "rules/conversation/01-anchor-gated-run.json",
+          "rules/conversation/02-spawn-classifier.json",
+          "rules/conversation/03a-route-intent-approve.json",
+          "rules/conversation/03b-route-intent-reject.json",
+          "rules/conversation/04-classifier-terminal-release.json"
         ],
         "inline_rules": []
       }
@@ -292,7 +303,8 @@
           "code_context",
           "code_impact",
           "code_search",
-          "doc_context"
+          "doc_context",
+          "classify_intent"
         ],
         "restricted_decide_actions": [],
         "ports": {

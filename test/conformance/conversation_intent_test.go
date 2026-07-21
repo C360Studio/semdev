@@ -17,9 +17,9 @@ const conversationContractDoc = "configs/personas/fragments/conversation/10-deci
 // (a hallucinated intent could route, or a real one could be dropped). Bidirectional
 // set-equality, mirroring the coordinator taxonomy census.
 //
-// NOTE: the routing-RULE arm (no rule routes an off-taxonomy intent) lands with the
-// routing rules in group 4 — it is deliberately not asserted here (the rules do not
-// exist yet).
+// The routing-RULE arm (no rule routes an off-taxonomy intent; every directive
+// intent has exactly one route) is TestConversationRoutingRulesMatchTaxonomy in
+// conversation_rules_test.go — landed with the rules in group 4.
 func TestConversationPersonaDeclaresExactIntentTaxonomy(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(repoRoot(t), conversationContractDoc))
 	if err != nil {

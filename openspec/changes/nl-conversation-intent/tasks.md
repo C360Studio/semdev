@@ -89,16 +89,37 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 4. The spawn rule + the intent-routing rules (design D3, D6)
 
-- [ ] 4.1 RED: `TestBootstrapWiresConversationClassifierRules` — the pack bootstraps a spawn
+- [x] 4.1 RED: `TestBootstrapWiresConversationClassifierRules` — the pack bootstraps a spawn
   rule (`conversation.pending` @ `awaiting_approval`, guarded on the
   `conversation.classifier.dispatched` marker fire-once, `inherit` `role:conversation`,
   `tool_choice:required`, the intent-allowlist metadata, the pending body/author templated
   onto the prompt) and two routing rules (`conversation.intent==approve` / `==reject`, EACH
   gated on `agent.run.phase==awaiting_approval` AND both gate facts absent → publish to
   `component.conversation-apply.dispatch`). Also completes the taxonomy census routing-rule
-  arm (1.3).
-- [ ] 4.2 Implement the rules under `configs/rules/conversation/`. No lifecycle transition in
-  any (G2).
+  arm (1.3). DONE — delivered as four conformance tests (bootstrap wiring; spawn contract;
+  route contract; release contract) + `TestConversationRoutingRulesMatchTaxonomy` swept over
+  ALL packs. The "intent-allowlist metadata" phrasing was delivered as the in-tool
+  closed-taxonomy validation (grp2) + the exactly-`[classify_intent]` advertised-tools pin
+  (`action_allowlist` is a decide-only knob — grp4-review L4, task text synced not code).
+- [x] 4.2 Implement the rules under `configs/rules/conversation/`. No lifecycle transition in
+  any (G2). DONE — FIVE rules, not three (two structural discoveries): `01-anchor-gated-run`
+  (a run entity never carries the bare `agent.loop.run` anchor before dev-from-task/01 fires
+  at executing+approved, so the gate-time inherit-spawn needs its own anchor — the two-rule
+  snapshot split; every other anchor reader also requires `run.change.approved`, so the early
+  stamp is inert) and `04-classifier-terminal-release` (the fire-once marker must RESET for
+  the run's next message — journey 6.4 needs two classifications; the release clears pending
+  author→body→message-id then the marker, order pinned, ANY terminal incl. fault). Review
+  folds (both reviewers, all blocking/high closed): explicit `max_iterations: 0` on the
+  spawn + route actions (go-H1 — the engine's DEFAULT per-action firing cap of 3 per
+  rule+entity would silently kill the NL lane on the run's 4th message; first rule in the
+  repo designed to re-fire indefinitely on one entity); gate-facts-absent guards on the
+  spawn (go-M1 — no dead paid turn on a gate-fact-bearing run); classify_intent READ-ONCE
+  BINDING (semstreams HIGH-1 — the tool faults, stamping and deduping nothing, when the
+  latest-wins pending slot no longer matches the dispatched marker id; red-first
+  `TestClassifyIntentFaultsWhenPendingSlotMoved`); honest best-effort-action + marker-leak
+  descriptions (go-M3/M4, semstreams MEDIUM-1 — `actionFailuresTotal` is the operator
+  tripwire). Carried forward: 5.1/5.6 (go-M6 consumer serialization), 6.6/7.1 (live-config
+  wiring, docs sync, the upstream atomic-multi-remove ask).
 
 ## 5. The apply consumer + the reject→cancel lane + the fault note (design D6, D7, D9, D11)
 
@@ -108,6 +129,12 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   `conversation.intent.author` (HARNESS-bound, NOT pending — H4b) and RE-RUNS `Authorize`
   (an unauthorized cited author → ZERO writes); (c) POSTS the transparency comment; (d)
   stamps `run.change.approved`/`rejected` via the ONE shared `approval-adapter` writer.
+  **grp4-review M6 carry-forward:** the consumer acts on the run's CURRENT intent facts at
+  consume time (the 03a/03b routes deliberately thread no snapshot) — pin that behavior, and
+  either process dispatches serially per run (e.g. max-ack-pending 1 on the input port) or
+  explicitly pin the both-facts safe-park outcome when two concurrent opposite dispatches
+  interleave their gate-open reads (survivable by the D7 partition, but a serialized
+  consumer never produces it).
 - [ ] 5.2 RED: `TestApplyPostFailureBlocksStamp` — a `Channel.Post` failure returns TRANSIENT
   and the gate fact is NOT stamped (transparency-before-effect; redelivery re-Posts, M6).
 - [ ] 5.3 RED: `TestRejectCancelsGatedRunOnly` — a run-lifecycle rule fires
@@ -151,13 +178,33 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   no journey rewired; the NL journeys are ADDED.
 - [ ] 6.6 A real-LLM classification probe (env-gated `SEMDEV_REAL_LLM=1`): the persona
   classifies a real approval + rejection + ambiguous message correctly against the live
-  model; recorded per the runbook. Decide the classifier model tier (OQ4).
+  model; recorded per the runbook. Decide the classifier model tier (OQ4) — and WIRE the
+  NL lane into `configs/semdev-live-gemini.json` with it (grp4-review MEDIUM-2/L5: the
+  five `rules/conversation/*` rules_files entries, `classify_intent` in `allowed_tools`,
+  and a `conversation` model_registry capability at the chosen tier — the bootstrap census
+  pins the mock config only, and an unknown capability silently falls back to
+  `defaults.model`, so the live lane stays dead-or-misrouted until this lands).
 
 ## 7. Spec + docs + verification + review + archive
 
 - [ ] 7.1 The `conversation-channel` delta matches the code. Docs: the NL-intent gate in the
   runbook (approve in prose; the exact command still works; a rejection cancels a GATED run;
-  NL-approve is not reversible via NL — the PR merge is the downstream stop).
+  NL-approve is not reversible via NL — the PR merge is the downstream stop). grp4-review
+  doc items: note dev-from-task/01's dormancy on live paths (superseded by conversation/01's
+  gate-time anchor — go-L3); name the marker-leak posture in the runbook (a wedged/never-
+  terminal classifier closes the NL lane silently for that run; exact command recovers;
+  `actionFailuresTotal` is the tripwire — go-M4) with the marker-leak reconciliation as a
+  named pre-production follow-up; FILE the upstream semstreams ask for an atomic
+  multi-remove (or abort-on-first-failure `on_enter`) — best-effort action continuation is
+  what leaves the stale-marker brick reachable (semstreams MEDIUM-1; house-wide value: every
+  marker-before-publish rule shares the inversion). Two named LOWs from the grp4 re-review:
+  (a) classify_intent's deterministic contract faults (slot-moved / marker-absent) retry to
+  the loop's iteration cap before faulting terminal — a framework faulted-stop
+  (StopLoop-on-contract-violation) would short-circuit the dead paid turns (grp5-able or an
+  upstream note); (b) under compound RULE_STATE loss a replayed release + fresh spawn can
+  re-arm the marker to a NEW id while an old classifier is in flight — strictly narrower
+  than the closed HIGH-1 window, bounded by the deterministic consumer + transparency +
+  PR backstop; name it in 04's replay notes.
 - [ ] 7.2 Full offline ladder (`task check`) + full `task e2e -race` uncached (incl. the NL
   journeys) + `openspec validate --strict`.
 - [ ] 7.3 Adversarial review — BOTH reviewers, zero blocking/high, all findings applied.

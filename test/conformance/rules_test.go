@@ -1287,6 +1287,12 @@ func TestStationDispatchEntityCensus(t *testing.T) {
 		"validation-station": "loop", // coordinator/03 fires on the coordinator loop
 		"floors-station":     "loop", // dev-from-task/05 fires on the developer loop
 		"verify-station":     "loop", // dev-from-task/07a fires on the review loop
+		// conversation/03a+03b fire on the RUN (the classifier subject-overrides
+		// conversation.intent.* there), so a retries-exhausted apply dispatch
+		// stamps station.dispatch.failed on the run and the RUN-fired park half
+		// (run-lifecycle/05) parks it toward the human — the gate stays closed
+		// (fail-safe: no gate fact lands without the deterministic apply running).
+		"conversation-apply": "run",
 	}
 
 	const runAnchorSubstitution = "$entity.triple.agent.run.entity-id"
@@ -1746,7 +1752,7 @@ func TestRuleToolsSubsetOfAllowed(t *testing.T) {
 // (the role name is the fragment binding key).
 func TestPersonaRoleDirsExist(t *testing.T) {
 	root := repoRoot(t)
-	for _, role := range []string{"coordinator", "developer", "reviewer"} {
+	for _, role := range []string{"coordinator", "developer", "reviewer", "conversation"} {
 		dir := filepath.Join(root, "configs", "personas", "fragments", role)
 		info, err := os.Stat(dir)
 		if err != nil || !info.IsDir() {

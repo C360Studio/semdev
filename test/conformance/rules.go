@@ -79,18 +79,23 @@ type ruleCondition struct {
 // ruleAction is one action in a rule's on_enter/on_exit (union of the fields the
 // pins inspect).
 type ruleAction struct {
-	Type       string            `json:"type"`
-	Workflow   string            `json:"workflow"`
-	Phase      string            `json:"phase"`
-	Subject    string            `json:"subject"`
-	Predicate  string            `json:"predicate"`
-	Object     string            `json:"object"`
-	Role       string            `json:"role"`
-	Tools      []string          `json:"tools"`
-	Prompt     string            `json:"prompt"`
-	RunScope   string            `json:"run_scope"`
-	Properties map[string]string `json:"properties"`
-	ToolChoice struct {
+	Type string `json:"type"`
+	// MaxIterations mirrors the engine's per-action firing cap: nil/omitted →
+	// the framework default (3 per rule+entity, RULE_STATE-persisted); explicit
+	// 0 → unlimited. A rule designed to re-fire indefinitely on ONE entity must
+	// opt out explicitly or the cap silently kills the lane (grp4-review H1).
+	MaxIterations *int              `json:"max_iterations"`
+	Workflow      string            `json:"workflow"`
+	Phase         string            `json:"phase"`
+	Subject       string            `json:"subject"`
+	Predicate     string            `json:"predicate"`
+	Object        string            `json:"object"`
+	Role          string            `json:"role"`
+	Tools         []string          `json:"tools"`
+	Prompt        string            `json:"prompt"`
+	RunScope      string            `json:"run_scope"`
+	Properties    map[string]string `json:"properties"`
+	ToolChoice    struct {
 		Mode         string `json:"mode"`
 		FunctionName string `json:"function_name"`
 	} `json:"tool_choice"`

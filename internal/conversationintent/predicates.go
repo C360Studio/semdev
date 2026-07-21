@@ -55,3 +55,14 @@ const (
 // conversation.intent.* triple. It MUST equal the writer internal/vocab declares
 // for that namespace (TestToolSourceMatchesVocabWriter cross-checks it).
 const ClassifierSource = "conversation-classifier"
+
+// ClassifierDispatchedPredicate is the spawn rule's fire-once marker
+// (writer conversation-spawn-rule, a rule add_triple — group 4): its object is
+// the pending message id the classifier loop was dispatched FOR. classify_intent
+// READS it as the read-once binding check (grp4-review HIGH-1): the pending slot
+// is latest-wins and can move during the model turn, so the tool faults —
+// stamping and deduping NOTHING — when the slot's id no longer matches the
+// dispatched id, rather than bind the new message's identity to a judgment of
+// the old message's text. The terminal-release rule then retires the slot and
+// the marker, and the fallback-note lane surfaces the miss to the human.
+const ClassifierDispatchedPredicate = "conversation.classifier.dispatched"

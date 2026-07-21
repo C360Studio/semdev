@@ -54,6 +54,13 @@ func classifiedFact(id string) message.Triple {
 	return message.Triple{Subject: runEntity, Predicate: conversationintent.IntentClassifiedPredicate, Object: id, Source: conversationintent.ClassifierSource}
 }
 
+// dispatchedFact builds the spawn rule's fire-once marker: the message id this
+// classifier loop was dispatched FOR (the group-4 spawn contract — every
+// sanctioned classifier spawn stamps it before the publish).
+func dispatchedFact(id string) message.Triple {
+	return message.Triple{Subject: runEntity, Predicate: conversationintent.ClassifierDispatchedPredicate, Object: id, Source: "conversation-spawn-rule"}
+}
+
 // call builds a classify_intent tool call carrying the run entity id (the inherit
 // loop's tool calls carry it — the submit_review/measure_task metadata pattern).
 func call(intent, reason string) agentic.ToolCall {
@@ -146,7 +153,8 @@ func TestClassifyIntentStampsOnRunFromPending(t *testing.T) {
 		pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-42"),
 		pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
 		pendingFact(conversationintent.PendingPrefix+"body", "yes, let's ship this"),
-		classifiedFact("issuecomment-7"), // a prior classification the append-set must preserve
+		dispatchedFact("issuecomment-42"), // the spawn marker names this message
+		classifiedFact("issuecomment-7"),  // a prior classification the append-set must preserve
 	}
 	w := &fakeWriter{}
 	res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call("approve", "the author said to ship it"))
@@ -213,6 +221,7 @@ func TestClassifyIntentIgnoresModelSuppliedIdentity(t *testing.T) {
 	facts := []message.Triple{
 		pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-42"),
 		pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
+		dispatchedFact("issuecomment-42"),
 	}
 	c := call("approve", "ship it")
 	// The model tries to supply its own identity + an outcome.
@@ -251,6 +260,7 @@ func TestClassifyIntentDedupIsIdempotentOnRedelivery(t *testing.T) {
 	facts := []message.Triple{
 		pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-42"),
 		pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
+		dispatchedFact("issuecomment-42"),
 		classifiedFact("issuecomment-42"), // already classified — the redelivery case
 	}
 	w := &fakeWriter{}
@@ -267,12 +277,52 @@ func TestClassifyIntentDedupIsIdempotentOnRedelivery(t *testing.T) {
 	}
 }
 
+// TestClassifyIntentFaultsWhenPendingSlotMoved pins the read-once binding
+// (grp4-review HIGH-1): the pending slot is latest-wins and the spawn marker
+// names the ONE message this loop was dispatched for. If the slot no longer
+// holds that id at execution time (a second authorized message landed during
+// the model turn), the tool must FAULT and stamp NOTHING — binding the new
+// message's identity to a judgment of the old message's text would misattribute
+// the intent AND permanently dedup a message that was never read. A missing
+// marker is the same fault (the loop was spawned outside the sanctioned spawn
+// rule, or the slot was already released) — fail closed, never guess.
+func TestClassifyIntentFaultsWhenPendingSlotMoved(t *testing.T) {
+	cases := map[string][]message.Triple{
+		"slot moved mid-flight": {
+			pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-43"), // the countermand replaced the slot
+			pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
+			dispatchedFact("issuecomment-42"), // ...but this loop was dispatched for 42
+		},
+		"marker absent": {
+			pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-42"),
+			pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
+		},
+	}
+	for name, facts := range cases {
+		w := &fakeWriter{}
+		res, err := New(&fakeReader{facts: facts}, w, nil).Execute(context.Background(), call("approve", "ship it"))
+		if err != nil {
+			t.Fatalf("%s: execute: %v", name, err)
+		}
+		if res.Error == "" {
+			t.Errorf("%s: classification succeeded; the tool must fault when the dispatched id does not match the pending slot", name)
+		}
+		if res.ErrorKind != agentic.ToolErrorInternal {
+			t.Errorf("%s: fault kind = %q, want %q (a harness-contract fault, not a model error)", name, res.ErrorKind, agentic.ToolErrorInternal)
+		}
+		if len(w.replaces) != 0 {
+			t.Errorf("%s: %d batches stamped; a mismatched classification must write nothing — no intent, no ledger entry (the unread message must stay classifiable)", name, len(w.replaces))
+		}
+	}
+}
+
 // TestClassifyIntentRejectsOffTaxonomy (task 2.3): an intent outside the closed
 // set (a hallucinated value) is rejected and stamps NOTHING, so it cannot route.
 func TestClassifyIntentRejectsOffTaxonomy(t *testing.T) {
 	facts := []message.Triple{
 		pendingFact(conversationintent.PendingMessageIDPredicate, "issuecomment-42"),
 		pendingFact(conversationintent.PendingAuthorPredicate, "maintainer-jo"),
+		dispatchedFact("issuecomment-42"),
 	}
 	for _, bad := range []string{"ship_it", "approved", "yes", ""} {
 		w := &fakeWriter{}
