@@ -222,8 +222,10 @@ snapshot (the routing-upgrades cell-space lesson — the engine writes each acti
 KV revision, so a Go guard racing the rules is weaker, not stronger). Therefore BOTH
 lifecycle rules must be mutually exclusive: the RESUME rule (`run-lifecycle/02`) gains
 `run.change.rejected length_eq 0`, and the CANCEL rule carries `run.change.approved
-length_eq 0` — a run holding both facts transitions to NEITHER (a safe park at the gate),
-never both. Pinned by the `TestConflictingIntentsResolveToOneTerminal` journey (6.4).
+length_eq 0` — a run holding both facts transitions to NEITHER, never both. That cell is
+an UNSURFACED STALL, not a park: nothing stamps `run.awaiting.human`, nothing posts, and
+no operator surface flags it. Parking it is NOT available as a fix — a park at this gate
+is unrecoverable (grp5-review B1) — so it is named in Risks rather than papered over. Pinned by the `TestConflictingIntentsResolveToOneTerminal` journey (6.4).
 
 ### D8 — the false-approval safety posture (four pre-landing guards + the downstream backstop)
 An LLM must never manufacture an approval a human did not give. Guards, none the LLM's
@@ -280,7 +282,157 @@ A conformance pin (mirroring `TestOnlySanctionedParkWriters`) asserts the ONLY s
 fast-path and the apply consumer route through one shared writer method — so the two code
 sites cannot drift their Source, preserving one-logical-writer (G5).
 
+**Delivered mechanism (group 5 — three decisions the pre-impl sketch left open).**
+
+**(1) The apply dispatch rides a JETSTREAM stream, and D6's wording was right.** At
+implementation time the repo appeared to say otherwise: all six `component.*.dispatch`
+consumers (`internal/station`) ride CORE NATS, and no declared stream covered
+`component.>`. That looked like precedent contradicting the design — but the framework's
+own primitive heuristic (`docs/concepts/03-streams-vs-kv-watches.md`) settles it the other
+way, and unanimously: this dispatch is a REQUEST (not a fact) with real external side
+effects (a forge comment POST, a permission API call), handled by exactly one consumer,
+whose replay would re-post to a human's thread. Fact→KV, request→stream; core NATS is the
+request/REPLY lane (`graph.query.*`), not a coordination primitive. The station base's own
+package doc books its transport as named M0 debt ("the crash-in-the-publish→handle-window
+durability the old `publish_agent` inherited from the AGENT JetStream stream is NOT
+preserved here … is design R8"). This lane declines to inherit that debt, because a
+dispatch dropped in that window means an authorized human's approval is silently swallowed
+and the run sits gated forever — the exact silent dead-end D9/HIGH-3 exists to prevent. A
+NARROW `CONVERSATION` stream over `component.conversation-apply.>` makes only this lane
+restart-safe; the other six keep their R8 debt explicit rather than being silently
+persisted.
+
+**Retry and durability are kept SEPARATE.** JetStream buys RESTART safety only; the RETRY
+posture is bounded in-process attempts, as in the station base.
+
+**But the TERMINAL path deliberately breaks with every other station, and this is the
+most important decision in the group (grp5-review B1, caught in review — the
+implementation had it wrong).** Every other station routes a retries-exhausted dispatch
+to `station.dispatch.failed`, which `run-lifecycle/05` converts into `run.awaiting.human`.
+Doing that HERE is unrecoverable: this run sits AT the change-approval gate, and BOTH
+release rules require `run.awaiting.human` ABSENT (`run-lifecycle/02` resume, `/07` cancel)
+— and NOTHING in the repo ever removes that predicate (eight park rules add it, zero
+remove it; a resume-from-park rule is still unbuilt). The run could then never be approved
+or cancelled, and even the human's deterministic escape hatch would die, because
+`/semdev approve` would stamp a fact no rule would ever consume. The trigger bar is low —
+any forge 5xx outlasting the retry budget — and the loss is the whole authored change.
+
+This is the SAME hazard D9's fault note was written to avoid, applied to a more likely
+trigger; the apply lane had walked straight into it. So on exhaustion this lane POSTS A
+NOTE and LEAVES THE GATE OPEN: the human is told the automatic path failed and pointed at
+the exact commands, which still work because nothing was stamped. Fail toward the human
+WITHOUT taking away their controls. The group-4 dispatch-entity census keeps its
+`conversation-apply: run` entry (the firing entity IS the run) with the opt-out recorded,
+and `TestApplyLaneIsTheDeliberateNonParkingStation` enforces it — a future "be consistent
+with the other six stations" refactor is exactly the change that must fail loudly.
+
+Because exhaustion is non-destructive, the retry budget is also LARGER than the station
+base's sub-second one: each attempt crosses an external HTTP dependency, so a routine
+forge blip must not become a terminal outcome. The JetStream `MaxDeliver` is a crash-loop backstop,
+NOT the retry budget. The rejected alternative — deriving "retries exhausted" from
+`msg.Metadata().NumDelivered` — was gymnastics: it duplicates `MaxDeliver` into the
+handler, requires threading the raw message through a byte-oriented dispatch path shared
+with two other lanes, and loses the park entirely if the process dies on the final
+delivery. The consumer is SERIAL (`max_ack_pending: 1`), which removes interleaving of two
+concurrent APPLY dispatches. It does NOT make the D7 partition redundant
+(grp5-review M4/M5): the serialization is per-consumer and global — one durable
+consumer, one exact filter subject — so it is orthogonal to the exact-command
+fast-path, which runs on a different consumer (or the poller goroutine) and can
+stamp a gate fact concurrently with an in-flight apply. The rule partition remains
+the only thing preventing a run from both resuming and cancelling. The global
+serialization also means one slow forge call is head-of-line blocking for every
+other awaiting-approval run — acceptable at M2 scale, named rather than implied.
+
+**(1b) A channel-less deployment REFUSES to apply (grp5-review H2).** The park lane
+degrades to graph-only without a forge token, because its post is a courtesy on top of an
+already-durable fact. Here the transparency post IS the entire visibility case for a
+decision with no harness floor (D8 guard 4), so the same degrade would release a gate no
+human was ever told about — reachable, since webhook mode needs no token and the
+classifier needs none either. The lane therefore fails closed with a loud warning; the
+exact-command path is unaffected.
+
+**(2) The fault note gets its OWN lane, NOT the park lane.** The park rules stamp
+`run.awaiting.human`, and `run-lifecycle/02` reads that predicate as a RESUME BLOCKER.
+Routing a classifier fault through the park would therefore WEDGE the run — a later
+successful approval could never resume it, converting a recoverable one-message miss into a
+permanently stuck run. `conversation/05` publishes `user.note.<instance>` instead, riding
+the EXISTING `USER` stream (subjects `user.>`, so no new stream) and stamping NOTHING: a
+note is a message to a human, not a lifecycle event (G9 — no new vocabulary for a post).
+The rule fires on the classifier LOOP, where conditions can only read the firing entity's
+own facts (the run's intent facts are unreachable), so the discriminator is
+`agent.loop.outcome == "failed"` (`agentic.OutcomeFailed`). A `success` terminal means
+classify_intent ran — including the deliberate conservative `none`, which stays SILENT
+because ordinary chatter must not draw a reply — and `cancelled` means the run is going
+away.
+
+**(3) The cancel rule carries the D15 park exclusion.** Like every active
+`lifecycle_transition` rule it requires `run.awaiting.human length_eq 0`
+(`TestLifecycleTransitionRulesExcludeParkedRuns` enforces this repo-wide). The guard is
+inert on the normal path — the change-approval gate is PHASE-based and stamps no park
+marker — and bites only when an `ask_human` park and a rejection coincide, where holding
+still is the correct conservative outcome.
+
 ## Risks / Trade-offs
+
+**Config-KV hazard, found in review and worth recording (grp5-review, BLOCKING).** Both shipped
+configs share ONE KV entry — the bucket (`semstreams_config`) and key (`version`) are hardcoded
+globals, not platform-derived — AND declare the identical platform identity
+(`c360/semdev-bootstrap/development`), so the framework's gh#459 cross-app detach guard cannot
+fire and the VERSION ALONE decides which file wins. `PushToKV` writes `model_registry`.
+`semdev-live-gemini.json` had carried a decorated version (`0.28.0-live-gemini`) for its whole
+life, which `CompareVersions` cannot parse — so it always took the sync-from-KV branch and could
+never push. That was an accident that happened to fail SAFE (a live run silently degrading to
+mock). Making the version parseable removed that accidental protection and let the live config
+win, so a subsequent mock-config boot would adopt gemini endpoints and the free ladder would
+spend real tokens behind one WARN line. Fixed by keeping the MOCK config's version STRICTLY
+GREATER (`0.30.0` vs `0.29.1`), so every stale-KV race resolves toward the free config; the live
+lane loads via its mandatory `task nats:reset`. Both invariants — plain semver AND the ordering —
+are pinned by `TestShippedConfigVersionsAreParseableSemver`, verified red against the inversion.
+Giving the live config a distinct `platform.id` is the framework's sanctioned isolation and the
+stronger fix. **The reason first given for deferring it here was wrong and is corrected:** entity
+IDs derive from `platform.instance_id` (`internal/boot/runtime.go:236-241`), which BOTH configs set
+to `semdev-001`; `Platform.ID` is read in exactly one place in the repo and only as a fallback that
+is dead while `instance_id` is set, and the sidecar queries grep `chain.execution`/`ENTITY_STATES`,
+which contain no identity segment. So the split would change no entity ID and no sidecar query — it
+is a one-field edit, not a migration.
+
+It is still deferred, for a DIFFERENT and accurate reason: tripping the gh#459 guard makes the live
+config run DETACHED (no sync, push, watch, or later runtime write against the shared bucket), which
+changes the boot semantics of the PAID lane — and that cannot be exercised without spending a real
+run. Changing how the paid lane loads its config belongs in a change that can verify it, not as a
+tail-end edit to this one. What the split would additionally close is a FALSE-PROVENANCE residual
+the ordering fix does not: a live boot against a stale mock KV silently runs on the mock endpoint
+with `defaults.model: mock`, which is safe on spend but could record a run in the evidence ledger as
+real-Gemini when it was mock (G7). Until the split lands, that risk is carried by the mandatory
+`task nats:reset` on every config-loading lane (`serve`, `e2e`, `test:integration`,
+`realllm:launch`), whose `nats:down -v` removes the volume and so genuinely wipes the config KV.
+
+
+**Known gap: the both-gate-facts cell is an unsurfaced stall (grp5-review, semstreams M3).**
+The D7 partition guarantees a run carrying BOTH gate facts fires NEITHER lifecycle rule —
+strictly safer than a double transition, but it is NOT a park: nothing stamps
+`run.awaiting.human`, nothing posts, and no operator surface flags it. The run sits at
+`awaiting_approval` indefinitely with no human-visible signal, and if the NL lane got there
+first the human has already seen a transparency comment for a decision that never took
+effect. Parking the cell is NOT available as a fix — a park at this gate is the B1 wedge.
+Reaching it needs an exact `/semdev reject` and `/semdev approve` to interleave inside one
+mirror evaluation, so it is narrow; it is named here rather than left implied, and a
+conflict-note lane (publishing `user.note.*`, which cannot wedge) is the natural follow-up.
+
+**Known gap: two definitive zero-write exits are only partly surfaced (grp5-review M5/L9).**
+An intent with no harness-bound author now posts a notice, but an unparseable
+`run.issue.ref` cannot — there is no thread to post to — so it is a loud log only. Both
+shapes are near-unreachable by construction (the harness binds the author; the ref is
+validated upstream), which is the argument for treating them as definitive rather than
+redelivering forever.
+
+**Known gap: the D11 census is package-scoped.** It proves the gate writer is not
+duplicated within `internal/conversationchannel` (covering composite-literal, positional,
+assignment, raw-literal, and sanctioned-Source shapes — all verified to fail red against
+planted evasions), but a gate write introduced in another package would be invisible to it,
+and `TestSingleWriterPerPredicate` censuses the vocab table rather than code. Bounded by
+both writing lanes living in this package by construction.
+
 
 - **[A false NL approval resumes a run the human didn't approve]** → guards D8.1–4
   pre-landing + the D8.5 PR-merge backstop (it wastes tokens, it cannot ship unreviewed

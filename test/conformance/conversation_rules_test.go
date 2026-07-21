@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/conversationchannel"
 	"github.com/c360studio/semdev/internal/conversationintent"
 )
 
@@ -63,6 +65,7 @@ var conversationRuleFiles = []string{
 	"rules/conversation/03a-route-intent-approve.json",
 	"rules/conversation/03b-route-intent-reject.json",
 	"rules/conversation/04-classifier-terminal-release.json",
+	"rules/conversation/05-classifier-fault-note.json",
 }
 
 // conversationPackRules returns the parsed rules under configs/rules/conversation/.
@@ -426,4 +429,312 @@ func TestConversationRoutingRulesMatchTaxonomy(t *testing.T) {
 			t.Errorf("canonical intent %q has no routing rule — a classified directive would silently stall at the gate", v)
 		}
 	}
+}
+
+// TestClassifierFaultPostsFallbackNote pins the fault-surfacing lane
+// (nl-conversation-intent task 5.4, design D9 / semstreams HIGH-3).
+//
+// A classifier FAULT is not a confident `none`. A loop that errors or truncates
+// stamps NO conversation.intent, so every downstream route stays silent — and the
+// human who wrote "ship it" sees NOTHING happen, forever. That is the silent
+// human-facing dead-end the design bars. A faulted terminal therefore POSTS a
+// fallback note telling them to use the exact command (or re-type).
+//
+// WHY THIS RULE MUST NOT USE THE PARK LANE: the park rules stamp
+// run.awaiting.human, which run-lifecycle/02 reads as a RESUME BLOCKER
+// (`run.awaiting.human length_eq 0`). Routing a classifier fault through the park
+// lane would therefore wedge the run — a LATER, successful approval could never
+// resume it. The note rides its own user.note.* subject on the existing USER
+// stream and stamps no fact at all: it is a message to a human, not a lifecycle
+// event (G9 — no new vocabulary for a post).
+//
+// The rule fires on the classifier LOOP (conditions can only read the FIRING
+// entity's own facts, so the run's intent facts are unreachable here) and
+// discriminates on agent.loop.outcome == "failed" — the framework's terminal
+// outcome for an errored/truncated loop (agentic.OutcomeFailed). A `success`
+// terminal means classify_intent ran (tool_choice is required on the spawn), and
+// `cancelled` means the run itself is going away — neither warrants a note.
+func TestClassifierFaultPostsFallbackNote(t *testing.T) {
+	var note *ruleFile
+	pack := conversationPackRules(t)
+	for i := range pack {
+		if pack[i].ID == "conversation_classifier_fault_note" {
+			note = &pack[i]
+			break
+		}
+	}
+	if note == nil {
+		t.Fatal("missing conversation_classifier_fault_note rule — a faulted classifier is a SILENT dead-end for the human (HIGH-3)")
+	}
+	if c, ok := note.condition("agent.loop.role"); !ok || c.Operator != "eq" || c.Value != "conversation" {
+		t.Error("the fault note must be scoped to the conversation role — every other role's failures have their own lanes")
+	}
+	if c, ok := note.condition("agent.loop.outcome"); !ok || c.Operator != "eq" || c.Value != "failed" {
+		t.Error(`the fault note must fire on agent.loop.outcome == "failed" — a confident none (success) stays SILENT (ordinary chatter), and cancelled means the run is going away`)
+	}
+	if c, ok := note.condition("agent.run.entity-id"); !ok || c.Operator != "ne" {
+		t.Error("the fault note needs the run anchor present (ne \"\") — the note consumer resolves the thread through it")
+	}
+
+	// The note must NOT stamp run.awaiting.human (or anything else): that fact is
+	// the resume rule's blocker, so parking here would wedge a later approval.
+	for _, a := range note.OnEnter {
+		if a.Type == "add_triple" {
+			t.Errorf("the fault note stamps %q — it must stamp NOTHING; run.awaiting.human in particular would block run-lifecycle/02 and wedge a later approval", a.Predicate)
+		}
+	}
+	var publishes []string
+	for _, a := range note.OnEnter {
+		if a.Type == "publish" {
+			publishes = append(publishes, a.Subject)
+		}
+	}
+	if len(publishes) != 1 {
+		t.Fatalf("the fault note must publish EXACTLY one subject, got %v", publishes)
+	}
+	published := publishes[0]
+	if !strings.HasPrefix(published, "user.note.") {
+		t.Errorf("the fault note publishes %q, want a user.note.* subject (its own lane on the existing USER stream, NOT the park lane)", published)
+	}
+}
+
+// TestApplyLaneIsTheDeliberateNonParkingStation is the B1 structural guard.
+//
+// Every other station routes a retries-exhausted dispatch to
+// `station.dispatch.failed`, which run-lifecycle/05 converts into
+// `run.awaiting.human`. For the conversation-apply lane that would be
+// UNRECOVERABLE, because its run is sitting AT the change-approval gate and BOTH
+// release rules require `run.awaiting.human` ABSENT:
+//
+//	run-lifecycle/02 (resume): run.awaiting.human length_eq 0
+//	run-lifecycle/07 (cancel): run.awaiting.human length_eq 0
+//
+// and NOTHING in the repo ever removes that predicate (eight park rules add it,
+// zero remove it — a resume-from-park rule is still unbuilt). A park here would
+// therefore wedge the run forever: never approvable, never cancellable, and even
+// `/semdev approve` would die stamping a fact no rule would consume.
+//
+// So the apply lane notifies the human and leaves the gate open instead. This pin
+// fails if anyone re-wires it to the park lane — a change that would look locally
+// reasonable ("be consistent with the other six stations") and be catastrophic.
+func TestApplyLaneIsTheDeliberateNonParkingStation(t *testing.T) {
+	root := repoRoot(t)
+
+	// (a) The apply lane's own code must never reference the park predicate.
+	dir := filepath.Join(root, "internal", "conversationchannel")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		// The park predicate reaches the graph either via the station const or the
+		// literal; catch both.
+		body := string(src)
+		bannedTokens := []string{"DispatchFailedPredicate", `"station.dispatch.failed"`}
+		// The predicate that ACTUALLY wedges the gate, banned in every file EXCEPT
+		// the one legitimate reader. Scoping it to apply.go alone was too narrow
+		// (grp5-review NEW-10): a helper added in a NEW file in this package could
+		// write the wedge predicate directly and name neither station token, so it
+		// would sail through both bans. parkpost.go:70 legitimately READS it to
+		// post a park message. No repo-wide pin covers this — TestOnlySanctionedParkWriters
+		// walks RULES only, never Go.
+		if e.Name() != "parkpost.go" {
+			bannedTokens = append(bannedTokens, `"run.awaiting.human"`)
+		}
+		for _, banned := range bannedTokens {
+			// Allow it inside comments explaining WHY the lane must not park.
+			for _, line := range strings.Split(body, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "//") {
+					continue
+				}
+				if strings.Contains(line, banned) {
+					t.Errorf("%s references %s in CODE — the conversation-apply lane must NEVER stamp a station park: its run is at the change-approval gate, both release rules require run.awaiting.human absent, and nothing ever removes it (the run would be wedged forever). Notify the human and leave the gate open instead.", e.Name(), banned)
+				}
+			}
+		}
+	}
+
+	// (b) The park rule that WOULD have covered it stays intact for the other
+	// stations — this pin is about the apply lane opting out, not about weakening
+	// the park subsystem.
+	if _, ok := runLifecycleRules(t)["run_park_station_failure_run"]; !ok {
+		t.Error("run-lifecycle/05 (the run-fired park half) is missing — the other RUN-dispatched stations lost their terminal-failure park")
+	}
+}
+
+// TestConversationLanePortsMatchConfigs closes the silent void both reviewers
+// flagged (go M2 / semstreams M6): the routing rules PUBLISH to
+// component.conversation-apply.dispatch, and if the consuming port were dropped
+// from a shipped config the rule would fire, the stream would store, and nothing
+// would consume — green everywhere, dead in production. Nothing tied the Go consts
+// to the config until now. The subject match is also load-bearing for the
+// serialization knob (component.go keys max_ack_pending on an EXACT subject
+// compare, so the station-convention wildcard would silently revert the lane to
+// the default 8).
+func TestConversationLanePortsMatchConfigs(t *testing.T) {
+	root := repoRoot(t)
+	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
+		raw, err := os.ReadFile(filepath.Join(root, "configs", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var cfg struct {
+			Streams    map[string]struct{ Subjects []string } `json:"streams"`
+			Components struct {
+				ConversationChannel struct {
+					Config struct {
+						Ports struct {
+							Inputs []struct {
+								Name       string `json:"name"`
+								Type       string `json:"type"`
+								Subject    string `json:"subject"`
+								StreamName string `json:"stream_name"`
+							} `json:"inputs"`
+						} `json:"ports"`
+					} `json:"config"`
+				} `json:"conversation-channel"`
+			} `json:"components"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+
+		byName := map[string]struct{ subject, stream string }{}
+		for _, in := range cfg.Components.ConversationChannel.Config.Ports.Inputs {
+			byName[in.Name] = struct{ subject, stream string }{in.Subject, in.StreamName}
+		}
+		for _, want := range []struct{ port, subject, stream string }{
+			{"apply_dispatch", conversationchannel.ApplyDispatchSubject, conversationchannel.ApplyStreamName},
+			{"user_notes", conversationchannel.UserNoteSubject, "USER"},
+		} {
+			got, ok := byName[want.port]
+			if !ok {
+				t.Errorf("%s: conversation-channel declares no %q input — its producer is a RULE, so the lane would publish into a void with every test still green", name, want.port)
+				continue
+			}
+			if got.subject != want.subject {
+				t.Errorf("%s: %s subject = %q, want %q (the Go const); an exact match is required — component.go keys the serialization knob on it", name, want.port, got.subject, want.subject)
+			}
+			if got.stream != want.stream {
+				t.Errorf("%s: %s stream_name = %q, want %q", name, want.port, got.stream, want.stream)
+			}
+		}
+
+		// The apply dispatch's stream must be declared, or Start fails loudly
+		// (AutoCreate:false). Declared NARROW on purpose.
+		stream, ok := cfg.Streams[conversationchannel.ApplyStreamName]
+		if !ok {
+			t.Errorf("%s: no %q stream declared — the apply consumer cannot start (AutoCreate is false)", name, conversationchannel.ApplyStreamName)
+			continue
+		}
+		if len(stream.Subjects) != 1 || !strings.HasPrefix(stream.Subjects[0], "component."+conversationchannel.ApplyStationName) {
+			t.Errorf("%s: %s subjects = %v, want exactly the narrow component.%s.> — a broader subject would silently persist the other six stations' fire-and-forget dispatches", name, conversationchannel.ApplyStreamName, stream.Subjects, conversationchannel.ApplyStationName)
+		}
+	}
+}
+
+// TestShippedConfigVersionsAreParseableSemver guards a SILENT config-loading
+// failure (nl-conversation-intent grp5-review, semstreams HIGH-1).
+//
+// The framework stores each config in a versioned NATS KV and, on boot, compares
+// the file's version to the KV's. config.CompareVersions strconv.Atoi's every
+// dot-separated segment, so a decorated value like "0.29.0-live-gemini" FAILS TO
+// PARSE — and the manager treats a comparison error as "sync from KV". The file
+// then loses on every boot against a populated KV, silently, forever.
+//
+// The failure is split and therefore very hard to spot: EnsureStreams runs off the
+// FILE (so newly declared streams appear and look healthy), while the component
+// manager reads the KV-synced config (so newly declared PORTS do not exist). The
+// result is a stream filling with nobody consuming it, with no error anywhere.
+// semdev-live-gemini.json carried a suffixed version for its whole life; group 5
+// is the first change to put a rule-published lane behind it.
+func TestShippedConfigVersionsAreParseableSemver(t *testing.T) {
+	root := repoRoot(t)
+	versions := map[string]string{}
+	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
+		raw, err := os.ReadFile(filepath.Join(root, "configs", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var cfg struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		if cfg.Version == "" {
+			t.Errorf("%s declares no version", name)
+			continue
+		}
+		versions[name] = cfg.Version
+		parts := strings.Split(cfg.Version, ".")
+		if len(parts) != 3 {
+			t.Errorf("%s version %q is not MAJOR.MINOR.PATCH — CompareVersions cannot parse it, so this file silently loses to the KV on every boot", name, cfg.Version)
+			continue
+		}
+		for _, p := range parts {
+			if _, err := strconv.Atoi(p); err != nil {
+				t.Errorf("%s version %q has non-numeric segment %q — CompareVersions strconv.Atoi's each segment, the comparison ERRORS, and the manager falls back to the KV: this file's component blocks (ports included) are silently ignored while EnsureStreams still runs off the file", name, cfg.Version, p)
+			}
+		}
+	}
+
+	// INVARIANT 2 — the MOCK config must win any stale-KV race (grp5-review,
+	// BLOCKING). Both files share ONE KV entry: the bucket ("semstreams_config")
+	// and key ("version") are hardcoded globals, NOT platform-derived, and both
+	// configs declare the IDENTICAL platform identity (c360/semdev-bootstrap/
+	// development) — so the framework's gh#459 cross-app detach guard cannot fire
+	// and VERSION ALONE decides which file wins.
+	//
+	// PushToKV writes model_registry. So if the LIVE config could ever win, a
+	// later mock-config boot would take the `cmp < 0` branch, syncFromKV, and
+	// silently adopt gemini endpoints — the free ladder spending real tokens
+	// behind one WARN line, with the `conversation` capability (mock-only) dropped
+	// so the classifier falls through to gemini too.
+	//
+	// Keeping mock STRICTLY GREATER makes every stale-KV race resolve toward the
+	// FREE config; the live lane still loads because its Taskfile entry mandates
+	// `task nats:reset`. NOTE this ordering was briefly INVERTED while fixing the
+	// unparseable-suffix bug: the suffix had accidentally made live un-pushable,
+	// and making it parseable removed that protection. Hence this pin.
+	mock, live := versions["semdev-bootstrap.json"], versions["semdev-live-gemini.json"]
+	if mock == "" || live == "" {
+		t.Fatalf("could not read both versions (mock=%q live=%q)", mock, live)
+	}
+	if compareSemver(t, mock, live) <= 0 {
+		t.Errorf("mock config version %q must be STRICTLY GREATER than the live config's %q — they share one KV entry and one platform identity, so version alone decides which file wins; if live wins, a later mock boot adopts the gemini model_registry and the FREE ladder spends real tokens", mock, live)
+	}
+}
+
+// compareSemver compares two plain MAJOR.MINOR.PATCH strings the same way the
+// framework's config.CompareVersions does (segment-wise integer compare).
+func compareSemver(t *testing.T, a, b string) int {
+	t.Helper()
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3 && i < len(as) && i < len(bs); i++ {
+		ai, err := strconv.Atoi(as[i])
+		if err != nil {
+			t.Fatalf("non-numeric segment in %q", a)
+		}
+		bi, err := strconv.Atoi(bs[i])
+		if err != nil {
+			t.Fatalf("non-numeric segment in %q", b)
+		}
+		if ai != bi {
+			if ai > bi {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
+
 }

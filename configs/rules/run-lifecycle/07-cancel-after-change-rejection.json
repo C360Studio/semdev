@@ -1,0 +1,32 @@
+{
+  "id": "run_cancel_after_change_rejection",
+  "type": "expression",
+  "name": "Cancel after change rejection (awaiting_approval → cancelled)",
+  "description": "The reject side of the first human gate (nl-conversation-intent group 5, design D7). A run parked at awaiting_approval carrying run.change.rejected transitions to cancelled: the authored change is abandoned and a re-triggered issue starts a fresh run (a rework loop that KEEPS the change is a Phase 3 concern, OQ2). Rule-owned transition (G2) — no Go fires it. The fact is stamped by the ONE sanctioned gate writer (approval-adapter) from either the exact `/semdev reject` fast-path or the deterministic apply consumer; this rule never inspects who decided, only that the decision landed.\n\nPHASE GUARD — LOAD-BEARING (architect H1): the agent-run state machine (agentrun.go:46-48) permits a LEGAL executing → cancelled edge. An unguarded reject rule would therefore fire on an ALREADY-APPROVED, ALREADY-EXECUTING run and destroy work the human explicitly approved — the irreversibility asymmetry the design settles: an approval is final once landed (transparency is VISIBILITY, not undo; the downstream PR merge is the real human stop). Gating on agent.run.phase == awaiting_approval confines the cancel to a run still AT the gate, mirroring the resume rule (run-lifecycle/02:9).\n\nCELL-SPACE PARTITION (grp3-review M2) — this rule and the RESUME rule must be MUTUALLY EXCLUSIVE over one atomic mirror snapshot. The exact-command fast-paths bypass the routing rules' both-facts-absent guard (design D6) and stamp a gate fact directly, so an authorized `/semdev reject` followed by `/semdev approve` on a still-gated run leaves BOTH run.change.rejected AND run.change.approved present. The Go fast-path refuses only reject-on-already-approved; it deliberately does NOT grow a second Go-side gate read, because the lifecycle partition is the RULES' job (G2) and a Go guard racing the rules is weaker, not stronger (the engine writes each action as its own KV revision — the routing-upgrades cell-space lesson). Therefore this rule carries `run.change.approved length_eq 0` and run-lifecycle/02 carries `run.change.rejected length_eq 0`: a run holding BOTH facts fires NEITHER rule. CALLED HONESTLY (grp5-review, semstreams M3): that is an UNSURFACED STALL, not a park \u2014 nothing stamps run.awaiting.human, nothing posts, and no operator surface flags it; the run simply sits at awaiting_approval. It is deliberately NOT parked, because a park at this gate is unrecoverable (both release rules require run.awaiting.human absent and nothing ever removes it \u2014 the B1 wedge). The cell is narrow (it needs an exact /semdev reject and /semdev approve to interleave inside one mirror evaluation) and is recorded as a known gap in the design's Risks. Pinned by TestRejectCancelsGatedRunOnly (offline) and the 6.4 conflict journey (end-to-end).\n\nPARK EXCLUSION (design D15, repo-wide invariant): like every active lifecycle_transition rule, this one carries `run.awaiting.human length_eq 0` so a run parked toward the human is never swept through a gate before the park is cleared. The guard is inert on the normal path — the change-approval gate is PHASE-based (run-lifecycle/01 transitions to awaiting_approval and stamps no run.awaiting.human), so a gated run does not carry the park marker; it bites only when an ask_human park and a rejection coincide, where holding still is the correct conservative outcome.\n\nFIRING CAP: the transition is terminal for this run (cancelled leaves awaiting_approval, so the conditions can never re-satisfy), hence a single fire per run — the engine's default per-action cap of 3 is never approached and no explicit max_iterations is needed (contrast the conversation routes, which re-fire across the gate's lifetime and must opt out explicitly).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.run.phase", "operator": "eq", "value": "awaiting_approval", "required": true },
+    { "field": "run.change.rejected", "operator": "eq", "value": "true", "required": true },
+    { "field": "run.change.approved", "operator": "length_eq", "value": 0, "required": true },
+    { "field": "run.awaiting.human", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "lifecycle_transition",
+      "workflow": "agent-run",
+      "phase": "cancelled",
+      "reason": "human rejected the authored change; abandoning this run"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "run-lifecycle",
+    "capability": "run-lifecycle",
+    "gate": "change-approval",
+    "task": "5.3",
+    "phase_guard": "awaiting_approval only (H1): the legal executing→cancelled edge means an unguarded rule would kill an approved, executing run.",
+    "mutual_exclusion": "paired with run-lifecycle/02 — each rule requires the OTHER gate fact ABSENT, so a both-facts run transitions to NEITHER, never both (grp3-review M2). That cell is an unsurfaced stall rather than a park — parking it would wedge the gate irrecoverably (B1); see the description."
+  }
+}

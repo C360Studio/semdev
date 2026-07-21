@@ -1288,10 +1288,17 @@ func TestStationDispatchEntityCensus(t *testing.T) {
 		"floors-station":     "loop", // dev-from-task/05 fires on the developer loop
 		"verify-station":     "loop", // dev-from-task/07a fires on the review loop
 		// conversation/03a+03b fire on the RUN (the classifier subject-overrides
-		// conversation.intent.* there), so a retries-exhausted apply dispatch
-		// stamps station.dispatch.failed on the run and the RUN-fired park half
-		// (run-lifecycle/05) parks it toward the human — the gate stays closed
-		// (fail-safe: no gate fact lands without the deterministic apply running).
+		// conversation.intent.* there). NOTE this lane is the ONE DELIBERATE
+		// NON-PARKING station (nl-conversation-intent grp5-review B1): the pre-impl
+		// sketch assumed a retries-exhausted apply dispatch would stamp
+		// station.dispatch.failed and let run-lifecycle/05 park it, but that is
+		// UNRECOVERABLE here — this run is at the change-approval gate, and BOTH
+		// release rules (run-lifecycle/02 resume, /07 cancel) require
+		// run.awaiting.human ABSENT, which nothing in the repo ever removes. The
+		// run would be wedged forever and even /semdev approve would die. So the
+		// apply consumer notifies the human and leaves the gate OPEN instead; this
+		// entry records the firing ENTITY (still the run) for census completeness,
+		// and TestApplyLaneIsTheDeliberateNonParkingStation enforces the opt-out.
 		"conversation-apply": "run",
 	}
 
@@ -1758,5 +1765,63 @@ func TestPersonaRoleDirsExist(t *testing.T) {
 		if err != nil || !info.IsDir() {
 			t.Errorf("persona fragment dir for role %q missing at %s", role, dir)
 		}
+	}
+}
+
+// TestRejectCancelsGatedRunOnly pins the reject lane (nl-conversation-intent task
+// 5.3, design D7). Two guards, both LOAD-BEARING:
+//
+// PHASE GUARD (architect H1): the agent-run state machine allows a LEGAL
+// executing→cancelled edge, so an unguarded reject rule would kill an already
+// approved, already executing run — destroying work the human explicitly approved.
+// The rule fires ONLY at awaiting_approval, mirroring the resume rule.
+//
+// CELL-SPACE PARTITION (grp3-review M2): the exact-command fast-paths bypass the
+// routing rules' both-facts-absent guard, so an authorized `/semdev reject` then
+// `/semdev approve` on a still-gated run can leave BOTH gate facts present. Full
+// mutual exclusion is the RULES' job (G2) and must be evaluated over ONE atomic
+// mirror snapshot, so BOTH lifecycle rules carry the other fact's absence guard: a
+// run holding both facts transitions to NEITHER, never to both. Without the paired
+// guards the run would resume AND cancel. NOTE that cell is an UNSURFACED STALL, not
+// a park — nothing stamps run.awaiting.human, nothing posts, no operator surface
+// flags it — and parking it is NOT available as a fix, because a park at this gate
+// is unrecoverable (both release rules require run.awaiting.human absent and nothing
+// ever removes it; grp5-review B1). Named in the design's Risks.
+func TestRejectCancelsGatedRunOnly(t *testing.T) {
+	rules := runLifecycleRules(t)
+
+	cancel, ok := rules["run_cancel_after_change_rejection"]
+	if !ok {
+		t.Fatal("missing run_cancel_after_change_rejection rule — the NL reject lane stamps run.change.rejected with nothing to act on it (the run stays gated forever)")
+	}
+	if c, ok := cancel.condition("run.change.rejected"); !ok || c.Operator != "eq" || c.Value != "true" {
+		t.Error("cancel must require run.change.rejected == true")
+	}
+	// H1 — the phase guard.
+	if c, ok := cancel.condition("agent.run.phase"); !ok || c.Operator != "eq" || c.Value != "awaiting_approval" {
+		t.Error("cancel MUST be phase-guarded to awaiting_approval (H1) — the legal executing→cancelled edge would otherwise kill an approved, executing run")
+	}
+	// M2 — this half of the partition.
+	if c, ok := cancel.condition("run.change.approved"); !ok || c.Operator != "length_eq" {
+		t.Error("cancel MUST require run.change.approved ABSENT (length_eq 0) — the M2 cell-space partition; a both-facts run must transition to NEITHER")
+	}
+	var cancelled bool
+	for _, a := range cancel.OnEnter {
+		if a.Type == "lifecycle_transition" && a.Phase == "cancelled" {
+			cancelled = true
+		}
+	}
+	if !cancelled {
+		t.Error("cancel must fire the rule-owned awaiting_approval → cancelled transition (G2: no Go fires it)")
+	}
+
+	// M2 — the OTHER half. The pre-existing resume rule must now also exclude a
+	// rejected run, or a both-facts run resumes as well as cancels.
+	resume, ok := rules["run_resume_after_change_approval"]
+	if !ok {
+		t.Fatal("missing run_resume_after_change_approval rule")
+	}
+	if c, ok := resume.condition("run.change.rejected"); !ok || c.Operator != "length_eq" {
+		t.Error("resume MUST require run.change.rejected ABSENT (length_eq 0) — the M2 partition's other half; without it a run carrying BOTH gate facts both resumes and cancels")
 	}
 }

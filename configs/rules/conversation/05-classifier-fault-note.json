@@ -1,0 +1,29 @@
+{
+  "id": "conversation_classifier_fault_note",
+  "type": "expression",
+  "name": "Faulted classifier terminal → post the fallback-to-command note",
+  "description": "The fault-surfacing lane (nl-conversation-intent group 5, design D9 / semstreams HIGH-3). A classifier FAULT is NOT a confident `none`. A loop that errors, truncates, or trips classify_intent's read-once binding check stamps NO conversation.intent.* — so the routing rules (03a/03b) never fire, the apply consumer never runs, and NOTHING happens. Silently. The human who typed 'ship it' watches an issue where semdev appears to have ignored them. That is the human-facing dead-end the design bars, so a faulted terminal POSTS a note pointing at the deterministic escape hatch: reply `/semdev approve` or `/semdev reject`, or re-type the message.\n\nWHY NOT THE PARK LANE (load-bearing): the park rules stamp run.awaiting.human, and run-lifecycle/02 reads that predicate as a RESUME BLOCKER (`run.awaiting.human length_eq 0`). Routing a classifier fault through the park lane would therefore WEDGE the run — a later, successful approval (by exact command or a fresh classification) could never resume it, turning a recoverable one-message miss into a permanently stuck run. This rule stamps NOTHING and publishes its own `user.note.<instance>` subject, which rides the EXISTING USER stream (subjects user.>) — no new stream, and no new vocabulary for what is a message to a human rather than a lifecycle event (G9).\n\nTRIGGER SHAPE: the rule fires on the classifier LOOP entity, because rule conditions can only read the FIRING entity's own facts — the run's conversation.intent.* facts are unreachable from here, so 'did the classifier produce a reading?' cannot be asked directly. The discriminator is instead the framework's terminal outcome: agent.loop.outcome == \"failed\" (agentic.OutcomeFailed) is the errored/truncated loop. A \"success\" terminal means classify_intent DID run (the spawn sets tool_choice required), including the deliberate conservative `none` — which stays SILENT, because ordinary chatter must not draw a reply. A \"cancelled\" terminal means the run itself is going away, so a note would be noise.\n\nRELATIONSHIP TO 04-classifier-terminal-release: both rules fire on the same faulted terminal, and that is intended — they are separate concerns (04 retires the pending slot + re-arms the spawn marker; this one tells the human). 04 fires on ANY terminal (outcome ne \"\"), this one only on the failed subset. The group-4 read-once binding faults (HIGH-1: the pending slot moved mid-flight, so the tool refuses to misattribute a new author to an old judgment) land HERE — that message is retired unclassified and UN-deduped, and this note is what makes the miss visible rather than silent.\n\nFIRING CAP: each classifier loop is a fresh entity, so this edge-triggers exactly once per loop — the engine's default per-action cap (3 per rule+entity) is never approached and no explicit max_iterations opt-out is needed (contrast the routes, which re-fire on ONE run across the gate's lifetime).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "conversation", "required": true },
+    { "field": "agent.loop.outcome", "operator": "eq", "value": "failed", "required": true },
+    { "field": "agent.run.entity-id", "operator": "ne", "value": "", "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "publish",
+      "subject": "user.note.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "conversation",
+    "capability": "conversation-channel",
+    "station": "classifier fault note — surface a failed classification to the human (group 5, design D9)",
+    "trigger_rationale": "fires on the classifier LOOP terminal; conditions read only the firing entity, so outcome==failed stands in for 'produced no reading'. The run id travels as the loop's agent.run.entity-id, which the note consumer resolves to the thread.",
+    "no_stamp_rationale": "stamps NOTHING on purpose. run.awaiting.human (the park lane's fact) is run-lifecycle/02's resume BLOCKER — parking a classifier fault would wedge the run against a later successful approval. A note is a message, not a lifecycle event.",
+    "silence_posture": "a `none` (success terminal) posts nothing — ordinary chatter must not draw a reply; only a FAULT, which is indistinguishable from being ignored, is surfaced."
+  }
+}

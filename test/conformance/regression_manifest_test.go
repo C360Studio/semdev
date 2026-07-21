@@ -28,7 +28,7 @@ var regressionManifest = []struct {
 		"product Go fires zero lifecycle transitions; the exception table stays empty (anti-B3)"},
 	{"G3", "test/conformance/g3_schema_test.go", []string{"TestNoToolSchemaAcceptsOutcomeField"},
 		"no tool schema accepts a caller-supplied outcome field"},
-	{"G5", "test/conformance/g5_writers_test.go", []string{"TestSingleWriterPerPredicate", "TestToolSourceMatchesVocabWriter"},
+	{"G5", "test/conformance/g5_writers_test.go", []string{"TestSingleWriterPerPredicate", "TestToolSourceMatchesVocabWriter", "TestOnlySanctionedGateWriters"},
 		"every predicate has exactly one writer; each tool's stamped Source equals its declared vocab writer"},
 	{"G9", "test/conformance/g9_vocab_test.go", []string{"TestVocabularyProvenance"},
 		"every predicate points at its introducing change"},

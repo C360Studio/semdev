@@ -123,7 +123,7 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 5. The apply consumer + the reject→cancel lane + the fault note (design D6, D7, D9, D11)
 
-- [ ] 5.1 RED: `TestApplyConsumerGateStillOpenReAuthorizeStamps` — the apply consumer: (a)
+- [x] 5.1 RED: `TestApplyConsumerGateStillOpenReAuthorizeStamps` — the apply consumer: (a)
   re-checks the gate is OPEN (neither `run.change.approved` nor `run.change.rejected`
   present — a second racing intent is a NO-OP, H4a); (b) reads the cited author from
   `conversation.intent.author` (HARNESS-bound, NOT pending — H4b) and RE-RUNS `Authorize`
@@ -135,9 +135,9 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   explicitly pin the both-facts safe-park outcome when two concurrent opposite dispatches
   interleave their gate-open reads (survivable by the D7 partition, but a serialized
   consumer never produces it).
-- [ ] 5.2 RED: `TestApplyPostFailureBlocksStamp` — a `Channel.Post` failure returns TRANSIENT
+- [x] 5.2 RED: `TestApplyPostFailureBlocksStamp` — a `Channel.Post` failure returns TRANSIENT
   and the gate fact is NOT stamped (transparency-before-effect; redelivery re-Posts, M6).
-- [ ] 5.3 RED: `TestRejectCancelsGatedRunOnly` — a run-lifecycle rule fires
+- [x] 5.3 RED: `TestRejectCancelsGatedRunOnly` — a run-lifecycle rule fires
   `awaiting_approval → cancelled` on `run.change.rejected`, PHASE-GUARDED to
   `awaiting_approval` (H1: it must NOT fire the legal `executing→cancelled` edge on an
   already-approved run); a bootstrap/rule-load pin covers the guard. **Cell-space
@@ -146,17 +146,17 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   length_eq 0` AND the existing RESUME rule (`run-lifecycle/02`) MUST gain
   `run.change.rejected length_eq 0` — a run holding both facts transitions to NEITHER (a
   safe park), never both. Add a rule-load pin asserting both mutual-exclusion guards.
-- [ ] 5.4 RED: `TestClassifierFaultPostsFallbackNote` — a faulted classifier terminal (no
+- [x] 5.4 RED: `TestClassifierFaultPostsFallbackNote` — a faulted classifier terminal (no
   `conversation.intent`, `agent.loop.outcome` faulted) triggers a fallback-to-command note
   post; a confident `none` posts nothing (HIGH-3).
-- [ ] 5.5 RED: `TestOnlySanctionedGateWriters` — the G5 census: the ONLY Source of
+- [x] 5.5 RED: `TestOnlySanctionedGateWriters` — the G5 census: the ONLY Source of
   `run.change.approved`/`rejected` is `approval-adapter`, and both the fast-path and the
   apply consumer route through one shared writer method (D11). Include the
   `TestToolSourceMatchesVocabWriter` ties for BOTH gate predicates
   (`approval-adapter`→`run.change.approved` and →`run.change.rejected`) — grp3-review L4
   (the gate facts are adapter-stamped, so their Source↔vocab tie belongs with this D11
   census, alongside the grp3 `conversation-adapter`→pending ties already added).
-- [ ] 5.6 Implement: the apply consumer (a declared jetstream input port on the
+- [x] 5.6 Implement: the apply consumer (a declared jetstream input port on the
   conversation-channel component: gate-still-open → harness-bound Authorize → Post → stamp,
   transient-on-Post-failure) + the phase-guarded `run.change.rejected → cancelled`
   run-lifecycle rule + the faulted-classifier fallback-note rule + the shared writer method.

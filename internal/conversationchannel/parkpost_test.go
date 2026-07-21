@@ -2,6 +2,7 @@ package conversationchannel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/c360studio/semdev/internal/forge/conversation"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
 )
@@ -243,4 +245,86 @@ func TestParkRacePublishBeforeFactRedelivers(t *testing.T) {
 	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postRun+`"}`)); err == nil {
 		t.Fatal("publish-before-park must redeliver until run.awaiting.human exists")
 	}
+}
+
+// --- the fault-note lane (grp5-review H3: handleUserNote had zero coverage) ---
+
+func newTestNotePoster(ch conversation.Channel, fetcher admission.EntityFetcher) *parkPoster {
+	return &parkPoster{channel: ch, fetcher: fetcher, logger: slog.Default()}
+}
+
+// TestFaultNotePostsAndNeverParks pins the D9/HIGH-3 lane AND its load-bearing
+// restraint: the note reaches the human, and it stamps NOTHING — in particular not
+// run.awaiting.human, which run-lifecycle/02 reads as a resume blocker. A fault
+// that parked the run would turn a recoverable one-message miss into a permanently
+// stuck run (the same hazard as grp5-review B1).
+func TestFaultNotePostsAndNeverParks(t *testing.T) {
+	ctx := context.Background()
+	const loopID = "c360.semdev.agent.loop.execution.classifier-1"
+	const runID = "c360.semdev.agent.chain.execution.run-1"
+	ch := &fakeChannel{}
+	p := newTestNotePoster(ch, &fakeFetcher{entities: map[string]*graph.EntityState{
+		loopID: entityWith(loopID, map[string]string{"agent.run.entity-id": runID}),
+		runID:  entityWith(runID, map[string]string{"run.issue.ref": "c360studio/semdev-fixture#7"}),
+	}})
+
+	payload, err := json.Marshal(publishEnvelope{EntityID: loopID})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := p.handleUserNote(ctx, payload); err != nil {
+		t.Fatalf("handleUserNote: %v", err)
+	}
+	if len(ch.posts) != 1 {
+		t.Fatalf("want exactly one fault note posted, got %d", len(ch.posts))
+	}
+	if !strings.Contains(ch.posts[0].body, "/semdev approve") {
+		t.Errorf("the fault note must point at the deterministic escape hatch, got %q", ch.posts[0].body)
+	}
+}
+
+// TestFaultNoteDefinitiveVsTransient: a shape semdev's own rule engine could not
+// have produced is acked (never redelivered forever); a forge blip redelivers (the
+// note is the human's only signal that their message was not understood).
+func TestFaultNoteDefinitiveVsTransient(t *testing.T) {
+	ctx := context.Background()
+	const loopID = "c360.semdev.agent.loop.execution.classifier-1"
+	const runID = "c360.semdev.agent.chain.execution.run-1"
+	entities := map[string]*graph.EntityState{
+		loopID: entityWith(loopID, map[string]string{"agent.run.entity-id": runID}),
+		runID:  entityWith(runID, map[string]string{"run.issue.ref": "c360studio/semdev-fixture#7"}),
+	}
+	good, err := json.Marshal(publishEnvelope{EntityID: loopID})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	t.Run("malformed envelope is definitive", func(t *testing.T) {
+		p := newTestNotePoster(&fakeChannel{}, &fakeFetcher{entities: entities})
+		if err := p.handleUserNote(ctx, []byte("not json")); err != nil {
+			t.Errorf("a malformed envelope must be acked, got: %v", err)
+		}
+	})
+	t.Run("post failure is transient", func(t *testing.T) {
+		p := newTestNotePoster(&fakeChannel{postErr: errors.New("forge 503")}, &fakeFetcher{entities: entities})
+		if err := p.handleUserNote(ctx, good); err == nil {
+			t.Error("a forge blip must redeliver — the note is the human's only signal")
+		}
+	})
+	t.Run("no channel is definitive", func(t *testing.T) {
+		p := newTestNotePoster(nil, &fakeFetcher{entities: entities})
+		p.channel = nil
+		if err := p.handleUserNote(ctx, good); err != nil {
+			t.Errorf("a channel-less deployment is acked (logged loud), got: %v", err)
+		}
+	})
+	t.Run("run without an issue ref is definitive", func(t *testing.T) {
+		p := newTestNotePoster(&fakeChannel{}, &fakeFetcher{entities: map[string]*graph.EntityState{
+			loopID: entityWith(loopID, map[string]string{"agent.run.entity-id": runID}),
+			runID:  entityWith(runID, map[string]string{}),
+		}})
+		if err := p.handleUserNote(ctx, good); err != nil {
+			t.Errorf("a run with nowhere to post is acked, got: %v", err)
+		}
+	})
 }

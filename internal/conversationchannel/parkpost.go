@@ -106,6 +106,79 @@ func (p *parkPoster) handleUserResponse(ctx context.Context, payload []byte) err
 	return nil
 }
 
+// UserNoteSubject is the fault-note lane's publish namespace. It rides the SAME
+// USER stream as the park lane (subjects user.>) but a DISTINCT subject, because
+// the two are different things: a park is a lifecycle fact with a message attached,
+// a note is only a message. Keeping them apart is load-bearing — see
+// handleUserNote.
+const UserNoteSubject = "user.note.>"
+
+// faultNoteBody is the fallback note posted when a classifier FAULTS (design D9 /
+// semstreams HIGH-3). It names the deterministic escape hatch, because the one
+// thing the human must not experience is silence: from their side, a faulted
+// classification and a semdev that ignored them look identical.
+const faultNoteBody = "🤔 I couldn't read that as an approval or a rejection.\n\n" +
+	"Reply `/semdev approve` or `/semdev reject` to decide this change explicitly — or just re-word what you meant and I'll try again."
+
+// handleUserNote posts the classifier fault note to the run's thread
+// (conversation/05). It deliberately shares the park lane's resolve-and-post
+// machinery but NOT its fact: the note stamps nothing.
+//
+// WHY THIS IS NOT THE PARK LANE: the park poster reads run.awaiting.human, and
+// that predicate is run-lifecycle/02's RESUME BLOCKER. Routing a classifier fault
+// through the park would wedge the run — a later successful approval could never
+// resume it. So a fault gets a message and nothing else, leaving the gate exactly
+// as open as it was.
+//
+// nil = definitive ack; error = transient (redelivered bounded — a forge blip must
+// not lose the human's only signal that their message was not understood).
+func (p *parkPoster) handleUserNote(ctx context.Context, payload []byte) error {
+	if p.channel == nil {
+		p.logger.Warn("fault-note: no conversation channel; the classifier fault is INVISIBLE to the human (the note is its only artifact)")
+		return nil
+	}
+	var env publishEnvelope
+	if err := json.Unmarshal(payload, &env); err != nil || env.EntityID == "" {
+		p.logger.Error("fault-note: malformed user.note envelope; skipping", slog.Any("error", err))
+		return nil
+	}
+	runEntityID, err := p.resolveRun(ctx, env.EntityID)
+	if err != nil {
+		return fmt.Errorf("fault-note: resolve run from %s: %w", env.EntityID, err)
+	}
+	run, err := p.fetcher.Entity(ctx, runEntityID)
+	if err != nil {
+		return fmt.Errorf("fault-note: read run %s: %w", runEntityID, err)
+	}
+	if run == nil {
+		p.logger.Warn("fault-note: run entity absent; nothing to post", slog.String("run", runEntityID))
+		return nil
+	}
+	ref := entityTriple(run, "run.issue.ref")
+	if ref == "" {
+		p.logger.Warn("fault-note: run has no run.issue.ref; the classifier fault stays graph-only",
+			slog.String("run", runEntityID))
+		return nil
+	}
+	// Validate the coordinate BEFORE posting so a malformed ref is a definitive
+	// skip, not an endless Post-error redeliver (the park lane's posture).
+	if _, _, _, err := admission.SplitRef(ref); err != nil {
+		p.logger.Error("fault-note: unparseable run.issue.ref; note stays graph-only",
+			slog.String("ref", ref), slog.Any("error", err))
+		return nil
+	}
+	thread, err := p.channel.ResolveThread(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("fault-note: resolve thread for %s: %w", ref, err)
+	}
+	if err := p.channel.Post(ctx, thread, faultNoteBody); err != nil {
+		return fmt.Errorf("fault-note: post to %s: %w", ref, err)
+	}
+	p.logger.Info("fault-note: classifier fault surfaced to the human",
+		slog.String("ref", ref), slog.String("run", runEntityID))
+	return nil
+}
+
 // resolveRun maps the park publish's firing entity to its run: a chain entity
 // IS the run; a loop entity carries the agent.run.entity-id anchor.
 func (p *parkPoster) resolveRun(ctx context.Context, entityID string) (string, error) {

@@ -59,11 +59,15 @@ type replacedFacts struct {
 
 type fakeWriter struct {
 	calls []replacedFacts
+	// err makes every write fail. Used by the B1 pin to drive an exhaustion
+	// through the REAL writer path, so the "wrote nothing" assertions stay
+	// reachable instead of vacuous.
+	err error
 }
 
 func (f *fakeWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, _ []string) error {
 	f.calls = append(f.calls, replacedFacts{entityID: entityID, add: add})
-	return nil
+	return f.err
 }
 
 func (f *fakeWriter) ReadOwnedPredicates(context.Context, string, string) ([]string, error) {

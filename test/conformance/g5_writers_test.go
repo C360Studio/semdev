@@ -1,10 +1,19 @@
 package conformance
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/conversationchannel"
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/experiment"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/applypatch"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
@@ -69,6 +78,14 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingMessageIDPredicate},
 		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingAuthorPredicate},
 		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingBodyPredicate},
+		// The GATE facts: run.change.approved / run.change.rejected are ONE logical
+		// writer (approval-adapter) realized at TWO code sites — the exact-command
+		// fast-path and the apply consumer — both routed through the shared
+		// stampGateFact (structurally pinned by TestOnlySanctionedGateWriters). These
+		// ties keep the Source const from drifting off what vocab declares
+		// (nl-conversation-intent grp3-review L4 / D11).
+		{"approval-adapter", conversationchannel.ApprovedSource, admission.ApprovedPredicate},
+		{"approval-adapter", conversationchannel.ApprovedSource, admission.RejectedPredicate},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.rejected"},
 		// The route mirror (design R1): check_floors + submit_review both stamp the route.*
@@ -141,5 +158,158 @@ func TestSingleWriterCensusCatchesViolations(t *testing.T) {
 	noWriter := []vocab.Predicate{{Name: "x.y", Capability: "forge-io", IntroducedBy: "m0-walking-skeleton-spine"}}
 	if len(singleWriterViolations(noWriter)) == 0 {
 		t.Error("census passed a writer-less predicate; G5 pin does not fire")
+	}
+}
+
+// isTripleLit reports whether a composite literal constructs a message.Triple
+// (by type name), so the positional-element scan cannot fire on an unrelated
+// slice or map literal that merely mentions a gate predicate.
+func isTripleLit(lit *ast.CompositeLit) bool {
+	switch typ := lit.Type.(type) {
+	case *ast.Ident:
+		return typ.Name == "Triple"
+	case *ast.SelectorExpr:
+		return typ.Sel.Name == "Triple"
+	}
+	return false
+}
+
+// TestOnlySanctionedGateWriters is the D11 gate-writer census
+// (nl-conversation-intent task 5.5, semstreams confirmed-clean requirement).
+//
+// run.change.approved and run.change.rejected are ONE logical writer
+// (approval-adapter) realized at TWO code sites: the exact-command fast-path
+// (releaseGate) and the deterministic apply consumer (handleDispatch). That is the
+// sanctioned "one logical writer, multiple realizing sites" precedent — but it only
+// holds if the sites cannot drift their Source apart, which is exactly what a
+// comment claiming "we both use approval-adapter" fails to guarantee.
+//
+// This pin asserts the sharing STRUCTURALLY within internal/conversationchannel:
+// the sole way either site there writes a gate fact is approvalAdapter.stampGateFact.
+// SCOPE, stated honestly (grp5-review M3/M4): the scan is package-scoped, so it
+// cannot see a gate write introduced in some OTHER package — TestSingleWriterPerPredicate
+// censuses the vocab table rather than code, so that gap is real. It is bounded by
+// the fact that both gate predicates live in the admission core and both writing
+// lanes are in this package by construction; a new writer elsewhere would be a
+// deliberate architectural move, not a drift. Within the package the matcher covers
+// composite-literal keys, field assignments, positional literals, and raw string
+// literals, so the obvious evasions are closed. The complementary SOURCE check
+// catches the remaining shape — a writer that takes its predicate as a parameter
+// and so never names a gate fact — because any such writer must still stamp
+// ApprovedSource to satisfy the vocab census.
+//
+// RESIDUAL GAP, stated precisely rather than papered over: a writer that takes its
+// predicate as a PARAMETER and stamps either a rogue Source OR NO Source at all
+// would evade both checks (a param-named predicate with the sanctioned Source IS
+// caught) —
+// but it would then be writing a gate fact under an unsanctioned Source, which is
+// the plain G5 violation TestSingleWriterPerPredicate's vocab table exists to make
+// reviewable. No static check closes this completely; these two close every shape
+// that could arise from ordinary drift.
+func TestOnlySanctionedGateWriters(t *testing.T) {
+	dir := filepath.Join(repoRoot(t), "internal", "conversationchannel")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+
+	// The ONE sanctioned realization. Any other site building a message.Triple
+	// with a gate predicate is a second writer.
+	const sharedWriter = "stampGateFact"
+	fset := token.NewFileSet()
+	var constructors []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok {
+				return true
+			}
+			// Does this function construct a triple carrying a gate predicate? The
+			// matcher deliberately covers every FORM a gate write can take, because
+			// the first version of this census matched only composite-literal
+			// `Predicate:` keys and let three trivial evasions through
+			// (grp5-review, semstreams M4): a positional literal, a field assignment,
+			// and a differently-named predicate parameter.
+			var buildsGateTriple bool
+			stampsGateSource := func(expr ast.Expr) bool {
+				var buf strings.Builder
+				_ = printer.Fprint(&buf, fset, expr)
+				return strings.Contains(buf.String(), "ApprovedSource")
+			}
+			namesGate := func(expr ast.Expr) bool {
+				var buf strings.Builder
+				_ = printer.Fprint(&buf, fset, expr)
+				v := strings.TrimSpace(buf.String())
+				return strings.Contains(v, "ApprovedPredicate") ||
+					strings.Contains(v, "RejectedPredicate") ||
+					strings.Contains(v, `"run.change.`) // the raw-literal evasion
+			}
+			ast.Inspect(fn, func(inner ast.Node) bool {
+				switch node := inner.(type) {
+				case *ast.KeyValueExpr:
+					// Triple{Predicate: <gate>}
+					if key, ok := node.Key.(*ast.Ident); ok && key.Name == "Predicate" && namesGate(node.Value) {
+						buildsGateTriple = true
+					}
+					// The SOURCE test is what catches a rogue writer that takes its
+					// predicate as a parameter (so it never names a gate fact): any
+					// gate write must still stamp the sanctioned Source to be honoured
+					// by the vocab census, and only the shared writer may do that.
+					if key, ok := node.Key.(*ast.Ident); ok && key.Name == "Source" && stampsGateSource(node.Value) {
+						buildsGateTriple = true
+					}
+				case *ast.AssignStmt:
+					// t.Predicate = <gate>
+					for i, lhs := range node.Lhs {
+						sel, ok := lhs.(*ast.SelectorExpr)
+						if !ok || sel.Sel.Name != "Predicate" || i >= len(node.Rhs) {
+							continue
+						}
+						if namesGate(node.Rhs[i]) {
+							buildsGateTriple = true
+						}
+					}
+				case *ast.CompositeLit:
+					// Triple{subj, <gate>, ...} — a positional literal has no field names,
+					// so any gate-naming element counts. Restricted to TRIPLE-typed
+					// literals: a []string{Approved, Rejected} in a READER (decidedGateFact
+					// checks which fact already landed) names both predicates and writes
+					// nothing.
+					if !isTripleLit(node) {
+						return true
+					}
+					for _, elt := range node.Elts {
+						if _, isKV := elt.(*ast.KeyValueExpr); isKV {
+							continue
+						}
+						if namesGate(elt) {
+							buildsGateTriple = true
+						}
+					}
+				}
+				return true
+			})
+			if buildsGateTriple {
+				constructors = append(constructors, fn.Name.Name)
+			}
+			return true
+		})
+	}
+
+	if len(constructors) == 0 {
+		t.Fatal("found no gate-fact triple construction in internal/conversationchannel — the census would pass vacuously (did stampGateFact move or change shape?)")
+	}
+	for _, name := range constructors {
+		if name != sharedWriter {
+			t.Errorf("function %q constructs a run.change.* gate triple directly — the gate facts are ONE logical writer (G5/D11) and BOTH the exact-command fast-path and the apply consumer must route through %s(); a second construction site is how the two sites silently drift their Source apart", name, sharedWriter)
+		}
 	}
 }

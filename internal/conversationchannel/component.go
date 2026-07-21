@@ -162,6 +162,20 @@ func DefaultPorts() *component.PortConfig {
 			StreamName:  "USER",
 			Required:    false,
 			Description: "The park rules' user.response publishes — posted to the thread via the Channel port.",
+		}, {
+			Name:        "user_notes",
+			Type:        "jetstream",
+			Subject:     UserNoteSubject,
+			StreamName:  "USER",
+			Required:    false,
+			Description: "The classifier fault-note publishes (conversation/05) — posted to the thread via the Channel port. A message only; stamps no fact.",
+		}, {
+			Name:        "apply_dispatch",
+			Type:        "jetstream",
+			Subject:     ApplyDispatchSubject,
+			StreamName:  ApplyStreamName,
+			Required:    false,
+			Description: "The NL intent routing rules' dispatch (conversation/03a+03b) — the deterministic apply consumer that re-authorizes, posts transparency, and releases the change gate.",
 		}},
 		Outputs: []component.PortDefinition{},
 	}
@@ -172,6 +186,7 @@ type Component struct {
 	config   ComponentConfig
 	nats     *natsclient.Client
 	approv   *approvalAdapter
+	apply    *applyConsumer
 	parkpost *parkPoster
 	pollLoop *poller // nil in webhook mode; the pull-first inbound transport in poll mode
 	logger   *slog.Logger
@@ -236,6 +251,21 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		logger: logger,
 	}
 	c.approv = newApprovalAdapter(deps.NATSClient, cfg, checker, deps.Platform, logger)
+	// The deterministic apply consumer (nl-conversation-intent D6). It shares this
+	// component's forge client, checker, and — structurally, via the injected stamp
+	// func — the ONE sanctioned gate writer the exact-command fast-path uses (G5/D11).
+	// A nil channel (no forge token) makes the NL apply lane REFUSE rather than
+	// degrade (grp5-review H2): unlike the park lane, whose post is a courtesy on
+	// top of a durable fact, here the post is the entire visibility guard for a
+	// decision with no harness floor. The exact-command lane still works.
+	c.apply = &applyConsumer{
+		cfg:     cfg,
+		channel: channel,
+		checker: checker,
+		fetcher: admission.NewNATSEntityFetcher(deps.NATSClient),
+		stamp:   c.approv.stampGateFact,
+		logger:  logger,
+	}
 	c.parkpost = &parkPoster{
 		channel: channel,
 		fetcher: admission.NewNATSEntityFetcher(deps.NATSClient),
@@ -378,6 +408,28 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 	if maxDeliver == 0 || maxDeliver == 3 {
 		maxDeliver = 10
 	}
+	maxAckPending := 8
+	// The APPLY lane is deliberately SERIAL (max-ack-pending 1, task 5.1): two
+	// concurrent opposite dispatches for one run would otherwise interleave their
+	// gate-still-open reads. NOTE this serializes the consumer against ITSELF only
+	// — globally, since there is one durable consumer on one exact subject — and is
+	// NOT a substitute for the D7 rule partition: the exact-command fast-path runs
+	// on a different consumer (or the poller goroutine) and can stamp a gate fact
+	// concurrently with an in-flight apply. A run holding BOTH gate facts fires
+	// NEITHER lifecycle rule, which is an unsurfaced stall, not a park.
+	//
+	// The redelivery budget is a CRASH-LOOP backstop, NOT the retry budget:
+	// handleApplyDispatch retries in-process and then NOTIFIES THE HUMAN, leaving
+	// the gate open. It deliberately NEVER parks — a park at the change-approval
+	// gate is unrecoverable (run-lifecycle/02 and /07 both require
+	// run.awaiting.human absent, and nothing in the repo ever removes it), so a
+	// parked run could never be approved or cancelled and even /semdev approve
+	// would die. See apply.go's FAILURE POSTURE block; the opt-out is enforced by
+	// TestApplyLaneIsTheDeliberateNonParkingStation.
+	if port.Subject == ApplyDispatchSubject {
+		maxAckPending = 1
+		maxDeliver = applyMaxDeliverCap
+	}
 	cfg := natsclient.StreamConsumerConfig{
 		StreamName:     streamName,
 		ConsumerName:   ComponentName + "-" + port.Name,
@@ -386,7 +438,7 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 		AckPolicy:      consumerCfg.AckPolicy,
 		MaxDeliver:     maxDeliver,
 		AckWait:        time.Minute,
-		MaxAckPending:  8,
+		MaxAckPending:  maxAckPending,
 		AutoCreate:     false,
 		MessageTimeout: 3 * time.Minute,
 	}
@@ -414,8 +466,12 @@ func (c *Component) handleEvent(ctx context.Context, subject string, payload []b
 	switch {
 	case subject == admission.SubjectComment:
 		return c.approv.handleCommentEvent(ctx, payload)
+	case subject == ApplyDispatchSubject:
+		return c.apply.handleApplyDispatch(ctx, payload)
 	case strings.HasPrefix(subject, "user.response."):
 		return c.parkpost.handleUserResponse(ctx, payload)
+	case strings.HasPrefix(subject, "user.note."):
+		return c.parkpost.handleUserNote(ctx, payload)
 	default:
 		c.logger.Debug("conversation-channel: irrelevant event subject; skipping", slog.String("subject", subject))
 		return nil
