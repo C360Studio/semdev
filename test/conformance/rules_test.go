@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/vocab"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 )
@@ -257,16 +259,16 @@ func TestChangeApprovalGateOrdering(t *testing.T) {
 	if c, ok := offer.condition("openspec.change.validated"); !ok || c.Operator != "ne" {
 		t.Error("offer-approval must require openspec.validated present (ne \"\") — validate-before-approval ordering (3.7)")
 	}
-	if c, ok := offer.condition("run.change.approved"); !ok || c.Operator != "length_eq" {
-		t.Error("offer-approval must require run.change_approved absent (length_eq 0)")
+	if c, ok := offer.condition("run.change.decision"); !ok || c.Operator != "length_eq" {
+		t.Error("offer-approval must require the gate UNDECIDED (run.change.decision length_eq 0)")
 	}
 
 	resume, ok := rules["run_resume_after_change_approval"]
 	if !ok {
 		t.Fatal("missing run_resume_after_change_approval rule")
 	}
-	if c, ok := resume.condition("run.change.approved"); !ok || c.Operator != "eq" || c.Value != "true" {
-		t.Error("resume must require run.change_approved == true — the gate holds until approval (3.5)")
+	if c, ok := resume.condition("run.change.decision"); !ok || c.Operator != "eq" || c.Value != "approve" {
+		t.Error("resume must require run.change.decision == \"approve\" — the gate holds until approval (3.5)")
 	}
 }
 
@@ -378,8 +380,8 @@ func TestProjectionSpawnIsSelfExtinguishing(t *testing.T) {
 	}
 	// It fires on approval and needs the run anchor (dev-from-task/01) so the run is
 	// the dispatch entity_id — assert both so the trigger is grounded.
-	if c, ok := proj.condition("run.change.approved"); !ok || c.Operator != "eq" || c.Value != "true" {
-		t.Error("projection dispatch must fire on run.change_approved == true (the spec trigger: approval projects task.spec)")
+	if c, ok := proj.condition("run.change.decision"); !ok || c.Operator != "eq" || c.Value != "approve" {
+		t.Error("projection dispatch must fire on run.change.decision == \"approve\" (the spec trigger: approval projects task.spec)")
 	}
 	if c, ok := proj.condition("agent.loop.run"); !ok || c.Operator != "ne" {
 		t.Error("projection dispatch must require the agent.run anchor (ne \"\") so the run resolves as the dispatch entity_id")
@@ -445,8 +447,8 @@ func TestSandboxProvisionIsSelfExtinguishing(t *testing.T) {
 	if prov.forcesFunction("provision_sandbox") {
 		t.Error("provision spawn must NOT force the provision_sandbox tool — provisioning is a publish-triggered component now (R6)")
 	}
-	if c, ok := prov.condition("run.change.approved"); !ok || c.Operator != "eq" || c.Value != "true" {
-		t.Error("provision spawn must fire on run.change_approved == true (provision the approved run's sandbox)")
+	if c, ok := prov.condition("run.change.decision"); !ok || c.Operator != "eq" || c.Value != "approve" {
+		t.Error("provision spawn must fire on run.change.decision == \"approve\" (provision the approved run's sandbox)")
 	}
 	if c, ok := prov.condition("agent.loop.run"); !ok || c.Operator != "ne" {
 		t.Error("provision spawn must require the agent.run anchor (ne \"\") — it identifies the run entity the dispatch fires on")
@@ -1792,19 +1794,21 @@ func TestRejectCancelsGatedRunOnly(t *testing.T) {
 
 	cancel, ok := rules["run_cancel_after_change_rejection"]
 	if !ok {
-		t.Fatal("missing run_cancel_after_change_rejection rule — the NL reject lane stamps run.change.rejected with nothing to act on it (the run stays gated forever)")
+		t.Fatal("missing run_cancel_after_change_rejection rule — the NL reject lane records a reject decision with nothing to act on it (the run stays gated forever)")
 	}
-	if c, ok := cancel.condition("run.change.rejected"); !ok || c.Operator != "eq" || c.Value != "true" {
-		t.Error("cancel must require run.change.rejected == true")
+	if c, ok := cancel.condition("run.change.decision"); !ok || c.Operator != "eq" || c.Value != "reject" {
+		t.Error("cancel must require run.change.decision == \"reject\"")
 	}
 	// H1 — the phase guard.
 	if c, ok := cancel.condition("agent.run.phase"); !ok || c.Operator != "eq" || c.Value != "awaiting_approval" {
 		t.Error("cancel MUST be phase-guarded to awaiting_approval (H1) — the legal executing→cancelled edge would otherwise kill an approved, executing run")
 	}
-	// M2 — this half of the partition.
-	if c, ok := cancel.condition("run.change.approved"); !ok || c.Operator != "length_eq" {
-		t.Error("cancel MUST require run.change.approved ABSENT (length_eq 0) — the M2 cell-space partition; a both-facts run must transition to NEITHER")
-	}
+	// D13 (group 8): the cell-space partition the two-boolean design needed is GONE,
+	// because a single-valued decision cannot contradict itself. The old cross-guards
+	// (cancel requiring approved-absent, resume requiring rejected-absent) existed only
+	// to stop a both-facts run from both resuming AND cancelling; a run can no longer
+	// hold both. Mutual exclusion is now asserted where it lives — on the VALUE.
+
 	var cancelled bool
 	for _, a := range cancel.OnEnter {
 		if a.Type == "lifecycle_transition" && a.Phase == "cancelled" {
@@ -1815,13 +1819,147 @@ func TestRejectCancelsGatedRunOnly(t *testing.T) {
 		t.Error("cancel must fire the rule-owned awaiting_approval → cancelled transition (G2: no Go fires it)")
 	}
 
-	// M2 — the OTHER half. The pre-existing resume rule must now also exclude a
-	// rejected run, or a both-facts run resumes as well as cancels.
+	// The OTHER half of the exclusion: resume keys on the OPPOSITE value of the SAME
+	// single-valued fact, so exactly one of the two rules can ever match a given run.
 	resume, ok := rules["run_resume_after_change_approval"]
 	if !ok {
 		t.Fatal("missing run_resume_after_change_approval rule")
 	}
-	if c, ok := resume.condition("run.change.rejected"); !ok || c.Operator != "length_eq" {
-		t.Error("resume MUST require run.change.rejected ABSENT (length_eq 0) — the M2 partition's other half; without it a run carrying BOTH gate facts both resumes and cancels")
+	rc, rok := resume.condition("run.change.decision")
+	cc, cok := cancel.condition("run.change.decision")
+	if !rok || !cok || rc.Value == cc.Value {
+		t.Errorf("resume and cancel must key on OPPOSITE values of the one decision fact "+
+			"(resume=%v cancel=%v) — that is what makes them mutually exclusive by construction (D13)", rc.Value, cc.Value)
 	}
+}
+
+// TestNoRuleReadsARetiredGateFact is the group-8 D13 half-migration guard.
+//
+// run.change.approved and run.change.rejected were RETIRED in favour of the single-valued
+// run.change.decision. A rule left behind reading a retired predicate does not error, does
+// not fail to load, and does not show up in any other census — it simply NEVER FIRES,
+// because nothing writes that predicate any more. That is the silently-dead-rule shape this
+// repo has been bitten by before (the inert transient routes), and for a rule on the
+// approval gate it means a run that can never resume or never cancel.
+//
+// The scan is over the RAW file bytes rather than parsed conditions, so a retired
+// predicate hiding in an action, a substitution token, or a prompt is caught too. Prose
+// mentions in `description` are legitimate — the D13 rationale has to be able to name what
+// it replaced — so descriptions are stripped before scanning.
+func TestNoRuleReadsARetiredGateFact(t *testing.T) {
+	retired := []string{"run.change.approved", "run.change.rejected"}
+	root := repoRoot(t)
+	rulesDir := filepath.Join(root, "configs", "rules")
+
+	err := filepath.WalkDir(rulesDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		var doc map[string]any
+		if jsonErr := json.Unmarshal(raw, &doc); jsonErr != nil {
+			return fmt.Errorf("%s: %w", path, jsonErr)
+		}
+		// Descriptions may name the retired facts (the D13 rationale); everything
+		// else may not.
+		delete(doc, "description")
+		scanned, marshalErr := json.Marshal(doc)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		for _, pred := range retired {
+			if strings.Contains(string(scanned), pred) {
+				rel, _ := filepath.Rel(root, path)
+				t.Errorf("%s references the RETIRED gate fact %q outside its description — "+
+					"nothing writes it any more, so this rule can never fire (D13: use run.change.decision "+
+					"with value %q or %q)", rel, pred, "approve", "reject")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk rules: %v", err)
+	}
+}
+
+// TestDecisionConditionsUseTheLegalEnum is the D13 companion census — and the half the
+// retired-NAME census structurally cannot see.
+//
+// D13 replaced a predicate whose domain was one universally-familiar literal ("true") with
+// a two-word English enum. Nothing else in the repo checks that a rule keying on
+// run.change.decision uses a value the writer can ever produce. A typo does not fail to
+// load, does not error, and does not trip any other pin — the rule simply never fires.
+//
+// This is not hypothetical: mutating dev-from-task/02-rewake-coordinator-dev.json from
+// "approve" to "approved" left the ENTIRE conformance suite green, and "approved" is a live
+// value elsewhere in this repo (dev-from-task/08a keys on review.verdict.value == "approved").
+// That rule is the dev-loop kickoff, so the run would approve, resume, provision and project
+// tasks — then never rewake the coordinator. Executing forever, no park, no surface.
+//
+// The legal shapes are exactly two: an absence guard (length_eq 0) or an equality against a
+// value the single sanctioned writer can actually stamp.
+func TestDecisionConditionsUseTheLegalEnum(t *testing.T) {
+	legal := map[string]bool{admission.DecisionApprove: true, admission.DecisionReject: true}
+	root := repoRoot(t)
+	checked := 0
+
+	err := filepath.WalkDir(filepath.Join(root, "configs", "rules"), func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		var doc struct {
+			Conditions []struct {
+				Field    string `json:"field"`
+				Operator string `json:"operator"`
+				Value    any    `json:"value"`
+			} `json:"conditions"`
+		}
+		if jsonErr := json.Unmarshal(raw, &doc); jsonErr != nil {
+			return fmt.Errorf("%s: %w", path, jsonErr)
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, c := range doc.Conditions {
+			if c.Field != admission.DecisionPredicate {
+				continue
+			}
+			checked++
+			switch c.Operator {
+			case "length_eq", "length_gte", "length_lte":
+				// An absence/length guard does not name a value.
+			case "eq", "ne":
+				s, ok := c.Value.(string)
+				if !ok || !legal[s] {
+					t.Errorf("%s: condition on %s uses value %#v, which the sanctioned writer "+
+						"NEVER stamps — this rule can never fire. Legal values are %q and %q.",
+						rel, admission.DecisionPredicate, c.Value, admission.DecisionApprove, admission.DecisionReject)
+				}
+			default:
+				t.Errorf("%s: condition on %s uses operator %q — a single-valued enum fact "+
+					"supports only equality and length guards", rel, admission.DecisionPredicate, c.Operator)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk rules: %v", err)
+	}
+	// Vacuity guard: this census is worthless if it silently matches nothing.
+	if checked == 0 {
+		t.Fatal("census matched ZERO conditions on run.change.decision — the scan is broken, " +
+			"not the ruleset (the gate rules all key on it)")
+	}
+	t.Logf("checked %d run.change.decision conditions", checked)
 }

@@ -171,9 +171,15 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   comment posts, `run.change.rejected` lands, the run reaches `cancelled`.
 - [x] 6.3 RED: `TestConservativeNoneDoesNotApprove` — an ambiguous authorized message
   ("thanks!", 👍) classifies `none`; the run stays gated, no gate fact.
-- [x] 6.4 RED: `TestConflictingIntentsResolveToOneTerminal` — two authorized NL messages, one
+- [ ] 6.4 RED: `TestConflictingIntentsResolveToOneTerminal` — two authorized NL messages, one
   approve + one reject, both classified; the run reaches EXACTLY ONE of resumed-or-cancelled
   and carries EXACTLY ONE gate fact, never both (the H4 gate-still-open guard end-to-end).
+  **UNTICKED (external review #10, CONFIRMED — ours).** The shipped test waits for
+  `executing` before posting the second message, so the phase gate DISCARDS it: only ONE
+  classification happens, the second mock fixture is never consumed, and the journey has no
+  `requireModelTurns` assertion to expose the dead fixture. It was ticked against a contract
+  it does not meet. Reworked in 8.4 per design D15 (a Post-barrier so both classifications
+  reach an OPEN gate); the current test is kept and renamed for the behavior it really pins.
 - [x] 6.5 The existing exact-command approval journeys (webhook + poll) pass byte-for-byte —
   no journey rewired; the NL journeys are ADDED.
 - [x] 6.6a WIRE the NL lane into `configs/semdev-live-gemini.json` — DONE: the five (six
@@ -192,7 +198,111 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   pins the mock config only, and an unknown capability silently falls back to
   `defaults.model`, so the live lane stays dead-or-misrouted until this lands).
 
+## 8. Post-review corrections — RUNS BEFORE GROUP 7 (design D12–D15)
+
+A 2026-07-21 external review filed 16 findings. Each was verified against the code before any
+was acted on: 3 are REFUTED (G5 "one logical writer" is the documented pattern; the station's
+`context.Background` rooting is deliberate), 3 are pre-existing openly-tracked deferrals (R8,
+task 10.4) that must NOT be reopened here, and the SECURITY (token on `git push` argv,
+`git add -A` escaping the task contract, devcontainer `..` traversal), PAID-RUN readiness,
+station-panic, and evidence-ledger findings belong to their OWN changes — they are NOT in
+scope for this one. The four below are defects in what THIS change built. Archiving without
+them would sync a spec asserting behavior the code lacks (G10).
+
+- [ ] 8.1 RED-first: the **gate-open watermark** (D12). **(b) LANDED** with 8.2 (they share
+  the resolver): deterministic active-run resolution + `RunState`, pinned by
+  `TestResolverPrefersTheActiveGatedRun` and mutation-verified. **(a) the watermark itself is
+  NOT done** — and note the sequencing hazard the review named: (b) alone makes a historical
+  comment deterministically target the FRESH gated run, so (a) must land before any deploy. `ResolveRunByRef` additionally
+  returns `gateOpenedAt` (the `agent.run.phase` triple's `Timestamp` while the phase is
+  `awaiting_approval`) and resolves DETERMINISTICALLY to the active run (awaiting-approval
+  preferred, newest gate-open next, entity ID as a stable tiebreak) instead of first-match-in-
+  page-order. BOTH inbound paths — the NL bridge AND the exact-command fast-path — require
+  `msg.At > gateOpenedAt`; an at-or-before message is definitively dropped (acked, counted,
+  logged LOUD), never redelivered. A run at the gate with NO usable phase timestamp FAILS
+  CLOSED (refuse + loud log), never honored. Pins: historical NL approval on a second run over
+  a reused issue; historical exact command likewise; a poller restart re-reading a thread from
+  cursor zero; the missing-watermark fail-closed path; and a fresh message still approving
+  normally. NOTE the accepted consequence: PRE-APPROVAL (an approve typed before the proposal
+  exists) no longer releases the gate — assert that explicitly rather than letting it regress
+  silently.
+
+- [x] 8.2 RED-first: **ONE single-valued decision fact** (D13). Retire
+  `run.change.approved` + `run.change.rejected`; introduce canonical `run.change.decision` ∈
+  {`approve`,`reject`} (writer `approval-adapter`), registered in `internal/vocab` BEFORE any
+  writer (beta.150 fails closed). `stampDecision` is the ONE shared writer: it reads the
+  current decision and REFUSES to change a decided run (approve-on-rejected and
+  reject-on-approved are both no-ops — H1 generalized symmetrically), same-value replay stays
+  idempotent. Migrate in ONE commit: `run-lifecycle/01,02,07`, `conversation/01,02,03a,03b`,
+  `dev-from-task/01,02,03`, `sandbox/01`, the resolver's `approved bool` getter, `approval.go`,
+  `apply.go`, the D11 census, the journeys' stand-in writes. Pins: the previously-wedging
+  sequence (`/semdev reject` then `/semdev approve` on a gated run) now yields ONE decision and
+  ONE terminal; a decision arriving after the run left `awaiting_approval` is inert (phase
+  guard); `TestEveryRuleFileIsBootstrapped` + the rule-condition censuses catch a
+  half-migrated predicate.
+
+- [ ] 8.3 RED-first: the **classifier spend bound** (D14). The spawn rule `add_triple`s the
+  dispatched message id onto the append-set `conversation.classifier.attempted` (writer
+  `conversation-spawn-rule`, vocab-registered) in the same action set that arms the marker, and
+  gains `conversation.classifier.attempted length_lte 2` (`OpLengthLte`, beta.153/#568) for
+  N=3. Counting on the SPAWN side makes faulted, truncated, refused, and cap-exhausted
+  attempts consume budget exactly like successful ones. The terminal-release rule clears
+  pending + the marker but NEVER the ledger. A new rule announces exhaustion on the
+  `user.note.>` lane (the exact-command escape hatch) carrying its OWN self-extinguishing
+  marker — the grp6 replay lesson: a human-visible post with no marker re-posts on RULE_STATE
+  loss. Pins: N+2 authorized messages produce EXACTLY N classifier dispatches
+  (`mock.RequestCount()` asserted at a DETERMINISTIC point, not an end-of-journey total); the
+  escape-hatch note posts exactly once; an exact command still releases the gate after the
+  budget is spent.
+
+- [ ] 8.4 RED-first: the **reworked conflict journey** (D15) — re-ticks 6.4. The forge double
+  BLOCKS in `Post` for the first apply dispatch (the consumer Posts before it stamps, D6/M6),
+  the second opposite message is posted + bridged + classified against a still-UNDECIDED gate,
+  then the Post is released. Assert: BOTH ids in the `conversation.intent.classified` ledger
+  (both fixtures consumed, proven by `mock.RequestCount()`), EXACTLY ONE `run.change.decision`
+  whose value matches the terminal the run reaches, and the losing dispatch refused by the
+  gate-still-open guard. Keep the existing test, renamed
+  `TestLateIntentAfterGateClosesIsIgnored` — the real behavior it pins. NO disjunctive
+  assertions (the grp6 lesson: "some reply" is not a guard).
+
+- [x] 8.5a The `run.change.decision` migration touches THREE canonical capability specs,
+  not one. Deltas for `run-lifecycle` (the gate requirement: single-valued, first-writer-
+  wins, phase-guarded commands) and `dev-from-task` (the projection trigger) ship WITH this
+  change — archiving with only the `conversation-channel` delta would leave two canonical
+  specs asserting a predicate the code no longer has, which is the exact failure group 8
+  exists to prevent, aimed at a different capability. 7.4's "still 12 caps" holds: three
+  capabilities MODIFIED, none added.
+
+- [ ] 8.5 Cheap truth fixes folded in: `configs/semdev-live-gemini.json:304` still says the
+  conversation pack "is not yet wired into this live config (task 6.6)" — contradicted by the
+  same file since 6.6a landed; `internal/conversationchannel/apply.go:66` says "eight park
+  rules" when there are NINE.
+
+- [ ] 8.6 Adversarial review — BOTH reviewers, zero blocking/high, all findings applied.
+  ROUND 1 (on the 8.2 diff) is DONE and folded; a further round is still required once
+  8.1a/8.3/8.4 land. What round 1 found, so it is not re-derived: **BLOCKING** — migrating
+  `run-lifecycle/01`'s guard to `decision length_eq 0` was NOT meaning-preserving (the old
+  guard was blind to rejection), so a pre-gate `/semdev reject` through the UNGUARDED
+  `releaseGate` made the gate unreachable and the run unrecoverable — one wedge closed, a
+  worse one opened one rule over. Fixed by phase-guarding `releaseGate` (which is also D12's
+  uniform rule) + `TestExactCommandOnUngatedRunIsIgnored`. **HIGH** — a silent refusal let the
+  apply consumer announce a decision it did not take (its guard-1 read and its write are
+  separated by THREE external round-trips, not the "sub-millisecond" the design claimed);
+  `stampDecision` now returns what stands and the consumer posts a correction. **HIGH** — the
+  full-page scan discarded a match found before page exhaustion, which would have silently
+  killed `/semdev approve` on every run past ~16k entities. **MEDIUM** — the retired-NAME
+  census could not see a wrong VALUE; a planted `"approved"` typo passed the whole suite
+  green, so `TestDecisionConditionsUseTheLegalEnum` was added and verified against it.
+  Focus: the watermark's fail-closed path and clock-skew posture, the decision-fact migration
+  completeness (no rule left reading a retired predicate), the spend bound's honesty (does it
+  count what it claims to count), and whether the reworked conflict journey can go vacuous-green.
+
 ## 7. Spec + docs + verification + review + archive
+
+**RUNS LAST — after group 8.** Archiving before the group-8 corrections would sync a spec
+asserting behavior the code does not have (G10). 7.1's spec delta must describe
+`run.change.decision` (D13), the watermark (D12), and the spend bound (D14) — not the retired
+two-fact partition.
 
 - [ ] 7.1 The `conversation-channel` delta matches the code. Docs: the NL-intent gate in the
   runbook (approve in prose; the exact command still works; a rejection cancels a GATED run;

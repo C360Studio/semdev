@@ -101,11 +101,18 @@ var Predicates = []Predicate{
 	// is invisible to the loop's conditions, so the marker is the extinguisher;
 	// ref-first ordering per the station-failure-parks park-first lesson).
 	{"run.issue.stamped", "issue-ref-rule", "forge-io", forgeIO},
-	// run.change.approved's WRITER stays approval-adapter (read by run-lifecycle/02);
-	// its CAPABILITY tag moved forge-io → conversation-channel to match where its
-	// production is now spec'd — the conversation seam owns the human-approval lane
-	// (conversation-channel-seam D5, G10 census coherence). A paper cap-tag move.
-	{"run.change.approved", "approval-adapter", "conversation-channel", m0},
+	// run.change.decision is the SINGLE-VALUED change-approval gate fact ("approve" |
+	// "reject") — the resume rule (run-lifecycle/02) matches approve, the phase-guarded
+	// cancel rule (run-lifecycle/07) matches reject. It REPLACES the former boolean pair
+	// run.change.approved / run.change.rejected (nl-conversation-intent D13, group 8):
+	// two independent booleans let one run carry BOTH, after which the mutually-exclusive
+	// lifecycle rules fired NEITHER and the run was wedged at the gate permanently. A
+	// single-valued fact makes that state UNREPRESENTABLE under replace-by-predicate.
+	// ONE logical writer (approval-adapter) across two realizing sites — the exact-command
+	// fast-path and the apply consumer — both routed through approvalAdapter.stampDecision
+	// and censused (G5, D11). Its capability tag is conversation-channel: the conversation
+	// seam owns the human-approval lane (conversation-channel-seam D5, G10).
+	{"run.change.decision", "approval-adapter", "conversation-channel", nlIntent},
 	// experiment.run.condition is the A/B EVIDENCE LABEL (integrate-semsource-ab-harness, D3):
 	// stamped once on the run at mint by the launch path (writer experiment-intake, G5) from
 	// the operator's boot-config condition. NEVER a routing input — a whole-document conformance
@@ -296,9 +303,8 @@ var Predicates = []Predicate{
 	// apply consumer re-Authorizes THIS author) and .reason (the model's cited words, G7).
 	// conversation.intent.classified is the MULTI-VALUED (append-set) ledger of message ids
 	// already classified — the dedup key that stops a poll re-read / webhook redelivery
-	// re-classifying. run.change.rejected is the reject gate fact (writer approval-adapter —
-	// the SAME single logical writer as run.change.approved, two code sites one Source,
-	// censused); a phase-guarded run-lifecycle rule fires awaiting_approval→cancelled on it.
+	// re-classifying. The gate DECISION itself is run.change.decision (declared above with
+	// the m0 predicates it replaces).
 	{"conversation.pending.message-id", "conversation-adapter", "conversation-channel", nlIntent},
 	{"conversation.pending.author", "conversation-adapter", "conversation-channel", nlIntent},
 	{"conversation.pending.body", "conversation-adapter", "conversation-channel", nlIntent},
@@ -328,7 +334,6 @@ var Predicates = []Predicate{
 	// that returns a ToolResult error does not fail its loop, so a classifier that
 	// refused to classify still terminates outcome=success (observed, not assumed).
 	{"conversation.classifier.recorded", "conversation-classifier", "conversation-channel", nlIntent},
-	{"run.change.rejected", "approval-adapter", "conversation-channel", nlIntent},
 }
 
 // frameworkAdjacent are canonical predicates semdev READS or WRITES that the framework

@@ -12,9 +12,9 @@ import (
 // The G5 single-writer PIVOT (conversation-channel-seam D5): human.opt.signal is
 // written by the channel-neutral `conversation-adapter`, NOT the GitHub-specific
 // `comment-adapter` — so N channels stay G5-legal (one writer, impls behind it).
-// Its capability home, and run.change.approved's, move from `forge-io` to
+// Its capability home, and run.change.decision's, move from `forge-io` to
 // `conversation-channel` to match where their production is now spec'd (G10 census
-// coherence). run.change.approved's WRITER stays `approval-adapter` (read by
+// coherence). run.change.decision's WRITER stays `approval-adapter` (read by
 // run-lifecycle/02 — a paper cap-tag move, not a writer change). This pin flips red
 // until the internal/vocab reassignment lands, and guards against a re-coupling.
 func TestConversationChannelVocabReassignment(t *testing.T) {
@@ -34,15 +34,15 @@ func TestConversationChannelVocabReassignment(t *testing.T) {
 		t.Errorf("human.opt.signal capability = %q, want conversation-channel", optSignal.Capability)
 	}
 
-	approved, ok := byName["run.change.approved"]
+	approved, ok := byName["run.change.decision"]
 	if !ok {
-		t.Fatal("run.change.approved absent from the vocab census")
+		t.Fatal("run.change.decision absent from the vocab census")
 	}
 	if approved.Capability != "conversation-channel" {
-		t.Errorf("run.change.approved capability = %q, want conversation-channel (spec'd home moved)", approved.Capability)
+		t.Errorf("run.change.decision capability = %q, want conversation-channel (spec'd home moved)", approved.Capability)
 	}
 	if approved.Writer != "approval-adapter" {
-		t.Errorf("run.change.approved writer = %q, want approval-adapter UNCHANGED (read by run-lifecycle/02)", approved.Writer)
+		t.Errorf("run.change.decision writer = %q, want approval-adapter UNCHANGED (read by run-lifecycle/02)", approved.Writer)
 	}
 }
 

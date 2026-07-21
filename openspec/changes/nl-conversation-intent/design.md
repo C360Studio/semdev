@@ -227,6 +227,13 @@ an UNSURFACED STALL, not a park: nothing stamps `run.awaiting.human`, nothing po
 no operator surface flags it. Parking it is NOT available as a fix — a park at this gate
 is unrecoverable (grp5-review B1) — so it is named in Risks rather than papered over. Pinned by the `TestConflictingIntentsResolveToOneTerminal` journey (6.4).
 
+> **SUPERSEDED BY D13 (group 8).** The two-fact partition above, and the "unsurfaced stall"
+> it accepts, are retired. `run.change.approved` / `run.change.rejected` are replaced by the
+> single-valued `run.change.decision`, so the both-facts cell is UNREPRESENTABLE and no
+> partition is needed: the resume rule matches `decision eq "approve"`, the cancel rule
+> `decision eq "reject"`. The PHASE GUARD described above stays load-bearing and unchanged
+> (H1). Journey 6.4 is unticked and reworked per D15 — it did not meet its stated contract.
+
 ### D8 — the false-approval safety posture (four pre-landing guards + the downstream backstop)
 An LLM must never manufacture an approval a human did not give. Guards, none the LLM's
 word alone:
@@ -286,12 +293,20 @@ witness that a classification landed, writer `conversation-classifier`; the faul
 on its ABSENCE, see D9), and `run.change.rejected` (writer `approval-adapter`). `run.change.approved`
 and `run.change.rejected` are written from TWO code sites (the fast-path inline + the apply
 consumer) under the ONE Source `approval-adapter` — the sanctioned "one logical writer,
+
 multiple realizing sites" precedent (`g5_writers_test.go`, the route-mirror) — which
 REQUIRES both sites call one shared writer method AND a sanctioned-writer census pin so the
 Source cannot drift (D11). `conversation-adapter` becomes a LIVE Source for the first time
 (no live emitter today); the Source split from `conversation-classifier` (same struct family)
 is censused. The classifier READS `agent.run.phase`/`run.issue.ref`; no Go fires a
 transition (G2).
+
+> **AMENDED BY D13/D14 (group 8).** `run.change.approved` and `run.change.rejected` are
+> RETIRED for the single-valued `run.change.decision` (writer `approval-adapter`). The
+> one-logical-writer / two-realizing-sites shape and its census are unchanged — they now
+> census `run.change.decision`. D14 adds `conversation.classifier.attempted` (the append-set
+> spend ledger, writer `conversation-spawn-rule`). Both are registered BEFORE any writer, per
+> the same beta.150 fail-closed rule that governs the group-1 registrations.
 
 ### D11 — the shared-writer census (G5, semstreams confirmed-clean requirement)
 A conformance pin (mirroring `TestOnlySanctionedParkWriters`) asserts the ONLY sources of
@@ -389,6 +404,179 @@ inert on the normal path — the change-approval gate is PHASE-based and stamps 
 marker — and bites only when an `ask_human` park and a rejection coincide, where holding
 still is the correct conservative outcome.
 
+## Group 8 — post-review corrections (four confirmed blockers)
+
+A 2026-07-21 external review filed 16 findings; each was verified against the code before
+any was acted on (3 were REFUTED, 3 were pre-existing tracked deferrals, and the security /
+paid-run / station findings belong to their OWN changes). FOUR are defects in what THIS
+change built, so they are corrected HERE — archiving without them would sync a spec
+asserting behavior the code does not have (G10). D12–D15 supersede the parts of D5–D11 they
+name; the superseded prose is left in place with a correction pointer, matching how D9
+records the group-6 correction.
+
+### D12 — the gate-open WATERMARK: a message can only decide the gate it was written for
+**The defect.** The poll cursor is an in-memory `map[ThreadRef]Cursor` built EMPTY
+(`poller.go:44,55`), so any restart re-reads a thread from the top. NL dedup reads the
+`conversation.intent.classified` ledger ON THE RUN, and the exact path's `alreadyApproved`
+is per-run too — so a SECOND run on a reused issue starts with an empty ledger, and a
+months-old "ship it" (or an old `/semdev approve`) releases a gate on a proposal the human
+never saw. `resolver.go` already conceded the enabling clause: *"First match in page order.
+Two runs sharing one ref is reachable."*
+
+**The fix — two halves.**
+
+**(a) A per-run watermark.** `ResolveRunByRef` additionally returns `gateOpenedAt` — the
+`Timestamp` of the run's `agent.run.phase` triple while that phase is `awaiting_approval`
+(replace-by-predicate makes it exactly the moment the gate opened, and it correctly ADVANCES
+on the legal `executing → awaiting_approval` re-entry). Both inbound paths then require
+`msg.At > gateOpenedAt`. A message at or before the watermark is DEFINITIVELY dropped
+(acked, counted, logged) — never redelivered, because redelivery cannot make it newer.
+
+**It applies to the EXACT COMMAND too (decided with the operator).** A stale
+`/semdev approve` on a reused issue is exactly as dangerous as a stale "ship it", and one
+uniform rule is the only one that can be explained honestly on a thread. The consequence is
+accepted and named: **PRE-APPROVAL STOPS WORKING** — an approve typed before the proposal
+exists no longer queues up to release the gate later. Nothing pins pre-approval as a
+contract today (it exists only as the defensive "the approval may beat the mint;
+redelivering" path), so this breaks no proven behavior; it does change the operator flow, so
+the runbook states it and the exact-command drop is LOUD (a log + counter), never silent.
+A courtesy reply on the thread for a dropped early command is a named follow-up, deliberately
+not built here (it needs its own dedup state or it becomes chatter spam).
+
+**Fail CLOSED on a missing watermark.** If the run is at `awaiting_approval` but carries no
+usable phase timestamp, semdev cannot establish when the gate opened and therefore cannot
+tell a fresh message from a replayed one. That is an error, not a pass: the message is
+refused with a loud log rather than honored. (The sandbox precedent — an absent guard fails
+closed, never open.)
+
+**(b) Deterministic resolution to the ACTIVE run.** `ResolveRunByRef`'s first-match-in-page-
+order is replaced by an explicit preference: a run at `awaiting_approval` wins over one that
+is not; among several, the one whose gate opened most recently wins; ties break on entity ID
+so the result is stable across pages and calls. This removes the "two runs sharing one ref"
+concession rather than restating it.
+
+### D13 — ONE single-valued decision fact (the both-facts wedge becomes unrepresentable)
+**The defect.** `releaseGate` checks ONLY `alreadyApproved` (which reads
+`run.change.approved == "true"`) and NEVER reads `run.change.rejected`. So an authorized
+`/semdev approve` on a REJECTED run stamps the opposite fact and both coexist — after which
+the D7 partition means NEITHER lifecycle rule fires. D7 and the Risks section documented that
+cell as "an unsurfaced stall" and left it. **That was the wrong call and is reversed here:**
+a permanently wedged run with a transparency comment promising a decision that never took
+effect is not an acceptable terminal, and "it is narrow" is not a safety argument.
+
+**The fix (decided with the operator).** `run.change.approved` and `run.change.rejected` are
+RETIRED and replaced by ONE single-valued canonical predicate:
+
+    run.change.decision ∈ {"approve", "reject"}      writer: approval-adapter
+
+Because the graph is replace-by-predicate on a single-valued fact, **a contradictory state
+cannot be represented at all.** The cell space collapses from four cells (neither / approved /
+rejected / BOTH) to three, and the wedge cell is gone by construction rather than by a
+partition both rules must remember to carry. `run-lifecycle/02` resumes on
+`decision eq "approve"`, `run-lifecycle/07` cancels on `decision eq "reject"`, and every
+`both-facts-absent` guard in the routing rules (D6) becomes the simpler `decision length_eq 0`.
+
+**Layered, so the residual race degrades to a valid decision instead of a stall.**
+1. `stampDecision` (the ONE shared writer, D11) READS the current decision first and REFUSES
+   to change a decided run — approve-on-rejected and reject-on-approved are both no-ops, which
+   generalizes H1 (an approval is irreversible) symmetrically to rejection (a cancelled run is
+   not resurrected). Same-value replay stays idempotent.
+2. The read-then-write in (1) has no durable CAS, so a true interleave can still land the
+   second write. It cannot wedge: the fact is single-valued, so the loser is OVERWRITTEN and
+   the run holds ONE valid decision.
+3. The lifecycle rules stay PHASE-GUARDED (D7/H1), so a decision that flips AFTER the run has
+   already left `awaiting_approval` is inert — it cannot cancel work that is executing.
+
+The honest residual is therefore "when two opposite authorized decisions interleave, which
+of the two valid decisions wins is not defined" — a real but benign nondeterminism between
+two things a human actually asked for, replacing a permanent unrecoverable wedge.
+
+**The window is NOT uniformly small, and an earlier draft of this decision said it was.**
+For two exact commands it is genuinely sub-millisecond. For the APPLY CONSUMER it is not:
+its gate-still-open read (guard 1) and its write (guard 4) are separated by up to three
+external round-trips — `ResolveThread`, `Authorize`, and the transparency `Post` — so the
+window is seconds wide. And because the Post comes FIRST (deliberately: announce before
+effect), a decision that loses that race has already been announced to the human. The
+writer therefore RETURNS the decision that stands, and the consumer POSTS A CORRECTION
+naming both sides rather than logging a success that did not happen (G7). A refusal that
+returns `nil` is indistinguishable from a write, which is how "announced an approval,
+delivered a cancellation, said nothing" becomes reachable.
+
+**A decision recorded BEFORE the gate opens is a wedge, so the exact command is
+phase-guarded.** `run-lifecycle/01` is the ONLY rule that moves a run INTO
+`awaiting_approval`, and it requires the gate undecided. So a `/semdev reject` typed while
+the run was still `executing` would make the gate unreachable — and with it unreachable the
+phase-guarded cancel rule can never fire either, while first-writer-wins refuses the
+recovering approve. `releaseGate` therefore refuses any exact command on a run not at
+`awaiting_approval`. This is the same uniform rule D12 already chose (pre-approval does not
+decide the gate), enforced in one place.
+
+**Blast radius (accepted).** ~39 non-test sites: `internal/vocab`, the resolver's `approved
+bool` getter, `approval.go` + `apply.go`, 8 rule files (`run-lifecycle/01,02,07`,
+`conversation/01,02,03a,03b`, `dev-from-task/01,02,03`, `sandbox/01`), the conformance
+censuses, the journeys' stand-in writes, and the three synced specs. Mechanical, but it must
+land as ONE commit — a half-migrated predicate is a silently dead rule.
+
+### D14 — a per-run classifier SPEND BOUND (the marker serializes; it does not bound)
+**The defect.** `conversation/02-spawn-classifier.json` gates on phase + pending + anchor +
+marker-absent + gate-undecided and counts NOTHING, while `"max_iterations": 0` (added
+deliberately for the grp4 go-H1 firing-cap finding) removes even the engine's default cap of
+3. The fire-once marker makes spawns SERIAL — one at a time — which is not the same as
+BOUNDED. N distinct authorized messages on one gated run = N paid classifier loops, with no
+ceiling and no operator-visible signal. On a live thread that is an unbounded spend path
+reachable by ordinary conversation.
+
+**The fix — an append-set attempt ledger the rule can read.** The spawn rule `add_triple`s
+the dispatched message id onto an APPEND-SET ledger `conversation.classifier.attempted`
+(writer `conversation-spawn-rule`) in the same action set that arms the marker, and gains the
+condition `conversation.classifier.attempted length_lte <N-1>` (`OpLengthLte`, landed in
+beta.153 via ask #568 — the same primitive the per-task routing budgets use). Counting on the
+SPAWN side is what makes the bound honest: it counts every dispatch, so a faulted, truncated,
+refused, or cap-exhausted classification consumes budget exactly like a successful one. The
+terminal-release rule clears the pending slot and the marker but **never** the ledger — the
+ledger is the run's durable spend record.
+
+**N = 3** for v1: enough for a human to rephrase twice, small enough that a runaway thread
+costs three short loops. It is a rule condition, so it is config-tunable without code.
+
+**Exhaustion is ANNOUNCED, not silent.** A rule fires when the ledger is full and the gate is
+still undecided and a pending message is unclassified, posting the deterministic escape hatch
+("I've used up my classification attempts on this run — reply `/semdev approve` or
+`/semdev reject`.") on the `user.note.>` lane, carrying its OWN self-extinguishing marker (the
+grp6 replay lesson: a human-visible post with no marker re-posts on RULE_STATE loss). The
+exact-command path is unaffected and costs zero model turns, so the run stays fully operable
+after the budget is spent.
+
+**Pinned offline.** A journey asserts the paid turn count is CAPPED: N+2 authorized messages
+produce EXACTLY N classifier dispatches (`mock.RequestCount()` at a deterministic point — the
+grp6 lesson), the escape-hatch note posts once, and a subsequent exact command still releases
+the gate.
+
+### D15 — the conflict journey must meet the contract it claims (task 6.4 UNTICKED)
+**The defect (ours, not the reviewer's).** Task 6.4 specifies "two authorized NL messages, one
+approve + one reject, **both classified**". The shipped
+`TestConflictingIntentsResolveToOneTerminal` waits for the run to reach `executing` before
+posting the second message — by which point the phase gate discards it. So ONE classification
+happens, the second mock fixture is never consumed, and the journey carries no
+`requireModelTurns` assertion that would have exposed the dead fixture. 6.4 was ticked against
+a contract the test does not meet; **it is unticked.**
+
+**The fix — a real barrier at the apply consumer's Post.** The apply consumer POSTS the
+transparency comment BEFORE it stamps the decision (D6/M6), which is a precise, deterministic
+place to hold the first decision open. The journey's forge double blocks in `Post` for the
+first apply dispatch; while it is held, the second opposite message is posted, bridged, and
+classified against a run whose gate is still UNDECIDED; the Post is then released. The
+assertions are then all reachable and all named:
+- BOTH message ids appear in the `conversation.intent.classified` ledger (two real
+  classifications, both fixtures consumed — `mock.RequestCount()` proves it);
+- the run carries EXACTLY ONE `run.change.decision` (D13 makes "never both" structural, so the
+  journey asserts the VALUE is one of the two and the run reaches the matching terminal);
+- the losing dispatch is refused by the gate-still-open guard (D6.1) — the guard the original
+  journey named but, being deterministically in the zero-gate-fact branch, never exercised.
+
+The existing test is KEPT, renamed to `TestLateIntentAfterGateClosesIsIgnored`, which is the
+real (and worth pinning) behavior it actually proves.
+
 ## Risks / Trade-offs
 
 **Config-KV hazard, found in review and worth recording (grp5-review, BLOCKING).** Both shipped
@@ -425,16 +613,23 @@ real-Gemini when it was mock (G7). Until the split lands, that risk is carried b
 `realllm:launch`), whose `nats:down -v` removes the volume and so genuinely wipes the config KV.
 
 
-**Known gap: the both-gate-facts cell is an unsurfaced stall (grp5-review, semstreams M3).**
-The D7 partition guarantees a run carrying BOTH gate facts fires NEITHER lifecycle rule —
-strictly safer than a double transition, but it is NOT a park: nothing stamps
-`run.awaiting.human`, nothing posts, and no operator surface flags it. The run sits at
-`awaiting_approval` indefinitely with no human-visible signal, and if the NL lane got there
-first the human has already seen a transparency comment for a decision that never took
-effect. Parking the cell is NOT available as a fix — a park at this gate is the B1 wedge.
-Reaching it needs an exact `/semdev reject` and `/semdev approve` to interleave inside one
-mirror evaluation, so it is narrow; it is named here rather than left implied, and a
-conflict-note lane (publishing `user.note.*`, which cannot wedge) is the natural follow-up.
+**RETIRED gap: the both-gate-facts cell (was grp5-review semstreams M3) — CLOSED by D13.**
+This section previously named "a run carrying BOTH gate facts fires NEITHER lifecycle rule"
+as a known, accepted, unsurfaced stall. The external review was right that documenting a
+permanent wedge is not the same as fixing it. D13 retires the two boolean facts for ONE
+single-valued `run.change.decision`, which makes the contradictory state UNREPRESENTABLE —
+the cell no longer exists, so there is nothing left to surface, park, or note. The
+conflict-note follow-up this paragraph proposed is withdrawn as unnecessary.
+
+**Replacement residual: which of two opposite simultaneous decisions wins is undefined.**
+`stampDecision` reads the current decision and refuses to change a decided run, but that
+read-then-write has no durable CAS, so a true interleave of two opposite AUTHORIZED commands
+can still land the second write. The outcome is ONE valid decision (single-valued fact), and
+the phase-guarded lifecycle rules make a post-transition flip inert — so the failure mode is
+a benign nondeterminism between two things a human actually asked for, in place of the
+permanent wedge. Deliberately not closed further: a durable CAS is a framework primitive
+semdev does not have, and the in-process serialization that would narrow it further is not
+worth the false confidence of a guard that silently stops holding under a second instance.
 
 **Known gap: two definitive zero-write exits are only partly surfaced (grp5-review M5/L9).**
 An intent with no harness-bound author now posts a notice, but an unparseable
@@ -460,7 +655,17 @@ both writing lanes living in this package by construction.
   (`tool_choice: required` + the decide-allowlist metadata).
 - **[Concurrent classifiers stamp both approved AND rejected]** → the gate-still-open guard
   (D6.1) makes the first apply terminal and the second a no-op; the routing rules gate on
-  both-facts-absent. A CONFLICT journey pins "exactly one terminal, never both."
+  the gate being UNDECIDED. Since D13 the fact is single-valued, so "never both" is
+  structural rather than guarded. The reworked CONFLICT journey (D15) pins it with BOTH
+  messages genuinely classified against an OPEN gate.
+- **[A historical comment decides a gate it was never written for]** (external review #1)
+  → the D12 per-run watermark drops any message authored at or before the moment that run's
+  gate opened, on BOTH the NL and exact-command paths, plus deterministic resolution to the
+  active awaiting-approval run. Fails CLOSED when no watermark can be established.
+- **[An unbounded thread spends unbounded classifier tokens]** (external review #3) → the
+  D14 per-run append-set attempt ledger caps dispatches at N=3 (counting faulted attempts),
+  and announces the exact-command escape hatch on exhaustion. Pinned offline by a capped
+  paid-turn-count journey.
 - **[Safety-asymmetric drop: a rejection lost to a later approval]** (semstreams MEDIUM-5)
   → named; mitigated by the gate-still-open guard, conservative-none, and the PR-merge
   backstop. Strict reject-stickiness deferred (OQ2).
@@ -491,9 +696,15 @@ both writing lanes living in this package by construction.
 6. The NL journeys — approve, reject, conservative-none, the CONFLICT terminal, and the
    fault fallback — plus a real-LLM classification probe (decide the model tier, OQ4). The
    exact-command journeys stay green.
-7. Spec + docs + full ladder + e2e -race + the censuses (G5/G1/taxonomy) + archive.
-Rollback: additive — the exact-command path is untouched; reverting drops the NL bridge,
-the classifier, and the reject lane.
+8. **(post-review corrections, D12–D15)** the gate-open watermark + deterministic active-run
+   resolution; the `run.change.decision` single-fact migration (ONE commit — a half-migrated
+   predicate is a silently dead rule); the classifier spend bound + its escape-hatch note; the
+   reworked conflict journey (6.4 unticked until it meets its contract).
+9. Spec + docs + full ladder + e2e -race + the censuses (G5/G1/taxonomy) + archive.
+Rollback: the NL bridge, the classifier, and the reject lane are additive and revert cleanly.
+The D13 predicate migration is NOT additive — reverting it means reverting the rule files and
+the resolver with it, since `run.change.approved` and `run.change.decision` are never both
+live.
 
 ## Open Questions
 

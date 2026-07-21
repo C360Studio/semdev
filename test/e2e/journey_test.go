@@ -49,6 +49,7 @@ import (
 	"github.com/c360studio/semdev/internal/forge/forgetest"
 	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semdev/internal/intake"
+	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/mockllm"
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/graph"
@@ -371,7 +372,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 
 	// Station 6 — the human approves the change. The journey stands in for the
 	// group-5 approval adapter (a forge-io path, deferred): it stamps
-	// run.change.approved=true on the RUN entity exactly as that adapter will
+	// run.change.decision="approve" on the RUN entity exactly as that adapter will
 	// (Source approval-adapter, on the run entity per D15). The EXISTING
 	// run-lifecycle/02-resume-after-change-approval rule then fires
 	// awaiting_approval→executing — the release side of the first human gate.
@@ -384,7 +385,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	t.Logf("station 6: human approved → run resumed to executing (mock RequestCount=%d)", mock.RequestCount())
 
 	// Station 7 — approval PROJECTS the immutable task surface BEFORE the dev loop
-	// routes into development (dev-from-task spec: WHEN run.change.approved present
+	// routes into development (dev-from-task spec: WHEN run.change.decision=="approve"
 	// THEN tasks projected as task.spec; Codex P1 on f1eed5c). Two rules fire on the
 	// run entity: dev-from-task/01 stamps the bare agent.run anchor, then
 	// dev-from-task/03 fires a `publish` to the PROJECTION STATION component (R6),
@@ -1322,7 +1323,7 @@ func publishCoordinatorWake(ctx context.Context, t *testing.T) string {
 
 // approveChange stands in for the REAL approval adapter (which SHIPPED with
 // forge-io-real-lanes: internal/intake/approval.go, proven end-to-end by the
-// webhook journey's comment-event station): it stamps run.change.approved=true
+// webhook journey's comment-event station): it stamps run.change.decision="approve"
 // on the run entity via the same OwnedFactWriter transport, with the vocab
 // writer Source (approval-adapter) — impersonating the adapter's exact triple.
 // It remains legitimate for journeys that do not drive the webhook lane (no
@@ -1335,14 +1336,14 @@ func approveChange(ctx context.Context, t *testing.T, runEntityID string) {
 	writer := agentictools.NewNATSOwnedFactWriter(client)
 	tr := message.Triple{
 		Subject:    runEntityID,
-		Predicate:  "run.change.approved",
-		Object:     "true",
+		Predicate:  admission.DecisionPredicate,
+		Object:     admission.DecisionApprove,
 		Source:     "approval-adapter",
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
 	if err := writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil); err != nil {
-		t.Fatalf("stamp run.change.approved on %s: %v", runEntityID, err)
+		t.Fatalf("stamp %s on %s: %v", admission.DecisionPredicate, runEntityID, err)
 	}
 }
 

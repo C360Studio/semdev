@@ -103,7 +103,7 @@ Template:
   dedicated component (conversation-channel-seam D8) puts it behind the
   channel-neutral `Channel` port so a second channel composes without touching
   the arc: it owns the comment-approval consumer (github.event.comment → neutral
-  Message → `admission.Authorize` → the stand-in `run.change.approved` fact the
+  Message → `admission.Authorize` → the stand-in `run.change.decision` fact the
   resume rule reads) and the park-post consumer (user.response.> → `Channel.Post`).
   It shares the `admission` decision + resolver core with issue-intake (a pure
   reference, not a second writer — G5), fires no lifecycle transition (G2 — the
@@ -333,7 +333,7 @@ Template:
   a routing classification the harness records — NOT the `submit_review` shape:
   approval has no executable ground-truth, so no measurement floor is possible
   and the tool takes no outcome field (G3). The consequential gate fact
-  (`run.change.approved`/`rejected`) is stamped deterministically downstream by
+  (`run.change.decision`) is stamped deterministically downstream by
   `approval-adapter` (one G5 writer), never by this tool; it fires no lifecycle
   transition (G2). It subject-overrides to the RUN (not the classifier loop the
   framework `decide` would target) because the dedup and the routing rule both

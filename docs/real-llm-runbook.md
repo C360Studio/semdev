@@ -247,7 +247,7 @@ landed).** On a host no webhook can reach, the change-approval gate is now
 releasable by POLLING the issue thread — no stand-in needed. Configure
 conversation-channel in POLL mode and approve with a real `/semdev approve` comment
 on the issue; the poller reads it on its interval and lands the exact
-`run.change.approved` fact (Source `approval-adapter`) the resume rule consumes. This
+`run.change.decision` = `approve` fact (Source `approval-adapter`) the resume rule consumes. This
 is the pull-first deployment shape:
 
 ```jsonc
@@ -278,7 +278,7 @@ real docker, zero paid tokens). Notes:
   is rejected at the (separately-configured) approval gate and the run parks forever.
 - Poll mode needs a forge token (to Read the thread); it still needs NO webhook secret.
 
-A CLI stand-in write (the exact `run.change.approved` fact) remains available for a
+A CLI stand-in write (the exact `run.change.decision` = `approve` fact) remains available for a
 host that runs NEITHER transport, but is no longer the only non-webhook option.
 
 **What the offline journey does and does NOT cover** (honesty, ledger it): the

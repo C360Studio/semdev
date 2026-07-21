@@ -2,16 +2,42 @@
   "id": "conversation_spawn_classifier",
   "type": "expression",
   "name": "Pending authorized message on a gated run → spawn the intent classifier",
-  "description": "The classifier spawn (nl-conversation-intent group 4, design D3/D5). When handleMessage's NL bridge has stamped conversation.pending.{message-id,author,body} on a run at awaiting_approval (an AUTHORIZED, non-command, not-yet-classified message — the bridge already enforced all three), spawn ONE inherit-scoped role=conversation classifier loop to read that single message. The pending author + body are TEMPLATED onto the prompt from the run's own triples (a rule can only template the firing entity's triples — the reason the bridge stamps the message ON the run, design Context). The persona (configs/personas/fragments/conversation) carries the closed-taxonomy decision contract; classify_intent validates the intent against the same Go taxonomy and HARNESS-BINDS the message id + author from these pending triples, never from the model (H3).\n\nONE-AT-A-TIME SERIALIZATION (load-bearing for the grp2 ledger): the fire-once marker conversation.classifier.dispatched = the pending message id, stamped BEFORE the publish and guarded length_eq 0. While a classifier is in flight the marker blocks a second spawn, so at most ONE classifier loop runs per run — classify_intent's read→replace classified-ledger is safe ONLY under this invariant (OwnedFactWriter assumes one concurrent writer of a prefix). The marker VALUE is read by classify_intent as its READ-ONCE BINDING (grp4-review HIGH-1): the pending slot is latest-wins, so if a second authorized message replaces it during the model turn, the tool sees slot-id ≠ dispatched-id and FAULTS (no stamp, no ledger entry) rather than bind the new message's identity to a judgment of the old message's text; the faulted terminal flows the release + the group-5 fallback note. The marker also makes the spawn replay-safe (publish_agent is not idempotent; the run is a long-lived, replay-exposed entity — the dev.developer.dispatched precedent, dispatch-developer.json:12). The marker is RELEASED by 04-classifier-terminal-release on the loop terminal (pending cleared first, then the marker), which re-arms this rule for the NEXT authorized message — the ledger dedup in the bridge, not this marker, is what stops an already-classified message re-entering.\n\nGATE-FACTS GUARDS (grp4-review M1): both run.change.approved and run.change.rejected must be ABSENT — the same cell the routing rules (03a/03b) require. A run still at awaiting_approval that already carries a gate fact (the D7 both-facts park; the publish→stamp window; a stamped-but-not-yet-resumed run) would spend a classifier turn whose intent can never route; these guards make that turn unspendable. Strictly narrowing: a genuinely open gate always has both absent.\n\nFIRING-CAP OPT-OUT (grp4-review H1, load-bearing): both actions carry explicit max_iterations: 0. The engine's per-action firing cap DEFAULTS to 3 per rule+entity (DefaultActionMaxIterations, persisted in RULE_STATE) — and this is the repo's first rule designed to re-fire indefinitely on ONE entity (the run, one edge per pending→spawn→release cycle). Under the default cap the FOURTH authorized message of a run's gate lifetime would be silently skipped (pending stamped, no spawn, no fault, no note — the silent-dead-lane class). The spend stays bounded by the bridge's ledger dedup, this marker, and the release — that is their whole job; the cap added nothing but the dead lane.\n\nRUN BINDING: run_scope=inherit reads the run's bare agent.loop.run anchor (stamped by 01-anchor-gated-run at gate entry) and binds the classifier's RunID to this run, so classify_intent resolves the run entity from its call metadata and stamps conversation.intent.* there (H2). The agent.loop.run ne \"\" condition is load-bearing: without the anchor present, inherit binds NO RunID and classify_intent faults on a missing run id.\n\nTOOL SURFACE: tools advertises EXACTLY [classify_intent] (beta.149 executor enforcement makes the scoped list load-bearing at execution — the classifier can call nothing else) and tool_choice=required forces the call so a weak model cannot terminate text-only (D2). One model turn per DISTINCT authorized message (D9): the bridge's ledger dedup + this marker + the release rule bound the spend. G2: no lifecycle transition — the intent fact routes via 03a/03b and the deterministic apply consumer stamps the gate fact; a rule owns any transition.",
+  "description": "The classifier spawn (nl-conversation-intent group 4, design D3/D5). When handleMessage's NL bridge has stamped conversation.pending.{message-id,author,body} on a run at awaiting_approval (an AUTHORIZED, non-command, not-yet-classified message — the bridge already enforced all three), spawn ONE inherit-scoped role=conversation classifier loop to read that single message. The pending author + body are TEMPLATED onto the prompt from the run's own triples (a rule can only template the firing entity's triples — the reason the bridge stamps the message ON the run, design Context). The persona (configs/personas/fragments/conversation) carries the closed-taxonomy decision contract; classify_intent validates the intent against the same Go taxonomy and HARNESS-BINDS the message id + author from these pending triples, never from the model (H3).\n\nONE-AT-A-TIME SERIALIZATION (load-bearing for the grp2 ledger): the fire-once marker conversation.classifier.dispatched = the pending message id, stamped BEFORE the publish and guarded length_eq 0. While a classifier is in flight the marker blocks a second spawn, so at most ONE classifier loop runs per run — classify_intent's read→replace classified-ledger is safe ONLY under this invariant (OwnedFactWriter assumes one concurrent writer of a prefix). The marker VALUE is read by classify_intent as its READ-ONCE BINDING (grp4-review HIGH-1): the pending slot is latest-wins, so if a second authorized message replaces it during the model turn, the tool sees slot-id ≠ dispatched-id and FAULTS (no stamp, no ledger entry) rather than bind the new message's identity to a judgment of the old message's text; the faulted terminal flows the release + the group-5 fallback note. The marker also makes the spawn replay-safe (publish_agent is not idempotent; the run is a long-lived, replay-exposed entity — the dev.developer.dispatched precedent, dispatch-developer.json:12). The marker is RELEASED by 04-classifier-terminal-release on the loop terminal (pending cleared first, then the marker), which re-arms this rule for the NEXT authorized message — the ledger dedup in the bridge, not this marker, is what stops an already-classified message re-entering.\n\nGATE-UNDECIDED GUARD (grp4-review M1; single-valued since D13/group 8): run.change.decision must be ABSENT — the same cell the routing rules (03a/03b) require. A run still at awaiting_approval that already carries a decision (the publish→stamp window; a decided-but-not-yet-resumed run) would spend a classifier turn whose intent can never route; this guard makes that turn unspendable. Strictly narrowing: a genuinely open gate is always undecided. The former both-facts cell this guard also covered no longer exists — one single-valued decision cannot contradict itself.\n\nFIRING-CAP OPT-OUT (grp4-review H1, load-bearing): both actions carry explicit max_iterations: 0. The engine's per-action firing cap DEFAULTS to 3 per rule+entity (DefaultActionMaxIterations, persisted in RULE_STATE) — and this is the repo's first rule designed to re-fire indefinitely on ONE entity (the run, one edge per pending→spawn→release cycle). Under the default cap the FOURTH authorized message of a run's gate lifetime would be silently skipped (pending stamped, no spawn, no fault, no note — the silent-dead-lane class). The spend stays bounded by the bridge's ledger dedup, this marker, and the release — that is their whole job; the cap added nothing but the dead lane.\n\nRUN BINDING: run_scope=inherit reads the run's bare agent.loop.run anchor (stamped by 01-anchor-gated-run at gate entry) and binds the classifier's RunID to this run, so classify_intent resolves the run entity from its call metadata and stamps conversation.intent.* there (H2). The agent.loop.run ne \"\" condition is load-bearing: without the anchor present, inherit binds NO RunID and classify_intent faults on a missing run id.\n\nTOOL SURFACE: tools advertises EXACTLY [classify_intent] (beta.149 executor enforcement makes the scoped list load-bearing at execution — the classifier can call nothing else) and tool_choice=required forces the call so a weak model cannot terminate text-only (D2). One model turn per DISTINCT authorized message (D9): the bridge's ledger dedup + this marker + the release rule bound the spend. G2: no lifecycle transition — the intent fact routes via 03a/03b and the deterministic apply consumer stamps the gate fact; a rule owns any transition.",
   "enabled": true,
-  "entity": { "pattern": "*.*.*.*.*.*" },
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
   "conditions": [
-    { "field": "agent.run.phase", "operator": "eq", "value": "awaiting_approval", "required": true },
-    { "field": "conversation.pending.message-id", "operator": "ne", "value": "", "required": true },
-    { "field": "agent.loop.run", "operator": "ne", "value": "", "required": true },
-    { "field": "conversation.classifier.dispatched", "operator": "length_eq", "value": 0, "required": true },
-    { "field": "run.change.approved", "operator": "length_eq", "value": 0, "required": true },
-    { "field": "run.change.rejected", "operator": "length_eq", "value": 0, "required": true }
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "conversation.pending.message-id",
+      "operator": "ne",
+      "value": "",
+      "required": true
+    },
+    {
+      "field": "agent.loop.run",
+      "operator": "ne",
+      "value": "",
+      "required": true
+    },
+    {
+      "field": "conversation.classifier.dispatched",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
   ],
   "logic": "and",
   "on_enter": [
@@ -29,8 +55,12 @@
       "subject": "agent.task.conversation",
       "role": "conversation",
       "model": "conversation",
-      "tools": ["classify_intent"],
-      "tool_choice": { "mode": "required" },
+      "tools": [
+        "classify_intent"
+      ],
+      "tool_choice": {
+        "mode": "required"
+      },
       "prompt": "SEMDEV CONVERSATION READER — classify ONE human message on this run's approval thread.\n\nThis run is awaiting human approval of its proposed change. A collaborator has posted a message on the thread. Read it and record what they MEANT with the classify_intent tool: intent \"approve\" only for an unmistakable directive to proceed, \"reject\" only for an unmistakable directive to stop or abandon the change, and \"none\" for anything else — thanks, questions, reactions, ambiguous positivity, thinking-out-loud. Quote the words that decided you in reason. You classify meaning only: authorization, the author's identity, and every approval fact are the harness's job, never yours.\n\nMessage author: $entity.triple.conversation.pending.author\nMessage text:\n$entity.triple.conversation.pending.body"
     }
   ],

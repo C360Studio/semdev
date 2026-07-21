@@ -8,7 +8,7 @@
   "conditions": [
     { "field": "agent.loop.run", "operator": "ne", "value": "", "required": true },
     { "field": "agent.run.phase", "operator": "eq", "value": "executing", "required": true },
-    { "field": "run.change.approved", "operator": "eq", "value": "true", "required": true },
+    { "field": "run.change.decision", "operator": "eq", "value": "approve", "required": true },
     { "field": "task.spec.test-command", "operator": "ne", "value": "", "required": true },
     { "field": "sandbox.provision.ready", "operator": "eq", "value": "true", "required": true },
     { "field": "run.awaiting.human", "operator": "length_eq", "value": 0, "required": true },

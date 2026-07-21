@@ -84,14 +84,12 @@ func TestToolSourceMatchesVocabWriter(t *testing.T) {
 		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingMessageIDPredicate},
 		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingAuthorPredicate},
 		{"conversation-adapter", conversationintent.AdapterSource, conversationintent.PendingBodyPredicate},
-		// The GATE facts: run.change.approved / run.change.rejected are ONE logical
-		// writer (approval-adapter) realized at TWO code sites — the exact-command
-		// fast-path and the apply consumer — both routed through the shared
-		// stampGateFact (structurally pinned by TestOnlySanctionedGateWriters). These
-		// ties keep the Source const from drifting off what vocab declares
-		// (nl-conversation-intent grp3-review L4 / D11).
-		{"approval-adapter", conversationchannel.ApprovedSource, admission.ApprovedPredicate},
-		{"approval-adapter", conversationchannel.ApprovedSource, admission.RejectedPredicate},
+		// The GATE fact: run.change.decision is written by ONE logical writer
+		// (approval-adapter) realized at TWO code sites — the exact-command fast-path
+		// and the apply consumer — both routed through the shared stampDecision
+		// (structurally pinned by TestOnlySanctionedGateWriters). This tie keeps the
+		// Source const from drifting off what vocab declares (grp3-review L4 / D11).
+		{"approval-adapter", conversationchannel.ApprovedSource, admission.DecisionPredicate},
 		{"verify_artifact", verifyartifact.Source, verifyartifact.ResultPredicate},
 		{"check_floors", checkfloors.Source, "floor.finding.rejected"},
 		// The route mirror (design R1): check_floors + submit_review both stamp the route.*
@@ -183,15 +181,15 @@ func isTripleLit(lit *ast.CompositeLit) bool {
 // TestOnlySanctionedGateWriters is the D11 gate-writer census
 // (nl-conversation-intent task 5.5, semstreams confirmed-clean requirement).
 //
-// run.change.approved and run.change.rejected are ONE logical writer
-// (approval-adapter) realized at TWO code sites: the exact-command fast-path
-// (releaseGate) and the deterministic apply consumer (handleDispatch). That is the
+// run.change.decision is ONE logical writer (approval-adapter) realized at TWO code
+// sites: the exact-command fast-path (releaseGate) and the deterministic apply
+// consumer (handleDispatch). That is the
 // sanctioned "one logical writer, multiple realizing sites" precedent — but it only
 // holds if the sites cannot drift their Source apart, which is exactly what a
 // comment claiming "we both use approval-adapter" fails to guarantee.
 //
 // This pin asserts the sharing STRUCTURALLY within internal/conversationchannel:
-// the sole way either site there writes a gate fact is approvalAdapter.stampGateFact.
+// the sole way either site there writes a gate fact is approvalAdapter.stampDecision.
 // SCOPE, stated honestly (grp5-review M3/M4): the scan is package-scoped, so it
 // cannot see a gate write introduced in some OTHER package — TestSingleWriterPerPredicate
 // censuses the vocab table rather than code, so that gap is real. It is bounded by
@@ -221,7 +219,7 @@ func TestOnlySanctionedGateWriters(t *testing.T) {
 
 	// The ONE sanctioned realization. Any other site building a message.Triple
 	// with a gate predicate is a second writer.
-	const sharedWriter = "stampGateFact"
+	const sharedWriter = "stampDecision"
 	fset := token.NewFileSet()
 	var constructors []string
 	for _, e := range entries {
@@ -254,8 +252,7 @@ func TestOnlySanctionedGateWriters(t *testing.T) {
 				var buf strings.Builder
 				_ = printer.Fprint(&buf, fset, expr)
 				v := strings.TrimSpace(buf.String())
-				return strings.Contains(v, "ApprovedPredicate") ||
-					strings.Contains(v, "RejectedPredicate") ||
+				return strings.Contains(v, "DecisionPredicate") ||
 					strings.Contains(v, `"run.change.`) // the raw-literal evasion
 			}
 			ast.Inspect(fn, func(inner ast.Node) bool {
@@ -311,7 +308,7 @@ func TestOnlySanctionedGateWriters(t *testing.T) {
 	}
 
 	if len(constructors) == 0 {
-		t.Fatal("found no gate-fact triple construction in internal/conversationchannel — the census would pass vacuously (did stampGateFact move or change shape?)")
+		t.Fatal("found no gate-fact triple construction in internal/conversationchannel — the census would pass vacuously (did stampDecision move or change shape?)")
 	}
 	for _, name := range constructors {
 		if name != sharedWriter {

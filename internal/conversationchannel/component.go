@@ -263,7 +263,7 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		channel: channel,
 		checker: checker,
 		fetcher: admission.NewNATSEntityFetcher(deps.NATSClient),
-		stamp:   c.approv.stampGateFact,
+		stamp:   c.approv.stampDecision,
 		logger:  logger,
 	}
 	c.parkpost = &parkPoster{

@@ -2,14 +2,30 @@
   "id": "conversation_route_intent_reject",
   "type": "expression",
   "name": "Classified REJECT intent on a still-gated run → dispatch the apply consumer",
-  "description": "The reject intent route (nl-conversation-intent group 4, design D6) — the exact mirror of 03a-route-intent-approve for conversation.intent.value = reject. The same deterministic apply consumer (component.conversation-apply.dispatch) re-checks the gate is open, re-Authorizes the HARNESS-bound cited author, posts the transparency comment, and stamps run.change.rejected under the one G5 writer (approval-adapter); the phase-guarded run-lifecycle CANCEL rule (group 5) then fires awaiting_approval → cancelled — never this rule, never Go (G2). See 03a for the full mechanism notes: run-as-dispatch-entity, both-facts-absent mutual exclusion (H4a), the gate fact as the self-extinguisher, and the no-marker rationale (idempotent consumer, M6 Post-then-stamp).\n\nWHY approve and reject are TWO rules, not one: the engine's condition set is a flat AND (a single rule cannot express value ∈ {approve,reject} without logic:or, and a guarded pure-AND pair is the house OR-collapse shape — 06b/06e precedent), and the taxonomy census pins exactly one route per directive intent. `none` deliberately routes NOWHERE: no directive means the run stays gated (D1).",
+  "description": "The reject intent route (nl-conversation-intent group 4, design D6) — the exact mirror of 03a-route-intent-approve for conversation.intent.value = reject. The same deterministic apply consumer (component.conversation-apply.dispatch) re-checks the gate is open, re-Authorizes the HARNESS-bound cited author, posts the transparency comment, and stamps run.change.decision = \"reject\" under the one G5 writer (approval-adapter); the phase-guarded run-lifecycle CANCEL rule (group 5) then fires awaiting_approval → cancelled — never this rule, never Go (G2). See 03a for the full mechanism notes: run-as-dispatch-entity, the gate-undecided guard (H4a), the gate fact as the self-extinguisher, and the no-marker rationale (idempotent consumer, M6 Post-then-stamp).\n\nWHY approve and reject are TWO rules, not one: the engine's condition set is a flat AND (a single rule cannot express value ∈ {approve,reject} without logic:or, and a guarded pure-AND pair is the house OR-collapse shape — 06b/06e precedent), and the taxonomy census pins exactly one route per directive intent. `none` deliberately routes NOWHERE: no directive means the run stays gated (D1).",
   "enabled": true,
-  "entity": { "pattern": "*.*.*.*.*.*" },
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
   "conditions": [
-    { "field": "agent.run.phase", "operator": "eq", "value": "awaiting_approval", "required": true },
-    { "field": "conversation.intent.value", "operator": "eq", "value": "reject", "required": false },
-    { "field": "run.change.approved", "operator": "length_eq", "value": 0, "required": true },
-    { "field": "run.change.rejected", "operator": "length_eq", "value": 0, "required": true }
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "conversation.intent.value",
+      "operator": "eq",
+      "value": "reject",
+      "required": false
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
   ],
   "logic": "and",
   "on_enter": [

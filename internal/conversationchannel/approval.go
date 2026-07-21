@@ -24,7 +24,7 @@ import (
 // the channel-neutral Channel port: it reads a neutral Message (via the GitHub
 // impl's contained normalize) — NOT a githubwebhook.CommentEvent — so a second
 // channel would drive the SAME approval logic. The adapter writes EXACTLY the fact
-// the journeys' stand-in wrote — run.change.approved="true", Source approval-adapter,
+// the journeys' stand-in wrote — run.change.decision="approve", Source approval-adapter,
 // on the RUN — and the untouched resume rule (run-lifecycle/02) does the rest (G2:
 // the transition stays rule-owned).
 //
@@ -40,12 +40,12 @@ const ApprovalCommandVerb = "approve"
 
 // RejectCommandVerb is the second token of the exact reject command
 // (`<command> reject`, default "/semdev reject") — the deterministic
-// counterpart to approve. It stamps run.change.rejected with zero model turns
+// counterpart to approve. It records the reject DECISION with zero model turns
 // (nl-conversation-intent D4); a phase-guarded run-lifecycle rule cancels the
 // gated run on it.
 const RejectCommandVerb = "reject"
 
-// ApprovedSource is the vocab-declared writer of run.change.approved — the exact
+// ApprovedSource is the vocab-declared writer of run.change.decision — the exact
 // stand-in Source the journeys proved. The PREDICATE lives in the shared admission
 // core (the resolver reads it too).
 const ApprovedSource = "approval-adapter"
@@ -101,9 +101,9 @@ func (a *approvalAdapter) handleCommentEvent(ctx context.Context, payload []byte
 // D3; nl-conversation-intent D4). It repo-scope-checks the thread, then DISPATCHES:
 //
 //   - an exact `/semdev approve` → the deterministic approve fast-path (byte-identical
-//     to the pre-NL path — stamps run.change.approved, zero model turns);
+//     to the pre-NL path — records the approve decision, zero model turns);
 //   - an exact `/semdev reject` → the deterministic reject fast-path (stamps
-//     run.change.rejected, zero model turns);
+//     the reject decision, zero model turns);
 //   - ANY OTHER message → the NL bridge (bridgeNonCommand): an authorized author's
 //     non-command message on a run at awaiting_approval, not already classified, is
 //     stamped as conversation.pending.* for a classifier to read; everything else
@@ -124,9 +124,9 @@ func (a *approvalAdapter) handleMessage(ctx context.Context, msg conversation.Me
 	}
 	switch {
 	case hasApprovalCommand(a.cfg.OptInCommand, msg.Body):
-		return a.releaseGate(ctx, msg, thread, admission.ApprovedPredicate)
+		return a.releaseGate(ctx, msg, thread, admission.DecisionApprove)
 	case hasRejectCommand(a.cfg.OptInCommand, msg.Body):
-		return a.releaseGate(ctx, msg, thread, admission.RejectedPredicate)
+		return a.releaseGate(ctx, msg, thread, admission.DecisionReject)
 	default:
 		return a.bridgeNonCommand(ctx, msg, thread)
 	}
@@ -135,15 +135,18 @@ func (a *approvalAdapter) handleMessage(ctx context.Context, msg conversation.Me
 // releaseGate is the deterministic exact-command gate write shared by the approve
 // and reject fast-paths (D4): build the admission Event from the neutral Message +
 // the thread's resolved code-host scope (owner/repo from SplitRef) → Authorize the
-// author → resolve the run → stamp the gate fact via the ONE shared writer. predicate
-// is admission.ApprovedPredicate or admission.RejectedPredicate; both carry Source
-// ApprovedSource (one G5 writer, two facts — the D11 census). This keeps Authorize +
-// the approve write byte-identical to the pre-NL path (grp2-review carry-forward a).
+// author → resolve the run → stamp the decision via the ONE shared writer. decision is
+// admission.DecisionApprove or admission.DecisionReject — two VALUES of one
+// single-valued fact (D13), not two facts. This keeps Authorize + the approve write
+// byte-identical to the pre-NL path (grp2-review carry-forward a).
 //
-// An already-approved run is a no-op for BOTH verbs: replaying approve is idempotent,
-// and rejecting an approved run is REFUSED (H1 — an approval is irreversible once
-// landed; the transparency post is visibility, the PR merge the downstream human stop).
-func (a *approvalAdapter) releaseGate(ctx context.Context, msg conversation.Message, thread conversation.ThreadRef, predicate string) error {
+// An ALREADY-DECIDED run is a no-op for BOTH verbs (D13 layer 1): replaying the same
+// decision is idempotent, and the OPPOSITE verb is REFUSED — H1 (an approval is
+// irreversible once landed) generalized symmetrically, so a rejected-and-cancelled run
+// is not resurrected either. The refusal is what closes the wedge the two-boolean design
+// left open (external review #2): the old code consulted only "already approved" and so
+// happily stamped the opposite fact alongside it.
+func (a *approvalAdapter) releaseGate(ctx context.Context, msg conversation.Message, thread conversation.ThreadRef, decision string) error {
 	owner, repo, _, err := admission.SplitRef(string(thread))
 	if err != nil {
 		// A real thread always carries a parseable owner/repo#number (the webhook
@@ -170,47 +173,149 @@ func (a *approvalAdapter) releaseGate(ctx context.Context, msg conversation.Mess
 		return nil
 	}
 
-	runEntityID, alreadyApproved, _, err := a.resolver.ResolveRunByRef(ctx, string(thread))
+	run, err := a.resolver.ResolveRunByRef(ctx, string(thread))
 	if err != nil {
 		return fmt.Errorf("approval: resolve run for %s: %w", string(thread), err)
 	}
-	if runEntityID == "" {
-		// The run may not be minted yet (the approval raced the wake) — or the
-		// ref never admitted. Redeliver a bounded number of times; MaxDeliver
-		// exhausts loud in the consumer log.
+	if run.EntityID == "" {
+		// The run may not be minted yet (the approval raced the wake), the graph read
+		// may lag the mint, or the ref never admitted. Redeliver a bounded number of
+		// times; MaxDeliver exhausts loud in the consumer log.
 		return fmt.Errorf("approval: no run carries run.issue.ref=%s yet; redelivering", string(thread))
 	}
-	if alreadyApproved {
-		a.logger.Info("approval: run already approved; command is a no-op (approval is irreversible, H1)",
-			slog.String("ref", string(thread)), slog.String("run", runEntityID), slog.String("predicate", predicate))
+
+	// PHASE GUARD — the exact command decides ONLY a run actually AT the gate.
+	//
+	// This is load-bearing in two directions, and its absence was a BLOCKING defect:
+	//
+	//  1. It stops a PRE-GATE decision from wedging the run permanently. run-lifecycle/01
+	//     is the ONLY rule that transitions a run INTO awaiting_approval, and it requires
+	//     the gate undecided. So a `/semdev reject` typed while the run was still
+	//     `executing` used to stamp a decision that made the gate unreachable — and with
+	//     the gate unreachable the phase-guarded cancel rule could never fire either, and
+	//     a follow-up `/semdev approve` was refused by first-decision-wins. Unrecoverable,
+	//     with no park and no operator surface: the exact class D13 exists to remove,
+	//     reintroduced one rule over.
+	//  2. It is the uniform rule D12 already decided on. Pre-approval (an approve typed
+	//     before the proposal exists) does NOT decide the gate — the same rule the
+	//     watermark applies. One rule, explainable on a thread, enforced in one place.
+	//
+	// A command on a non-gated run is DEFINITIVE (acked): redelivering cannot make the
+	// run gated, and a bounded retry that happened to span the gate opening would make
+	// pre-approval nondeterministically work — worse than not working at all.
+	if run.Phase != admission.PhaseAwaitingApproval {
+		atomic.AddInt64(&a.ignored, 1)
+		a.logger.Info("approval: exact command on a run that is not at the change-approval gate; ignored",
+			slog.String("ref", string(thread)), slog.String("actor", ev.Actor),
+			slog.String("run", run.EntityID), slog.String("phase", run.Phase),
+			slog.String("decision", decision))
 		return nil
 	}
 
-	if err := a.stampGateFact(ctx, runEntityID, predicate); err != nil {
-		return fmt.Errorf("approval: stamp %s on %s: %w", predicate, runEntityID, err)
+	landed, err := a.stampDecision(ctx, run.EntityID, decision)
+	if err != nil {
+		return fmt.Errorf("approval: stamp %s on %s: %w", decision, run.EntityID, err)
+	}
+	if landed != decision {
+		// REFUSED by first-decision-wins: the gate was already decided (a replay of the
+		// same verb, or the opposite verb on a decided run). Counted as ignored, NOT
+		// granted — the counter and the log must not assert a decision that did not
+		// happen (G7).
+		atomic.AddInt64(&a.ignored, 1)
+		a.logger.Info("approval: run already decided; command refused (first decision wins, D13)",
+			slog.String("ref", string(thread)), slog.String("actor", ev.Actor),
+			slog.String("run", run.EntityID), slog.String("stands", landed),
+			slog.String("refused", decision))
+		return nil
 	}
 	atomic.AddInt64(&a.granted, 1)
-	a.logger.Info("approval: authorized command released the change gate",
+	a.logger.Info("approval: authorized command decided the change gate",
 		slog.String("ref", string(thread)), slog.String("actor", ev.Actor),
-		slog.String("run", runEntityID), slog.String("predicate", predicate))
+		slog.String("run", run.EntityID), slog.String("decision", decision))
 	return nil
 }
 
-// stampGateFact writes ONE gate fact (predicate=true) on the run under the single
-// sanctioned writer Source ApprovedSource — the D11 shared gate writer both the
+// stampDecision writes the run's SINGLE-VALUED change-approval decision under the one
+// sanctioned writer Source ApprovedSource — the D11 shared gate writer that BOTH the
 // exact-command fast-path and the group-5 apply consumer route through (the
-// TestOnlySanctionedGateWriters census, group 5). ReplaceTriples is
-// replace-by-predicate, so a redelivered stamp is idempotent.
-func (a *approvalAdapter) stampGateFact(ctx context.Context, runEntityID, predicate string) error {
+// TestOnlySanctionedGateWriters census). ReplaceTriples is replace-by-predicate, so a
+// redelivered stamp is idempotent.
+//
+// FIRST DECISION WINS (D13 layer 1). It READS the run's current decision and refuses to
+// change a decided run: approve-on-rejected and reject-on-approved are both no-ops. This
+// is the guard whose absence was the wedge — the old code read only "already approved"
+// and stamped the opposite fact beside it, leaving a run that fired NEITHER lifecycle
+// rule and could never be approved OR cancelled again.
+//
+// The read-then-write is NOT atomic and there is no durable CAS in the framework, so a
+// true interleave of two opposite authorized decisions can still land the second write.
+// That is bounded and deliberately accepted (design D13 / Risks): the fact is
+// single-valued, so the loser is OVERWRITTEN rather than coexisting — the run always
+// holds ONE valid decision, and the phase-guarded lifecycle rules make a decision that
+// arrives after the run left the gate inert. The failure mode is "which of two things the
+// human actually asked for wins is undefined", never a permanent wedge. Do NOT "fix" this
+// with an in-process mutex: it would read as a guarantee while silently not holding across
+// a second component instance.
+//
+// IT RETURNS THE DECISION THAT STANDS, which is how a caller detects a refusal. A refusal
+// MUST NOT be silent: the apply consumer POSTS its transparency comment BEFORE calling
+// this (guard 3 precedes guard 4, deliberately), and between its gate-still-open read and
+// this write it makes up to three external round-trips — ResolveThread, Authorize, Post.
+// A competing decision landing in that window means the human has ALREADY been shown one
+// outcome while a different one stands. Returning `nil` there let the consumer log a
+// success that never happened and leave the thread asserting the opposite of reality (G7).
+// Callers compare landed != requested and correct the record.
+func (a *approvalAdapter) stampDecision(ctx context.Context, runEntityID, decision string) (string, error) {
+	current, err := a.currentDecision(ctx, runEntityID)
+	if err != nil {
+		// A read fault is TRANSIENT — never decide a gate whose current state is
+		// unknown (fail closed; redelivery retries).
+		return "", fmt.Errorf("read current decision on %s: %w", runEntityID, err)
+	}
+	if current != "" {
+		// Already decided: a same-value replay is idempotent, the opposite verb is
+		// refused (H1 generalized). Either way what STANDS is `current`.
+		return current, nil
+	}
+
 	tr := message.Triple{
 		Subject:    runEntityID,
-		Predicate:  predicate,
-		Object:     "true",
+		Predicate:  admission.DecisionPredicate,
+		Object:     decision,
 		Source:     ApprovedSource,
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	return a.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil)
+	if err := a.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil); err != nil {
+		return "", err
+	}
+	return decision, nil
+}
+
+// currentDecision reads the run's decision fact fresh from the graph ("" = undecided).
+// It reads at STAMP time rather than trusting the resolver's earlier snapshot — the
+// resolve happens before an external Authorize round-trip, which is exactly the window a
+// competing decision lands in.
+func (a *approvalAdapter) currentDecision(ctx context.Context, runEntityID string) (string, error) {
+	if a.reader == nil {
+		// No graph reader (a nil NATS client — the schema-only/registration wiring).
+		// The gate's current state is UNKNOWABLE here, so refuse rather than write
+		// blind: deciding a gate without being able to see whether it is already
+		// decided is exactly the read the wedge came from. Fail CLOSED.
+		return "", fmt.Errorf("no fact reader wired; refusing to decide a gate whose state cannot be read")
+	}
+	facts, err := a.reader.ReadFacts(ctx, runEntityID, admission.DecisionPredicate)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range facts {
+		if tr.Predicate == admission.DecisionPredicate {
+			if s, ok := tr.Object.(string); ok && s != "" {
+				return s, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // bridgeNonCommand is the NL bridge (D4/D5): a message that is NOT an exact command,
@@ -249,13 +354,25 @@ func (a *approvalAdapter) bridgeNonCommand(ctx context.Context, msg conversation
 	// the run reaches the gate is acked-and-lost — an accepted asymmetry: the human
 	// replies to the park-post, which lands AT the gate. An exact command survives
 	// either way, being phase-agnostic.)
-	runEntityID, _, phase, err := a.resolver.ResolveRunByRef(ctx, string(thread))
+	run, err := a.resolver.ResolveRunByRef(ctx, string(thread))
 	if err != nil {
 		return fmt.Errorf("approval: resolve run for %s: %w", string(thread), err)
 	}
-	if runEntityID == "" || phase != admission.PhaseAwaitingApproval {
+	if run.EntityID == "" || run.Phase != admission.PhaseAwaitingApproval {
 		return nil
 	}
+	if run.Decided() {
+		// Gated but ALREADY DECIDED — the window between the decision landing and the
+		// lifecycle rule firing the transition. The run is still awaiting_approval, so
+		// the phase check above passes, but the routing rules require the gate
+		// UNDECIDED, so any classification produced here could never route. Bridging
+		// would spend a real model turn on a guaranteed-dead result.
+		a.logger.Info("approval: run is gated but already decided; no NL bridge (the classification could not route)",
+			slog.String("ref", string(thread)), slog.String("run", run.EntityID),
+			slog.String("decision", run.Decision))
+		return nil
+	}
+	runEntityID := run.EntityID
 
 	owner, repo, _, err := admission.SplitRef(string(thread))
 	if err != nil {

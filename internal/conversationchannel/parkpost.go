@@ -165,7 +165,7 @@ func (p *parkPoster) handleUserNote(ctx context.Context, payload []byte) error {
 	// gate was released by something else (rule 05 cannot guard on gate facts —
 	// its conditions are loop-scoped). Both are correctly silent: a decision was
 	// applied AND announced, so a note about not understanding is simply wrong.
-	if landed := decidedGateFact(run); landed != "" {
+	if landed := decidedGate(run); landed != "" {
 		p.logger.Info("fault-note: a gate decision already landed and was announced; suppressing the note",
 			slog.String("run", runEntityID), slog.String("decided", landed))
 		return nil

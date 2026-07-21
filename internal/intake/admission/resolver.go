@@ -27,32 +27,65 @@ type classifiedRequester interface {
 	RequestClassified(ctx context.Context, subject string, data []byte, timeout time.Duration) ([]byte, error)
 }
 
-// ApprovedPredicate is the change-approval fact the approval adapter stamps on the
-// run and the resume rule (run-lifecycle/02) matches. It lives here because BOTH
-// the RunResolver (which reports whether a run is already approved) and the
-// approval adapter (which writes it) reference it — the shared admission core is
-// their common home. The WRITER (Source) is the approval adapter's own const.
-const ApprovedPredicate = "run.change.approved"
+// DecisionPredicate is the SINGLE-VALUED change-approval decision fact — the one gate
+// fact the lifecycle rules key on (nl-conversation-intent D13, group 8). It REPLACES the
+// former boolean pair run.change.approved / run.change.rejected.
+//
+// WHY ONE FACT (external review #2, CONFIRMED): with two independent booleans a run could
+// carry BOTH — the exact-command fast-paths stamped one without ever reading the other —
+// and the mutually-exclusive lifecycle rules then fired NEITHER. That run was wedged at the
+// gate permanently: no park (a park at this gate is itself unrecoverable, the B1 wedge), no
+// post, no operator surface. The design previously accepted that cell as "an unsurfaced
+// stall" and documented it. Documenting a permanent wedge is not fixing it.
+//
+// Because the graph is REPLACE-BY-PREDICATE, a single-valued decision makes the
+// contradictory state UNREPRESENTABLE: the cell space collapses from four cells
+// (neither/approved/rejected/BOTH) to three, and the wedge is gone by construction rather
+// than by a partition every rule must remember to carry. The worst a race can now produce
+// is ONE of two decisions a human actually asked for.
+//
+// The writer (Source) is the approval adapter's own const — ONE logical writer across the
+// exact-command fast-path and the apply consumer, censused (G5).
+const DecisionPredicate = "run.change.decision"
 
-// RejectedPredicate is the change-rejection gate fact the approval adapter stamps
-// on the run when an authorized actor rejects the change — the exact `/semdev
-// reject` command or a classified NL reject intent (nl-conversation-intent D7). A
-// phase-guarded run-lifecycle rule fires awaiting_approval→cancelled on it. Its
-// single writer (Source) is the approval adapter's own const — the SAME writer as
-// ApprovedPredicate (two code sites, one Source, censused, G5). It lives beside
-// ApprovedPredicate because both are the gate facts the shared approval core writes.
-const RejectedPredicate = "run.change.rejected"
+// DecisionApprove and DecisionReject are the ONLY legal DecisionPredicate objects. The
+// resume rule (run-lifecycle/02) matches approve; the phase-guarded cancel rule
+// (run-lifecycle/07) matches reject.
+const (
+	DecisionApprove = "approve"
+	DecisionReject  = "reject"
+)
+
+// RunState is what the resolver reports about the run bound to an issue ref. It is a
+// STRUCT rather than a return tuple because the callers need three independent facts
+// about the run (its identity, whether the gate is already decided, and where it is in
+// its lifecycle) and adding a fourth to a positional tuple is how a caller silently
+// swaps two same-typed values.
+//
+// A zero RunState means NO run carries the ref (yet) — the wake→mint race, or a ref that
+// never admitted. Callers MUST check EntityID before trusting any other field.
+type RunState struct {
+	// EntityID is the run's graph entity ID; "" when no run carries the ref.
+	EntityID string
+	// Decision is the run's single-valued change-approval decision — "" (undecided),
+	// DecisionApprove, or DecisionReject (D13).
+	Decision string
+	// Phase is the run's agent.run.phase — the M7 getter the NL bridge gates on
+	// (awaiting_approval). semdev READS it, never writes it (G2).
+	Phase string
+}
+
+// Decided reports whether the change-approval gate already carries a decision.
+func (s RunState) Decided() bool { return s.Decision != "" }
 
 // RunResolver finds the run entity bound to a host-neutral issue ref via its
 // rule-stamped run.issue.ref fact. Implemented over the graph's prefix query;
 // faked in unit pins. Shared by issue-intake (duplicate-delivery discrimination),
 // the conversation-channel approval adapter, and the operator launch driver.
 type RunResolver interface {
-	// ResolveRunByRef returns the run entity ID carrying run.issue.ref == ref,
-	// its change-approval state, and its agent.run.phase (the M7 getter — the
-	// conversation-channel NL bridge gates on awaiting_approval), "" ids/phase
-	// when none exists (yet), or an error on a transport fault.
-	ResolveRunByRef(ctx context.Context, ref string) (runEntityID string, approved bool, phase string, err error)
+	// ResolveRunByRef returns the state of the run carrying run.issue.ref == ref, a
+	// ZERO RunState when none exists (yet), or an error on a transport fault.
+	ResolveRunByRef(ctx context.Context, ref string) (RunState, error)
 }
 
 // NATSRunResolver resolves ref→run over the graph's paginated prefix query
@@ -67,65 +100,120 @@ type NATSRunResolver struct {
 // maxRunPages bounds the pagination defensively (a page is 1000 entities).
 const maxRunPages = 16
 
-// ResolveRunByRef returns the run entity ID carrying run.issue.ref == ref (with
-// its run.change.approved state and its agent.run.phase), "" ids/phase when none
-// exists yet, or an error on a transport fault — the RunResolver contract, over
-// the graph prefix query.
-func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (string, bool, string, error) {
+// ResolveRunByRef returns the state of the run carrying run.issue.ref == ref (its
+// single-valued change-approval decision and its agent.run.phase), a ZERO RunState when
+// none exists yet, or an error on a transport fault — the RunResolver contract, over the
+// graph prefix query.
+//
+// RESOLUTION IS DETERMINISTIC, not first-match-in-page-order (D12b, external review #1).
+// This function previously returned the first ref-matching entity it encountered and
+// conceded in a comment that "two runs sharing one ref is reachable". That concession is
+// the enabling half of the historical-approval defect: a re-triggered issue leaves an OLD
+// run carrying the same ref, and whichever one paging happened to reach first decided
+// whose gate a comment released. The order is now explicit and total:
+//
+//  1. a run AT the change-approval gate beats one that is not — a decision can only
+//     sensibly apply to the run actually asking for one;
+//  2. among those, the most recently OPENED gate wins (the freshest proposal);
+//  3. ties break on entity ID, so the result is stable across pages and repeat calls.
+//
+// Every page is scanned before choosing; the loop no longer returns early.
+func (r *NATSRunResolver) ResolveRunByRef(ctx context.Context, ref string) (RunState, error) {
+	var best RunState
+	var bestGateOpen time.Time
+	found := false
+
 	cursor := ""
 	for page := 0; page < maxRunPages; page++ {
 		req := graph.PrefixQueryRequest{Prefix: r.prefix, Cursor: cursor}
 		data, err := json.Marshal(req)
 		if err != nil {
-			return "", false, "", err
+			return RunState{}, err
 		}
 		respData, err := r.client.RequestClassified(ctx, "graph.ingest.query.prefix", data, 5*time.Second)
 		if err != nil {
-			return "", false, "", fmt.Errorf("prefix query: %w", err)
+			return RunState{}, fmt.Errorf("prefix query: %w", err)
 		}
 		var resp graph.PrefixQueryResponse
 		if err := json.Unmarshal(respData, &resp); err != nil {
-			return "", false, "", fmt.Errorf("decode prefix response: %w", err)
+			return RunState{}, fmt.Errorf("decode prefix response: %w", err)
 		}
 		for i := range resp.Entities {
 			e := &resp.Entities[i]
-			var refMatch, approved bool
-			var phase string
+			var refMatch bool
+			var cand RunState
+			var gateOpen time.Time
 			for _, tr := range e.Triples {
 				switch tr.Predicate {
 				case "run.issue.ref":
 					if s, ok := tr.Object.(string); ok && s == ref {
 						refMatch = true
 					}
-				case ApprovedPredicate:
-					// approved = the VALUE the resume rule matches ("true"), not
-					// mere presence (review finding).
-					if s, ok := tr.Object.(string); ok && s == "true" {
-						approved = true
+				case DecisionPredicate:
+					if s, ok := tr.Object.(string); ok {
+						cand.Decision = s
 					}
 				case agentrun.PhasePredicate:
 					// The M7 phase getter: the framework run phase the NL bridge
 					// gates on (awaiting_approval). semdev READS it, never writes it (G2).
 					if s, ok := tr.Object.(string); ok {
-						phase = s
+						cand.Phase = s
+						// The phase triple's timestamp is the moment the run entered
+						// its CURRENT phase (replace-by-predicate). That is the moment
+						// the gate opened ONLY while the phase is awaiting_approval, so
+						// it is recorded only then — a "gate opened at" value carrying
+						// some other transition's time would be a lie the moment a
+						// caller compares a message timestamp against it (D12a).
+						if s == PhaseAwaitingApproval {
+							gateOpen = tr.Timestamp
+						}
 					}
 				}
 			}
-			if refMatch {
-				// First match in page order. Two runs sharing one ref is
-				// reachable only via a re-triggered issue after a terminal
-				// park; when the resume lane lands, prefer-newest (or an
-				// explicit disambiguation) replaces this — noted in the
-				// design's resume carry-forward.
-				return e.ID, approved, phase, nil
+			if !refMatch {
+				continue
+			}
+			cand.EntityID = e.ID
+			if !found || preferRun(cand, gateOpen, best, bestGateOpen) {
+				best, bestGateOpen, found = cand, gateOpen, true
 			}
 		}
 		if resp.NextCursor == "" {
-			return "", false, "", nil
+			return best, nil
 		}
 		cursor = resp.NextCursor
 	}
-	return "", false, "", fmt.Errorf("run resolution exceeded %d pages", maxRunPages)
+	// PAGE EXHAUSTION — return what we found rather than discarding it. The old
+	// first-match loop short-circuited and so was immune to this; scanning every page
+	// to apply a deterministic preference (D12b) reintroduced the exposure, and
+	// discarding `best` here would be a REGRESSION, not a safety measure.
+	//
+	// Concretely: the chain-execution prefix accumulates every run semdev has ever
+	// minted, so a long-lived deployment crosses maxRunPages*1000 entities. Past that
+	// point, returning an error for a run that was found on page 1 makes releaseGate
+	// treat every approval as transient — redeliver, MaxDeliver, gone — and
+	// `/semdev approve` silently stops working on EVERY run. The ordering is a
+	// PREFERENCE, not a correctness requirement, so a partial scan degrades to "a
+	// deterministically-chosen run" rather than to nothing.
+	if found {
+		return best, nil
+	}
+	return RunState{}, fmt.Errorf("run resolution exceeded %d pages", maxRunPages)
+}
+
+// preferRun reports whether candidate cand beats the incumbent best under the D12b
+// ordering: at-the-gate first, then most-recently-opened gate, then entity ID (a total
+// order, so the winner does not depend on page arrival).
+func preferRun(cand RunState, candGateOpen time.Time, best RunState, bestGateOpen time.Time) bool {
+	candGated := cand.Phase == PhaseAwaitingApproval
+	bestGated := best.Phase == PhaseAwaitingApproval
+	if candGated != bestGated {
+		return candGated
+	}
+	if !candGateOpen.Equal(bestGateOpen) {
+		return candGateOpen.After(bestGateOpen)
+	}
+	return cand.EntityID < best.EntityID
 }
 
 // ResolveRunIDsByRef returns EVERY run entity ID carrying run.issue.ref == ref (unordered) —

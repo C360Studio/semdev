@@ -412,14 +412,14 @@ func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error 
 	recordID := AdmissionRecordEntityID(c.platform.Org, c.platform.Platform, in.IssueRef, deliveryID)
 	if err := RecordAdmission(ctx, c.creator, recordID, decision.Actor, in.IssueRef); err != nil {
 		if err == ErrAlreadyRecorded {
-			runID, _, _, rerr := c.resolver.ResolveRunByRef(ctx, in.IssueRef)
+			run, rerr := c.resolver.ResolveRunByRef(ctx, in.IssueRef)
 			if rerr != nil {
 				atomic.AddInt64(&c.errors, 1)
 				return fmt.Errorf("intake: recorded admission but could not check for the run: %w", rerr) // redeliver
 			}
-			if runID != "" {
+			if run.EntityID != "" {
 				c.logger.Info("intake: admission already recorded and the run exists; duplicate delivery skipped",
-					slog.String("ref", in.IssueRef), slog.String("run", runID))
+					slog.String("ref", in.IssueRef), slog.String("run", run.EntityID))
 				return nil
 			}
 			c.logger.Warn("intake: admission recorded but NO run carries the ref — the wake never took (crash window or failed publish); re-publishing the wake",

@@ -24,7 +24,7 @@ import (
 //
 // The four guards, in order (design D6/D8 — each is a hard stop, not advice):
 //
-//  1. GATE STILL OPEN — neither run.change.approved nor run.change.rejected is
+//  1. GATE STILL OPEN — run.change.decision is not yet
 //     present. A second racing classification cannot double-release (H4a), and a
 //     duplicate dispatch is a no-op.
 //  2. HARNESS-BOUND AUTHOR RE-AUTHORIZED — the cited author is read from
@@ -139,11 +139,14 @@ type applyConsumer struct {
 	checker admission.PermissionChecker
 	fetcher admission.EntityFetcher
 
-	// stamp is the ONE shared gate writer (approvalAdapter.stampGateFact) — the
+	// stamp is the ONE shared gate writer (approvalAdapter.stampDecision) — the
 	// D11 requirement that the fast-path and this consumer cannot drift their
 	// Source apart. Injected as a func so the sharing is structural, not a
 	// convention two call sites are trusted to honor.
-	stamp func(ctx context.Context, runEntityID, predicate string) error
+	// It returns the decision that STANDS after the write: a value different from
+	// the requested one means the write was REFUSED because the gate was decided
+	// during this lane's Authorize+Post window (see the correction path in guard 4).
+	stamp func(ctx context.Context, runEntityID, decision string) (string, error)
 
 	// backoff is the inter-attempt delay base; zero means applyRetryBackoff. Only
 	// the retry tests set it (to keep a 3-attempt exhaustion pin sub-millisecond
@@ -172,7 +175,7 @@ type applyAttempt struct {
 	// re-read from a fresh snapshot on every attempt (grp4-review M6 — a later
 	// classification legitimately wins), so a re-classification inside the retry
 	// budget could announce "approving on @alice's decision", then stamp
-	// run.change.rejected on @bob's. The human would have been shown a decision
+	// a reject decision on @bob's. The human would have been shown a decision
 	// semdev did not take. Keying on the tuple keeps L1's de-duplication (an
 	// identical retry never re-announces) while restoring the invariant that the
 	// gate fact can never diverge from what was announced.
@@ -274,7 +277,7 @@ func (a *applyConsumer) handleDispatch(ctx context.Context, payload []byte, st *
 	}
 
 	// GUARD 1 — the gate must still be OPEN (H4a).
-	if landed := decidedGateFact(run); landed != "" {
+	if landed := decidedGate(run); landed != "" {
 		a.logger.Info("conversation-apply: gate already decided; dispatch is a no-op (H4a)",
 			slog.String("run", runEntityID), slog.String("decided", landed))
 		return nil
@@ -283,7 +286,7 @@ func (a *applyConsumer) handleDispatch(ctx context.Context, payload []byte, st *
 	// The routing fact, read at CONSUME time (grp4-review M6: the routes thread no
 	// snapshot, so a later classification legitimately wins). `none` or absent
 	// means there is nothing to apply.
-	predicate, ok := gatePredicateFor(entityTriple(run, conversationintent.IntentValuePredicate))
+	decision, ok := decisionFor(entityTriple(run, conversationintent.IntentValuePredicate))
 	if !ok {
 		a.logger.Info("conversation-apply: run carries no directive intent; nothing to apply",
 			slog.String("run", runEntityID))
@@ -349,21 +352,57 @@ func (a *applyConsumer) handleDispatch(ctx context.Context, payload []byte, st *
 	// announced, so an identical retry does not re-announce, but a retry whose
 	// intent or author MOVED re-announces before stamping the new decision. The
 	// gate fact must never diverge from what the human was shown.
-	announcement := predicate + "\x00" + author
+	announcement := decision + "\x00" + author
 	if st.postedFor != announcement {
-		if err := a.channel.Post(ctx, st.thread, transparencyBody(predicate, author)); err != nil {
+		if err := a.channel.Post(ctx, st.thread, transparencyBody(decision, author)); err != nil {
 			return fmt.Errorf("conversation-apply: post transparency for %s: %w", ref, err)
 		}
 		st.postedFor = announcement
 	}
 
 	// GUARD 4 — the effect, through the ONE shared gate writer (D11).
-	if err := a.stamp(ctx, runEntityID, predicate); err != nil {
-		return fmt.Errorf("conversation-apply: stamp %s on %s: %w", predicate, runEntityID, err)
+	landed, err := a.stamp(ctx, runEntityID, decision)
+	if err != nil {
+		return fmt.Errorf("conversation-apply: stamp %s on %s: %w", decision, runEntityID, err)
 	}
-	a.logger.Info("conversation-apply: classified intent released the change gate",
-		slog.String("run", runEntityID), slog.String("author", author), slog.String("predicate", predicate))
+	if landed != decision {
+		// REFUSED — the gate was decided by something else (an exact command, or a
+		// racing classification) AFTER guard 1 read it open. Guard 1's read and this
+		// write are separated by up to three external round-trips (ResolveThread,
+		// Authorize, Post), so this window is seconds wide, not the sub-millisecond
+		// interleave the two-exact-command case bounds.
+		//
+		// The human has ALREADY been shown `decision` by guard 3. Staying silent here
+		// would leave the thread asserting an outcome that never took effect, and the
+		// run would then follow `landed` — an approval announced, a cancellation
+		// delivered. So the record is CORRECTED on the thread. Best-effort by design:
+		// the durable decision is already correct and this lane must not redeliver
+		// (guard 1 would short-circuit the retry and the correction would never post),
+		// so a Post failure is a loud log, not an error — the park-post courtesy
+		// posture, on a fact that is already durable.
+		a.logger.Warn("conversation-apply: gate was decided during this dispatch; the announcement is being corrected",
+			slog.String("run", runEntityID), slog.String("author", author),
+			slog.String("announced", decision), slog.String("stands", landed))
+		if perr := a.postNote(ctx, st.thread, decisionCorrectionBody(decision, landed)); perr != nil {
+			a.logger.Error("conversation-apply: could not correct the announcement; the thread still shows the superseded decision",
+				slog.String("run", runEntityID), slog.String("announced", decision),
+				slog.String("stands", landed), slog.Any("error", perr))
+		}
+		return nil
+	}
+	a.logger.Info("conversation-apply: classified intent decided the change gate",
+		slog.String("run", runEntityID), slog.String("author", author), slog.String("decision", decision))
 	return nil
+}
+
+// decisionCorrectionBody is posted when a decision this lane ALREADY announced was
+// overtaken before it could be recorded. It names both sides plainly: the human saw one
+// outcome and the run is following another, and a thread that never mentions the
+// divergence is worse than one that does (G7 — the transparency post is the whole
+// visibility case for a gate with no harness floor).
+func decisionCorrectionBody(announced, stands string) string {
+	return fmt.Sprintf("⚠️ Correction: I announced this change as **%s**, but the gate had already been decided as **%s** — that earlier decision stands and is what this run is following.\n\nNo action was taken on the %s.",
+		announced, stands, announced)
 }
 
 // postNote posts a human-facing notice. Kept separate from the transparency post
@@ -393,27 +432,23 @@ func (a *applyConsumer) admissionConfig() admission.Config {
 	return admission.Config{Allowlist: a.cfg.Allowlist, OptInLabel: a.cfg.OptInLabel, OptInCommand: a.cfg.OptInCommand}
 }
 
-// decidedGateFact returns whichever gate fact is already present ("" if the gate
-// is still open). Reading BOTH is the H4a guard: approve and reject are equally
-// terminal, so either one closes this lane.
-func decidedGateFact(run *graph.EntityState) string {
-	for _, pred := range []string{admission.ApprovedPredicate, admission.RejectedPredicate} {
-		if entityTriple(run, pred) != "" {
-			return pred
-		}
-	}
-	return ""
+// decidedGate returns the run's change-approval decision ("" if the gate is still
+// open) — the H4a guard. Since D13 the decision is ONE single-valued fact, so this is
+// a single read rather than a scan of two mutually-contradictory booleans: approve and
+// reject are equally terminal and either closes this lane.
+func decidedGate(run *graph.EntityState) string {
+	return entityTriple(run, admission.DecisionPredicate)
 }
 
-// gatePredicateFor maps a classified intent to its gate fact. `none` (and an
+// decisionFor maps a classified intent to the gate DECISION it carries. `none` (and an
 // absent/unknown value) maps to NOTHING — the closed taxonomy's deliberate
 // no-directive case: the run stays gated (D1).
-func gatePredicateFor(intent string) (string, bool) {
+func decisionFor(intent string) (string, bool) {
 	switch conversationintent.Intent(intent) {
 	case conversationintent.Approve:
-		return admission.ApprovedPredicate, true
+		return admission.DecisionApprove, true
 	case conversationintent.Reject:
-		return admission.RejectedPredicate, true
+		return admission.DecisionReject, true
 	default:
 		return "", false
 	}
@@ -423,8 +458,8 @@ func gatePredicateFor(intent string) (string, bool) {
 // author whose message drove the decision so the human can see the attribution —
 // honest visibility, with NO undo promise (architect H1/BLOCKING-1: an NL approval
 // is irreversible once landed; the downstream PR merge is the real human stop).
-func transparencyBody(predicate, author string) string {
-	if predicate == admission.RejectedPredicate {
+func transparencyBody(decision, author string) string {
+	if decision == admission.DecisionReject {
 		return fmt.Sprintf("🛑 Cancelling this run based on @%s's rejection.\n\nThe authored change is abandoned. Re-trigger the issue to start a fresh run.", author)
 	}
 	// Phrased as the decision being RECORDED, not as work already underway: this

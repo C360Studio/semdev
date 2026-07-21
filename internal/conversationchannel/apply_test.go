@@ -44,13 +44,18 @@ func oneRun(e *graph.EntityState) *fakeFetcher {
 func newTestApply(fetcher admission.EntityFetcher, ch conversation.Channel, checker admission.PermissionChecker, writer *fakeWriter) *applyConsumer {
 	cfg := ComponentConfig{Repo: "c360studio/semdev-fixture", Allowlist: []string{"cglusky"}}
 	applyConfigDefaults(&cfg)
-	adapter := &approvalAdapter{cfg: cfg, writer: writer, logger: slog.Default()}
+	// The adapter needs a fact READER as well as a writer: stampDecision reads the
+	// run's current decision before writing (D13 first-decision-wins). An empty
+	// reader means "undecided", which is what these fixtures intend — the
+	// already-decided cases seed the decision on the FETCHER's run snapshot, which
+	// the consumer's own gate-still-open guard reads first.
+	adapter := &approvalAdapter{cfg: cfg, writer: writer, reader: &fakeIntentReader{}, logger: slog.Default()}
 	return &applyConsumer{
 		cfg:     cfg,
 		channel: ch,
 		checker: checker,
 		fetcher: fetcher,
-		stamp:   adapter.stampGateFact,
+		stamp:   adapter.stampDecision,
 		logger:  slog.Default(),
 	}
 }
@@ -69,7 +74,7 @@ func gateStamps(w *fakeWriter) []message.Triple {
 	var out []message.Triple
 	for _, call := range w.calls {
 		for _, tr := range call.add {
-			if tr.Predicate == admission.ApprovedPredicate || tr.Predicate == admission.RejectedPredicate {
+			if tr.Predicate == admission.DecisionPredicate {
 				out = append(out, tr)
 			}
 		}
@@ -103,8 +108,8 @@ func TestApplyConsumerGateStillOpenReAuthorizeStamps(t *testing.T) {
 		if len(stamps) != 1 {
 			t.Fatalf("want exactly ONE gate stamp, got %d (%v)", len(stamps), stamps)
 		}
-		if stamps[0].Predicate != admission.ApprovedPredicate {
-			t.Errorf("stamped %q, want %q", stamps[0].Predicate, admission.ApprovedPredicate)
+		if obj, _ := stamps[0].Object.(string); obj != admission.DecisionApprove {
+			t.Errorf("decision = %q, want %q", obj, admission.DecisionApprove)
 		}
 		if stamps[0].Source != ApprovedSource {
 			t.Errorf("gate fact Source = %q, want the ONE sanctioned writer %q (G5/D11)", stamps[0].Source, ApprovedSource)
@@ -129,19 +134,22 @@ func TestApplyConsumerGateStillOpenReAuthorizeStamps(t *testing.T) {
 			t.Fatalf("handleDispatch: %v", err)
 		}
 		stamps := gateStamps(w)
-		if len(stamps) != 1 || stamps[0].Predicate != admission.RejectedPredicate {
-			t.Fatalf("want exactly one %s stamp, got %v", admission.RejectedPredicate, stamps)
+		if len(stamps) != 1 {
+			t.Fatalf("want exactly one decision stamp, got %v", stamps)
+		}
+		if obj, _ := stamps[0].Object.(string); obj != admission.DecisionReject {
+			t.Fatalf("decision = %q, want %q", obj, admission.DecisionReject)
 		}
 	})
 
 	// (a) The gate-still-open guard — the H4a serializer for the publish→stamp
-	// window. Either fact present means a decision already landed.
-	for _, landed := range []string{admission.ApprovedPredicate, admission.RejectedPredicate} {
+	// window. Either decision value present means a decision already landed.
+	for _, landed := range []string{admission.DecisionApprove, admission.DecisionReject} {
 		t.Run("already-decided gate is a no-op ("+landed+" present)", func(t *testing.T) {
 			w := &fakeWriter{}
 			ch := &fakeChannel{}
 			run := gatedRun(conversationintent.Approve, "cglusky")
-			run.Triples = append(run.Triples, message.Triple{Predicate: landed, Object: "true"})
+			run.Triples = append(run.Triples, message.Triple{Predicate: admission.DecisionPredicate, Object: landed})
 			a := newTestApply(oneRun(run), ch, admission.AllowlistOnlyChecker{}, w)
 
 			if err := a.handleDispatch(ctx, dispatchPayload(t, testRunID), &applyAttempt{}); err != nil {
@@ -285,7 +293,7 @@ func TestApplyLaneNeverParksTheGatedRun(t *testing.T) {
 	ch := &fakeChannel{}
 	// The writer FAILS every write, so the gate stamp never lands and the lane
 	// exhausts. Crucially the writer stays WIRED (a.stamp is the production
-	// stampGateFact, not a stub), so w records every write the lane attempts —
+	// stampDecision, not a stub), so w records every write the lane attempts —
 	// which is what keeps the assertions below non-vacuous. An earlier version of
 	// this pin overrode a.stamp, severing the only link to w and making its
 	// headline assertion incapable of failing (grp5-review).
@@ -310,7 +318,7 @@ func TestApplyLaneNeverParksTheGatedRun(t *testing.T) {
 	for _, call := range w.calls {
 		for _, tr := range call.add {
 			switch tr.Predicate {
-			case admission.ApprovedPredicate, admission.RejectedPredicate:
+			case admission.DecisionPredicate:
 				// the gate fact itself — the one sanctioned write
 			default:
 				t.Errorf("the apply lane wrote %q — it may ONLY ever write a gate fact; a park predicate here wedges the gate FOREVER", tr.Predicate)
@@ -358,7 +366,7 @@ func TestApplyRetriesTransientThenSucceeds(t *testing.T) {
 		t.Errorf("fetcher called %d times, want 2 (one fault + one success)", f.calls)
 	}
 	stamps := gateStamps(w)
-	if len(stamps) != 1 || stamps[0].Predicate != admission.ApprovedPredicate {
+	if len(stamps) != 1 || stamps[0].Object != admission.DecisionApprove {
 		t.Errorf("the recovered attempt must release the gate exactly once, got %v", stamps)
 	}
 	// And the human sees ONE announcement, not one per attempt.
@@ -376,9 +384,9 @@ func TestApplyStampFaultDoesNotRePost(t *testing.T) {
 	ch := &fakeChannel{}
 	a := newRetryApply(oneRun(gatedRun(conversationintent.Approve, "cglusky")), ch, &fakeWriter{})
 	var stampCalls int
-	a.stamp = func(context.Context, string, string) error {
+	a.stamp = func(context.Context, string, string) (string, error) {
 		stampCalls++
-		return errors.New("graph write fault")
+		return "", errors.New("graph write fault")
 	}
 
 	if err := a.handleApplyDispatch(ctx, dispatchPayload(t, testRunID)); err != nil {
@@ -488,12 +496,12 @@ func TestApplyReAnnouncesWhenIntentMovesMidRetry(t *testing.T) {
 
 	var stampCalls int
 	realStamp := a.stamp
-	a.stamp = func(ctx context.Context, runID, predicate string) error {
+	a.stamp = func(ctx context.Context, runID, decision string) (string, error) {
 		stampCalls++
 		if stampCalls == 1 {
-			return errors.New("graph write fault") // force a second attempt
+			return "", errors.New("graph write fault") // force a second attempt
 		}
-		return realStamp(ctx, runID, predicate)
+		return realStamp(ctx, runID, decision)
 	}
 
 	if err := a.handleApplyDispatch(ctx, dispatchPayload(t, testRunID)); err != nil {
@@ -505,7 +513,7 @@ func TestApplyReAnnouncesWhenIntentMovesMidRetry(t *testing.T) {
 		t.Fatalf("want exactly one gate stamp, got %v", stamps)
 	}
 	// The lane acted on the CURRENT intent — reject, by the second author.
-	if stamps[0].Predicate != admission.RejectedPredicate {
+	if stamps[0].Object != admission.DecisionReject {
 		t.Fatalf("the consumer must act on the CURRENT intent (reject), stamped %q", stamps[0].Predicate)
 	}
 	// THE GUARD: the human must have been told about the decision that actually

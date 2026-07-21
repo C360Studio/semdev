@@ -19,7 +19,7 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `intake.event.ref` | admission-check | forge-io |
 | `run.issue.ref` | issue-ref-rule | forge-io |
 | `run.issue.stamped` | issue-ref-rule | forge-io |
-| `run.change.approved` | approval-adapter | conversation-channel |
+| `run.change.decision` | approval-adapter | conversation-channel |
 | `experiment.run.condition` | experiment-intake | semsource-ab |
 | `human.opt.signal` | conversation-adapter | conversation-channel |
 | `run.awaiting.human` | park-rule | run-lifecycle |
@@ -84,7 +84,6 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `conversation.intent.classified` | conversation-classifier | conversation-channel |
 | `conversation.classifier.dispatched` | conversation-spawn-rule | conversation-channel |
 | `conversation.classifier.recorded` | conversation-classifier | conversation-channel |
-| `run.change.rejected` | approval-adapter | conversation-channel |
 
 ## Components
 

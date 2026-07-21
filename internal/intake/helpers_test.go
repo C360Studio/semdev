@@ -29,11 +29,11 @@ func cfg() admission.Config {
 // fakeResolver seeds the redelivery discriminator's run lookup ("" = no run yet).
 type fakeResolver struct {
 	runID    string
-	approved bool
+	decision string
 	phase    string
 	err      error
 }
 
-func (f *fakeResolver) ResolveRunByRef(context.Context, string) (string, bool, string, error) {
-	return f.runID, f.approved, f.phase, f.err
+func (f *fakeResolver) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
+	return admission.RunState{EntityID: f.runID, Decision: f.decision, Phase: f.phase}, f.err
 }

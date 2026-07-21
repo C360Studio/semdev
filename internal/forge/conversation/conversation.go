@@ -2,7 +2,7 @@
 // ConversationChannel port and the neutral Message it carries. semdev's human
 // interface is a message thread — today GitHub issue/PR comments, tomorrow (each
 // composed behind this same port) other channels. The arc already consumes only
-// normalized facts (run.change.approved, human.opt.signal), never a host payload;
+// normalized facts (run.change.decision, human.opt.signal), never a host payload;
 // this package makes the plumbing BENEATH those facts channel-neutral too, so a
 // new channel is a new impl behind the port, not a re-hardcoding of GitHub's
 // CreateComment / CommentEvent / owner-repo-number shape at every human-message

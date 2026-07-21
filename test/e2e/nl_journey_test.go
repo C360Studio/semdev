@@ -125,15 +125,13 @@ func TestBridgeProofNLApprovalReleasesGate(t *testing.T) {
 	// Station 3 — the whole house pattern runs: poller Read → NL bridge → classifier
 	// spawn → classify_intent → routing rule → apply consumer → gate fact → resume.
 	requireRunPhase(ctx, t, runEntityID, "executing")
-	requireTriplePresent(ctx, t, runEntityID, admission.ApprovedPredicate,
+	requireDecision(ctx, t, runEntityID, admission.DecisionApprove,
 		"the NL approval never reached the gate — check the classifier spawn, classify_intent, the routing rule, and the apply consumer in that order")
 	t.Logf("NL station 2-3: an authorized NL approval released the gate — no /semdev approve anywhere in the path")
 
 	// The gate fact was stamped by the deterministic apply consumer, NOT by the
 	// model: exactly ONE approval fact, and no rejection alongside it.
-	requireRunTripleCount(ctx, t, runEntityID, admission.ApprovedPredicate, 1, 30*time.Second)
-	requireTripleAbsent(ctx, t, runEntityID, admission.RejectedPredicate,
-		"an approve classification must never also stamp a rejection")
+	requireRunTripleCount(ctx, t, runEntityID, admission.DecisionPredicate, 1, 30*time.Second)
 
 	// The announcement names the HARNESS-BOUND author (D2/D8.1 — identity is copied
 	// from the pending slot by the harness, never supplied by the model). Asserting
@@ -177,11 +175,12 @@ func TestBridgeProofNLRejectionCancelsRun(t *testing.T) {
 
 	double.AddComment(1, webhookJourneyActor, nlRejectMessage)
 
-	requireTriplePresent(ctx, t, runEntityID, admission.RejectedPredicate,
+	requireDecision(ctx, t, runEntityID, admission.DecisionReject,
 		"the NL rejection never reached the gate — check the classifier spawn, the 03b reject route, and the apply consumer")
 	requireRunPhase(ctx, t, runEntityID, "cancelled")
-	requireTripleAbsent(ctx, t, runEntityID, admission.ApprovedPredicate,
-		"a rejected run must never also carry the approval fact")
+	if n := decisionCount(ctx, t, runEntityID); n != 1 {
+		t.Fatalf("a rejected run carries %d decision facts, want exactly 1 (D13 — the gate cannot hold two)", n)
+	}
 	requireTransparencyPosted(t, double, "Cancelling this run")
 	requireNoFaultNote(t, double)
 	requireModelTurns(t, mock, 4, "2 coordinator decides + create_change + ONE classifier; a cancelled run never reaches the dev rewake")
@@ -213,10 +212,8 @@ func TestConservativeNoneDoesNotApprove(t *testing.T) {
 	// generous settle window, because proving a NON-event needs time to be honest.
 	time.Sleep(20 * time.Second)
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
-	requireTripleAbsent(ctx, t, runEntityID, admission.ApprovedPredicate,
-		"AMBIGUOUS CHATTER RELEASED THE GATE — the conservative-none contract is broken; this is the false-approval class the whole design guards against")
-	requireTripleAbsent(ctx, t, runEntityID, admission.RejectedPredicate,
-		"ambiguous chatter must not cancel the run either")
+	requireTripleAbsent(ctx, t, runEntityID, admission.DecisionPredicate,
+		"AMBIGUOUS CHATTER DECIDED THE GATE — the conservative-none contract is broken; this is the false-approval class the whole design guards against")
 	requireNoTransparencyPosted(t, double)
 	requireModelTurns(t, mock, 4, "2 coordinator decides + create_change + ONE classifier; a `none` routes nowhere so the run stays gated")
 	t.Logf("NL conservative case: %q classified `none` — run still gated, zero gate facts, nothing posted", nlChatterMessage)
@@ -252,7 +249,7 @@ func TestConflictingIntentsResolveToOneTerminal(t *testing.T) {
 
 	// Decision one: an NL approval, applied end-to-end.
 	double.AddComment(1, webhookJourneyActor, nlApproveMessage)
-	requireTriplePresent(ctx, t, runEntityID, admission.ApprovedPredicate,
+	requireDecision(ctx, t, runEntityID, admission.DecisionApprove,
 		"the first NL approval never reached the gate")
 	requireRunPhase(ctx, t, runEntityID, "executing")
 
@@ -261,15 +258,16 @@ func TestConflictingIntentsResolveToOneTerminal(t *testing.T) {
 	double.AddComment(1, webhookJourneyActor, nlRejectMessage)
 	time.Sleep(20 * time.Second) // settle: proving a non-event needs time to be honest
 
-	approved := runTripleCount(ctx, t, runEntityID, admission.ApprovedPredicate)
-	rejected := runTripleCount(ctx, t, runEntityID, admission.RejectedPredicate)
-	if approved != 1 || rejected != 0 {
-		t.Fatalf("run carries %d approval + %d rejection facts, want exactly 1 approval and 0 rejections — a late rejection must not stamp against a closed gate (H4a + the apply consumer's gate-still-open re-check)", approved, rejected)
+	if n := decisionCount(ctx, t, runEntityID); n != 1 {
+		t.Fatalf("run carries %d decision facts, want exactly 1 — the gate is single-valued (D13)", n)
+	}
+	if got := runDecision(ctx, t, runEntityID); got != admission.DecisionApprove {
+		t.Fatalf("decision = %q, want %q — a late rejection must not overturn a decided gate (H4a + the apply consumer's gate-still-open re-check)", got, admission.DecisionApprove)
 	}
 	if phase := runPhase(ctx, t, runEntityID); phase == "cancelled" {
 		t.Fatalf("a rejection arriving AFTER the approval landed cancelled the run — an approval is irreversible once landed (architect H1), and the reject rule is phase-guarded to awaiting_approval precisely so approved, executing work is never killed")
 	}
-	t.Logf("NL conflict case: approve applied, later reject refused — approved=%d rejected=%d, run not cancelled", approved, rejected)
+	t.Logf("NL conflict case: approve applied, later reject refused — decision=%q (one fact), run not cancelled", runDecision(ctx, t, runEntityID))
 }
 
 // TestClassifierBindingFaultTellsTheHuman (task 6.4, the one-tick case) — the
@@ -307,8 +305,7 @@ func TestClassifierBindingFaultTellsTheHuman(t *testing.T) {
 
 	// And the gate is untouched — the loss is a loss, not a decision.
 	time.Sleep(10 * time.Second)
-	if n := runTripleCount(ctx, t, runEntityID, admission.ApprovedPredicate) +
-		runTripleCount(ctx, t, runEntityID, admission.RejectedPredicate); n != 0 {
+	if n := decisionCount(ctx, t, runEntityID); n != 0 {
 		t.Errorf("a refused classification stamped %d gate fact(s) — it must stamp NONE; the human's controls stay live precisely because nothing was decided", n)
 	}
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
@@ -477,4 +474,56 @@ func requireHumanWasTold(t *testing.T, d *forgetest.Double) {
 		"off the dispatched marker, and classify_intent refuses to misattribute), the fallback note MUST fire — check "+
 		"that conversation/05 keys on the ABSENCE of conversation.classifier.recorded and NOT on agent.loop.outcome, "+
 		"because a tool error does not fail its loop")
+}
+
+// requireDecision polls until the run carries run.change.decision == want. Since D13
+// the gate is ONE single-valued fact, so asserting a decision is a VALUE check —
+// predicate presence alone would pass for the OPPOSITE decision.
+func requireDecision(ctx context.Context, t *testing.T, runEntityID, want, hint string) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+
+	// Polled INLINE rather than through requireEventually so the diagnostic can name
+	// what actually landed. requireEventually takes a pre-composed string, which would
+	// capture the observed value before the first poll — every failure would read
+	// "(saw )" and drop the one field that distinguishes "nothing decided" from "the
+	// OPPOSITE decision landed".
+	deadline := time.Now().Add(30 * time.Second)
+	seen := ""
+	for {
+		if e, found := scanEntities(ctx, client)[runEntityID]; found {
+			seen = tripleString(e, admission.DecisionPredicate)
+			if seen == want {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			got := seen
+			if got == "" {
+				got = "<undecided>"
+			}
+			t.Fatalf("run %s never reached run.change.decision==%s (saw %s) — %s",
+				runEntityID, want, got, hint)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// runDecision returns the run's current decision value ("" = undecided).
+func runDecision(ctx context.Context, t *testing.T, runEntityID string) string {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+	e, ok := scanEntities(ctx, client)[runEntityID]
+	if !ok {
+		return ""
+	}
+	return tripleString(e, admission.DecisionPredicate)
+}
+
+// decisionCount returns how many run.change.decision triples the run carries. The fact
+// is single-valued, so anything but 0 or 1 is itself the defect.
+func decisionCount(ctx context.Context, t *testing.T, runEntityID string) int {
+	return runTripleCount(ctx, t, runEntityID, admission.DecisionPredicate)
 }

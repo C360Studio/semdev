@@ -20,13 +20,13 @@ import (
 
 type fakeResolver struct {
 	runID    string
-	approved bool
+	decision string
 	phase    string
 	err      error
 }
 
-func (f *fakeResolver) ResolveRunByRef(context.Context, string) (string, bool, string, error) {
-	return f.runID, f.approved, f.phase, f.err
+func (f *fakeResolver) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
+	return admission.RunState{EntityID: f.runID, Decision: f.decision, Phase: f.phase}, f.err
 }
 
 // fakeIntentReader scripts the classified-ledger read handleMessage's NL bridge
@@ -36,10 +36,19 @@ type fakeIntentReader struct {
 	facts []message.Triple
 	err   error
 	reads int
+	// readsByPrefix separates WHICH fact a read was for. The exact-command
+	// fast-path legitimately reads the DECISION fact (stampDecision's
+	// first-decision-wins guard, D13) while still doing zero NL work, so a pin
+	// that counted all reads together would either break or go vacuous.
+	readsByPrefix map[string]int
 }
 
 func (f *fakeIntentReader) ReadFacts(_ context.Context, _ string, prefix string) ([]message.Triple, error) {
 	f.reads++
+	if f.readsByPrefix == nil {
+		f.readsByPrefix = map[string]int{}
+	}
+	f.readsByPrefix[prefix]++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -74,6 +83,182 @@ func (f *fakeWriter) ReadOwnedPredicates(context.Context, string, string) ([]str
 	return nil, nil
 }
 
+// fakeGraph is a STATEFUL resolver+reader+writer triple: what the adapter writes is
+// what a subsequent resolve and read observe. The stateless fakes above cannot express
+// the group-8 defects at all — the wedge (8.2) and the watermark (8.1) are both about a
+// SECOND message seeing what the FIRST one left behind, so a fake that forgets is a
+// vacuous green (the grp5 lesson: assert reachability, never trust a fake that cannot
+// fail).
+type fakeGraph struct {
+	runID  string
+	phase  string
+	facts  []message.Triple
+	writes int
+}
+
+func (f *fakeGraph) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
+	return admission.RunState{EntityID: f.runID, Decision: f.objectOf(admission.DecisionPredicate), Phase: f.phase}, nil
+}
+
+func (f *fakeGraph) ReadFacts(_ context.Context, _ string, prefix string) ([]message.Triple, error) {
+	var out []message.Triple
+	for _, tr := range f.facts {
+		if strings.HasPrefix(tr.Predicate, prefix) {
+			out = append(out, tr)
+		}
+	}
+	return out, nil
+}
+
+// ReplaceTriples mirrors the graph's replace-by-predicate semantics: a written
+// predicate REPLACES any prior triple of that predicate on the entity.
+func (f *fakeGraph) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
+	f.writes++
+	for _, tr := range add {
+		kept := f.facts[:0]
+		for _, existing := range f.facts {
+			if existing.Predicate != tr.Predicate {
+				kept = append(kept, existing)
+			}
+		}
+		f.facts = append(kept, tr)
+	}
+	return nil
+}
+
+func (f *fakeGraph) ReadOwnedPredicates(context.Context, string, string) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeGraph) objectOf(pred string) string {
+	for _, tr := range f.facts {
+		if tr.Predicate == pred {
+			if s, ok := tr.Object.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// gateFacts returns every gate-decision triple the run carries — the assertion
+// surface for "the gate holds exactly one decision".
+func (f *fakeGraph) gateFacts() []message.Triple {
+	var out []message.Triple
+	for _, tr := range f.facts {
+		if strings.HasPrefix(tr.Predicate, "run.change.") {
+			out = append(out, tr)
+		}
+	}
+	return out
+}
+
+func newTestApprovalOnGraph(g *fakeGraph, checker admission.PermissionChecker) *approvalAdapter {
+	cfg := ComponentConfig{Repo: "c360studio/semdev-fixture", Allowlist: []string{"cglusky"}}
+	applyConfigDefaults(&cfg)
+	return &approvalAdapter{cfg: cfg, checker: checker, resolver: g, writer: g, reader: g, logger: slog.Default()}
+}
+
+// TestOppositeCommandsCannotWedgeTheGate is the group-8 8.2 pin (external review #2,
+// CONFIRMED). BEFORE the fix, releaseGate consulted ONLY alreadyApproved (which reads
+// run.change.approved) and NEVER run.change.rejected, so an authorized `/semdev reject`
+// followed by `/semdev approve` on a still-gated run left BOTH gate facts present — after
+// which the resume rule (which requires rejected absent) and the cancel rule (which
+// requires approved absent) BOTH refuse to fire and the run is wedged at the gate
+// FOREVER, with no park, no post, and no operator surface. That cell was previously
+// DOCUMENTED as an accepted "unsurfaced stall"; design D13 reverses that call and makes
+// the contradictory state unrepresentable via ONE single-valued run.change.decision.
+//
+// The assertion is deliberately on the CELL SPACE, not on a predicate name: the run must
+// carry EXACTLY ONE gate-decision fact no matter which verbs arrive in which order.
+func TestOppositeCommandsCannotWedgeTheGate(t *testing.T) {
+	g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval}
+	a := newTestApprovalOnGraph(g, nil)
+	ctx := context.Background()
+
+	if err := a.handleCommentEvent(ctx, flattenedComment(t, "cglusky", "cglusky", "/semdev reject")); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if err := a.handleCommentEvent(ctx, flattenedComment(t, "cglusky", "cglusky", "/semdev approve")); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	got := g.gateFacts()
+	// THE LOAD-BEARING ASSERTION is the VALUE: first decision wins (D13 layer 1 — H1's
+	// irreversible-approval generalized symmetrically, so a cancelled run is never
+	// resurrected either). Without the refusal, the approve OVERWRITES the reject here
+	// and this is the check that catches it.
+	if len(got) == 0 {
+		t.Fatal("no decision recorded at all — the reject should have decided the gate")
+	}
+	if obj, _ := got[0].Object.(string); obj != admission.DecisionReject {
+		t.Fatalf("decision = %q, want %q — the FIRST authorized decision must stand; an "+
+			"opposite command on a decided run is refused, never applied", obj, admission.DecisionReject)
+	}
+	// The cell-space check is a REGRESSION GUARD, not the proof: with one single-valued
+	// predicate and replace-by-predicate semantics len() cannot exceed 1 by construction,
+	// so this fires only if someone reintroduces a second run.change.* gate fact.
+	if len(got) != 1 {
+		t.Errorf("run carries %d gate-decision facts %v, want EXACTLY 1 — a run holding two "+
+			"contradictory gate facts fires NEITHER lifecycle rule and is wedged at the gate forever", len(got), got)
+	}
+}
+
+// TestExactCommandOnUngatedRunIsIgnored is the BLOCKING pin from the group-8 review.
+//
+// releaseGate had NO phase guard, so an exact command decided whatever run the ref
+// resolved to, in ANY phase. Combined with run-lifecycle/01 (the ONLY rule that moves a
+// run INTO awaiting_approval) now requiring the gate UNDECIDED, that made a PRE-GATE
+// `/semdev reject` an unrecoverable wedge: the decision lands while the run is still
+// executing → the gate is never offered → the cancel rule is phase-guarded to a phase the
+// run can never reach → and a follow-up `/semdev approve` is refused by first-decision-wins.
+// No park, no post, no operator surface — the exact class D13 exists to remove.
+//
+// It is also the D12 rule stated once: a command before the gate opens does not decide it.
+func TestExactCommandOnUngatedRunIsIgnored(t *testing.T) {
+	for _, phase := range []string{"executing", "completed", ""} {
+		t.Run("phase="+phase, func(t *testing.T) {
+			g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: phase}
+			a := newTestApprovalOnGraph(g, nil)
+
+			for _, body := range []string{"/semdev reject", "/semdev approve"} {
+				if err := a.handleCommentEvent(context.Background(),
+					flattenedComment(t, "cglusky", "cglusky", body)); err != nil {
+					t.Fatalf("%s must be DEFINITIVE (acked), got %v — redelivery cannot make a run gated, "+
+						"and a retry that happened to span the gate opening would make pre-approval "+
+						"nondeterministically work", body, err)
+				}
+			}
+			if n := len(g.gateFacts()); n != 0 {
+				t.Fatalf("an exact command on a run at phase %q recorded %d decision(s) %v, want 0 — "+
+					"a pre-gate decision makes run-lifecycle/01 unable to OPEN the gate, wedging the run "+
+					"in a phase from which nothing can recover it", phase, n, g.gateFacts())
+			}
+		})
+	}
+}
+
+// TestGatedButDecidedRunSpendsNoClassifier pins the NL bridge's Decided() guard. Between a
+// decision landing and the lifecycle rule firing the transition, the run is STILL
+// awaiting_approval — so the phase check alone lets a message through, and the classifier
+// it spawns produces an intent the routing rules (which require the gate undecided) can
+// never route. That is a real model turn spent on a guaranteed-dead result.
+func TestGatedButDecidedRunSpendsNoClassifier(t *testing.T) {
+	g := &fakeGraph{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval}
+	g.facts = append(g.facts, message.Triple{Predicate: admission.DecisionPredicate, Object: admission.DecisionApprove})
+	a := newTestApprovalOnGraph(g, nil)
+	before := g.writes
+
+	if err := a.handleCommentEvent(context.Background(),
+		flattenedComment(t, "cglusky", "cglusky", "yes please ship it")); err != nil {
+		t.Fatalf("handleCommentEvent: %v", err)
+	}
+	if g.writes != before {
+		t.Errorf("an NL message on a gated-but-DECIDED run performed %d writes, want 0 — "+
+			"stamping conversation.pending.* here spawns a classifier whose intent cannot route", g.writes-before)
+	}
+}
+
 func newTestApproval(resolver admission.RunResolver, writer *fakeWriter, checker admission.PermissionChecker) *approvalAdapter {
 	cfg := ComponentConfig{Repo: "c360studio/semdev-fixture", Allowlist: []string{"cglusky"}}
 	applyConfigDefaults(&cfg)
@@ -104,13 +289,13 @@ func flattenedComment(t *testing.T, sender, author, body string) []byte {
 
 // TestApprovalReadsNeutralMessage pins the carve: the approval adapter authorizes
 // and releases the gate from a NEUTRAL Message (via conversation.NormalizeInboundComment)
-// — NOT a githubwebhook.CommentEvent/CommentSignal — and lands run.change.approved="true"
+// — NOT a githubwebhook.CommentEvent/CommentSignal — and lands run.change.decision="approve"
 // (Source approval-adapter) on the resolved run, byte-for-byte the stand-in fact the
 // resume rule consumes. The admission Event it authorizes is rebuilt from Message.Author
 // + SplitRef(thread), so Authorize is unchanged.
 func TestApprovalReadsNeutralMessage(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "c360.semdev-001.agent.chain.execution.r1"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: "c360.semdev-001.agent.chain.execution.r1", phase: admission.PhaseAwaitingApproval}, writer, nil)
 
 	if err := a.handleCommentEvent(context.Background(), flattenedComment(t, "cglusky", "cglusky", "/semdev approve")); err != nil {
 		t.Fatalf("handleCommentEvent: %v", err)
@@ -126,9 +311,9 @@ func TestApprovalReadsNeutralMessage(t *testing.T) {
 		t.Fatalf("add = %d triples, want 1", len(call.add))
 	}
 	tr := call.add[0]
-	if tr.Predicate != admission.ApprovedPredicate || tr.Object != "true" || tr.Source != ApprovedSource {
+	if tr.Predicate != admission.DecisionPredicate || tr.Object != admission.DecisionApprove || tr.Source != ApprovedSource {
 		t.Errorf("triple = %s=%v (Source %s), want %s=true (Source %s) — the exact resume-rule condition",
-			tr.Predicate, tr.Object, tr.Source, admission.ApprovedPredicate, ApprovedSource)
+			tr.Predicate, tr.Object, tr.Source, admission.DecisionApprove, ApprovedSource)
 	}
 }
 
@@ -136,7 +321,7 @@ func TestApprovalReadsNeutralMessage(t *testing.T) {
 // ONE approval core (handleMessage), TWO transports. The WEBHOOK path
 // (handleCommentEvent → NormalizeInboundComment → handleMessage) and the POLL path
 // (a neutral Message fed to handleMessage directly) both authorize Message.Author
-// and land the IDENTICAL run.change.approved="true" (Source approval-adapter) on the
+// and land the IDENTICAL run.change.decision="approve" (Source approval-adapter) on the
 // resolved run. The webhook path stays byte-identical to today (the migrated
 // approval pins are its regression guard); this adds the direct-Message entry point.
 func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
@@ -146,7 +331,7 @@ func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
 
 	// Webhook transport: a flattened created comment through the full path.
 	wWriter := &fakeWriter{}
-	aw := newTestApproval(&fakeResolver{runID: runID}, wWriter, nil)
+	aw := newTestApproval(&fakeResolver{runID: runID, phase: admission.PhaseAwaitingApproval}, wWriter, nil)
 	if err := aw.handleCommentEvent(ctx, flattenedComment(t, "cglusky", "cglusky", "/semdev approve")); err != nil {
 		t.Fatalf("webhook handleCommentEvent: %v", err)
 	}
@@ -154,7 +339,7 @@ func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
 	// Poll transport: a neutral Message (the poll transport's unit — a real comment
 	// id, one author) fed to the SAME core directly, no webhook payload.
 	pWriter := &fakeWriter{}
-	ap := newTestApproval(&fakeResolver{runID: runID}, pWriter, nil)
+	ap := newTestApproval(&fakeResolver{runID: runID, phase: admission.PhaseAwaitingApproval}, pWriter, nil)
 	msg := conversation.Message{ID: "9876543210", Author: "cglusky", Body: "/semdev approve", At: time.Now().UTC()}
 	if err := ap.handleMessage(ctx, msg, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("poll handleMessage: %v", err)
@@ -170,9 +355,9 @@ func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
 			t.Fatalf("%s transport: stamped entity=%q with %d triples, want %q with 1", name, call.entityID, len(call.add), runID)
 		}
 		tr := call.add[0]
-		if tr.Predicate != admission.ApprovedPredicate || tr.Object != "true" || tr.Source != ApprovedSource {
+		if tr.Predicate != admission.DecisionPredicate || tr.Object != admission.DecisionApprove || tr.Source != ApprovedSource {
 			t.Errorf("%s transport: triple = %s=%v (Source %s), want %s=true (Source %s)",
-				name, tr.Predicate, tr.Object, tr.Source, admission.ApprovedPredicate, ApprovedSource)
+				name, tr.Predicate, tr.Object, tr.Source, admission.DecisionApprove, ApprovedSource)
 		}
 	}
 }
@@ -182,7 +367,7 @@ func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
 // non-allowlisted author's command is ignored, zero writes (H-1: one identity).
 func TestPollAuthorizesMessageAuthorNotAllowlisted(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, admission.AllowlistOnlyChecker{})
+	a := newTestApproval(&fakeResolver{runID: "run-x", phase: admission.PhaseAwaitingApproval}, writer, admission.AllowlistOnlyChecker{})
 	msg := conversation.Message{ID: "1", Author: "mallory", Body: "/semdev approve"}
 	if err := a.handleMessage(context.Background(), msg, conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("unauthorized poll message is definitive: %v", err)
@@ -205,7 +390,7 @@ func TestPollHonorsEditedApproveWebhookDoesNot(t *testing.T) {
 	// Webhook: an EDITED comment carrying "/semdev approve" — normalizeComment
 	// rejects a non-created action, so no write ever reaches the core.
 	wWriter := &fakeWriter{}
-	aw := newTestApproval(&fakeResolver{runID: runID}, wWriter, nil)
+	aw := newTestApproval(&fakeResolver{runID: runID, phase: admission.PhaseAwaitingApproval}, wWriter, nil)
 	editedEvent := githubwebhook.CommentEvent{
 		WebhookEvent: githubwebhook.WebhookEvent{
 			EventType:  "issue_comment",
@@ -230,7 +415,7 @@ func TestPollHonorsEditedApproveWebhookDoesNot(t *testing.T) {
 
 	// Poll: the SAME edited-in approve, read as a current-body Message, IS honored.
 	pWriter := &fakeWriter{}
-	ap := newTestApproval(&fakeResolver{runID: runID}, pWriter, nil)
+	ap := newTestApproval(&fakeResolver{runID: runID, phase: admission.PhaseAwaitingApproval}, pWriter, nil)
 	msg := conversation.Message{ID: "5", Author: "cglusky", Body: "/semdev approve", At: time.Now().UTC()}
 	if err := ap.handleMessage(ctx, msg, conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("poll edited-in approve: %v", err)
@@ -244,7 +429,7 @@ func TestPollHonorsEditedApproveWebhookDoesNot(t *testing.T) {
 // no write, definitive ack.
 func TestUnauthorizedApprovalIsIgnored(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, admission.AllowlistOnlyChecker{})
+	a := newTestApproval(&fakeResolver{runID: "run-x", phase: admission.PhaseAwaitingApproval}, writer, admission.AllowlistOnlyChecker{})
 	if err := a.handleCommentEvent(context.Background(), flattenedComment(t, "mallory", "mallory", "/semdev approve")); err != nil {
 		t.Fatalf("unauthorized is definitive: %v", err)
 	}
@@ -258,7 +443,7 @@ func TestUnauthorizedApprovalIsIgnored(t *testing.T) {
 // command never counts (privilege confusion otherwise).
 func TestUnattributableCommandIsNoSignal(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: "run-x", phase: admission.PhaseAwaitingApproval}, writer, nil)
 	if err := a.handleCommentEvent(context.Background(), flattenedComment(t, "cglusky", "mallory", "/semdev approve")); err != nil {
 		t.Fatalf("unattributable is definitive: %v", err)
 	}
@@ -268,15 +453,21 @@ func TestUnattributableCommandIsNoSignal(t *testing.T) {
 }
 
 // TestApprovalReplayIsIdempotent — an already-approved run gets no second write
-// (and no error: the replay acks).
+// (and no error: the replay acks). It runs on the STATEFUL fakeGraph because the
+// refusal is a fresh read at STAMP time (D13), not the resolver's earlier snapshot:
+// the resolve happens before an external Authorize round-trip, which is exactly the
+// window a competing decision lands in, so a test that only seeds the resolver would
+// prove the wrong guard.
 func TestApprovalReplayIsIdempotent(t *testing.T) {
-	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x", approved: true}, writer, nil)
+	g := &fakeGraph{runID: "run-x", phase: admission.PhaseAwaitingApproval}
+	g.facts = append(g.facts, message.Triple{Predicate: admission.DecisionPredicate, Object: admission.DecisionApprove})
+	a := newTestApprovalOnGraph(g, nil)
+	before := g.writes
 	if err := a.handleCommentEvent(context.Background(), flattenedComment(t, "cglusky", "cglusky", "/semdev approve")); err != nil {
 		t.Fatalf("replay must ack: %v", err)
 	}
-	if len(writer.calls) != 0 {
-		t.Errorf("replay wrote %d facts, want 0", len(writer.calls))
+	if g.writes != before {
+		t.Errorf("replay performed %d writes, want 0", g.writes-before)
 	}
 }
 
@@ -302,7 +493,7 @@ func TestApprovalResolverFaultRedelivers(t *testing.T) {
 // flattened itself).
 func TestDecodeErrorIsDefinitiveAck(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: "run-x", phase: admission.PhaseAwaitingApproval}, writer, nil)
 	if err := a.handleCommentEvent(context.Background(), []byte(`{not json`)); err != nil {
 		t.Fatalf("a decode error must ack (nil), got %v", err)
 	}
@@ -314,7 +505,7 @@ func TestDecodeErrorIsDefinitiveAck(t *testing.T) {
 // TestNonCommandCommentsAreIgnored — ordinary conversation never touches the graph.
 func TestNonCommandCommentsAreIgnored(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-x"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: "run-x", phase: admission.PhaseAwaitingApproval}, writer, nil)
 	for _, body := range []string{
 		"looks good to me",
 		"/semdevil approve",       // prefix-collision guard
@@ -380,7 +571,7 @@ func TestHasRejectCommandTokenizing(t *testing.T) {
 
 // TestExactApproveCommandStillDeterministic — the whole-token /semdev approve
 // fast-path stays BYTE-IDENTICAL under the hybrid dispatch: it stamps
-// run.change.approved (Source approval-adapter) and NEVER consults the classifier
+// the approve decision (Source approval-adapter) and NEVER consults the classifier
 // ledger (no NL path, zero model turns). The migrated approval pins above are the
 // regression guard; this adds the "no classifier read on the fast-path" assertion.
 func TestExactApproveCommandStillDeterministic(t *testing.T) {
@@ -398,17 +589,17 @@ func TestExactApproveCommandStillDeterministic(t *testing.T) {
 		t.Fatalf("exact approve = %d calls, want one 1-triple write", len(writer.calls))
 	}
 	tr := writer.calls[0].add[0]
-	if tr.Predicate != admission.ApprovedPredicate || tr.Object != "true" || tr.Source != ApprovedSource {
+	if tr.Predicate != admission.DecisionPredicate || tr.Object != admission.DecisionApprove || tr.Source != ApprovedSource {
 		t.Errorf("triple = %s=%v (Source %s), want %s=true (Source %s)",
-			tr.Predicate, tr.Object, tr.Source, admission.ApprovedPredicate, ApprovedSource)
+			tr.Predicate, tr.Object, tr.Source, admission.DecisionApprove, ApprovedSource)
 	}
-	if reader.reads != 0 {
-		t.Errorf("exact approve consulted the classifier ledger %d times, want 0 (deterministic fast-path)", reader.reads)
+	if n := reader.readsByPrefix[conversationintent.IntentClassifiedPredicate]; n != 0 {
+		t.Errorf("exact approve consulted the classifier ledger %d times, want 0 (deterministic fast-path)", n)
 	}
 }
 
 // TestExactRejectCommandStampsRejected — a whole-token /semdev reject stamps
-// run.change.rejected (Source approval-adapter) deterministically, no model turn,
+// the reject decision (Source approval-adapter) deterministically, no model turn,
 // no classifier read. (The awaiting_approval→cancelled transition is a rule,
 // asserted in group 5.)
 func TestExactRejectCommandStampsRejected(t *testing.T) {
@@ -426,27 +617,32 @@ func TestExactRejectCommandStampsRejected(t *testing.T) {
 		t.Fatalf("exact reject = %d calls, want one 1-triple write", len(writer.calls))
 	}
 	tr := writer.calls[0].add[0]
-	if tr.Predicate != admission.RejectedPredicate || tr.Object != "true" || tr.Source != ApprovedSource {
+	if tr.Predicate != admission.DecisionPredicate || tr.Object != admission.DecisionReject || tr.Source != ApprovedSource {
 		t.Errorf("triple = %s=%v (Source %s), want %s=true (Source %s)",
-			tr.Predicate, tr.Object, tr.Source, admission.RejectedPredicate, ApprovedSource)
+			tr.Predicate, tr.Object, tr.Source, admission.DecisionReject, ApprovedSource)
 	}
-	if reader.reads != 0 {
-		t.Errorf("exact reject consulted the classifier ledger %d times, want 0", reader.reads)
+	if n := reader.readsByPrefix[conversationintent.IntentClassifiedPredicate]; n != 0 {
+		t.Errorf("exact reject consulted the classifier ledger %d times, want 0", n)
 	}
 }
 
 // TestExactRejectRefusedOnApprovedRun — H1: an approval is irreversible once
 // landed, so /semdev reject on an already-approved run is a no-op (no write).
 func TestExactRejectRefusedOnApprovedRun(t *testing.T) {
-	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-1", approved: true, phase: "executing"}, writer, nil)
+	g := &fakeGraph{runID: "run-1", phase: "executing"}
+	g.facts = append(g.facts, message.Triple{Predicate: admission.DecisionPredicate, Object: admission.DecisionApprove})
+	a := newTestApprovalOnGraph(g, nil)
+	before := g.writes
 	if err := a.handleMessage(context.Background(),
 		conversation.Message{ID: "3", Author: "cglusky", Body: "/semdev reject"},
 		conversation.ThreadRef("c360studio/semdev-fixture#7")); err != nil {
 		t.Fatalf("handleMessage: %v", err)
 	}
-	if len(writer.calls) != 0 {
-		t.Errorf("reject on an approved run wrote %d facts, want 0 (H1 — approval irreversible)", len(writer.calls))
+	if g.writes != before {
+		t.Errorf("reject on an approved run performed %d writes, want 0 (H1 — approval irreversible)", g.writes-before)
+	}
+	if got := g.objectOf(admission.DecisionPredicate); got != admission.DecisionApprove {
+		t.Errorf("decision = %q, want it UNCHANGED at %q", got, admission.DecisionApprove)
 	}
 }
 

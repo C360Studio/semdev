@@ -19,7 +19,7 @@
 // It is the `decide` SHAPE, not the `submit_review` shape (G3): a routing
 // classification the harness records, NOT a harness-floored verdict — approval
 // has no executable ground-truth, so no measurement floor is possible. The
-// consequential gate fact (run.change.approved / run.change.rejected) is stamped
+// consequential gate fact (run.change.decision) is stamped
 // deterministically downstream by the apply consumer under one G5 writer
 // (approval-adapter), never here; classify_intent fires no lifecycle transition
 // (G2). It is a SEPARATE tool from `decide` because `decide` carries no

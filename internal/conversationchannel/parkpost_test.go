@@ -364,10 +364,10 @@ func TestFaultNoteSuppressedOnceGateDecided(t *testing.T) {
 		}
 	}
 
-	for _, decided := range []string{admission.ApprovedPredicate, admission.RejectedPredicate} {
+	for _, decided := range []string{admission.DecisionApprove, admission.DecisionReject} {
 		t.Run("silent once "+decided+" landed", func(t *testing.T) {
 			ch := &fakeChannel{}
-			p := newTestNotePoster(ch, &fakeFetcher{entities: runFacts(map[string]string{decided: "true"})})
+			p := newTestNotePoster(ch, &fakeFetcher{entities: runFacts(map[string]string{admission.DecisionPredicate: decided})})
 			if err := p.handleUserNote(ctx, payload); err != nil {
 				t.Fatalf("handleUserNote: %v", err)
 			}

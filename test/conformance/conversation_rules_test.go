@@ -225,8 +225,8 @@ func TestClassifierSpawnRuleContract(t *testing.T) {
 	// while still at awaiting_approval (the D7 both-facts park; the
 	// publish→stamp window) must not spend a classifier turn whose intent can
 	// never route.
-	if !spawn.hasAbsenceGuard("run.change.approved") || !spawn.hasAbsenceGuard("run.change.rejected") {
-		t.Error("spawn must require BOTH gate facts absent (run.change.approved/rejected length_eq 0) — a gate-fact-bearing run's classification is a guaranteed-dead paid turn")
+	if !spawn.hasAbsenceGuard("run.change.decision") {
+		t.Error("spawn must require the gate UNDECIDED (run.change.decision length_eq 0) — a decided run's classification is a guaranteed-dead paid turn")
 	}
 	// Firing-cap opt-out (grp4-review H1): the engine's default per-action cap
 	// (3 per rule+entity, RULE_STATE-persisted) would silently skip the marker
@@ -299,8 +299,8 @@ func TestIntentRoutesDispatchApplyConsumer(t *testing.T) {
 		if c, ok := route.condition("agent.run.phase"); !ok || c.Operator != "eq" || c.Value != "awaiting_approval" {
 			t.Errorf("%s must be phase-gated to awaiting_approval, got %+v", id, c)
 		}
-		if !route.hasAbsenceGuard("run.change.approved") || !route.hasAbsenceGuard("run.change.rejected") {
-			t.Errorf("%s must require BOTH gate facts absent (run.change.approved/rejected length_eq 0, H4a) — and the gate fact landing is what extinguishes the trigger", id)
+		if !route.hasAbsenceGuard("run.change.decision") {
+			t.Errorf("%s must require the gate UNDECIDED (run.change.decision length_eq 0, H4a) — and the decision landing is what extinguishes the trigger", id)
 		}
 		if !route.publishesTo(applySubject) {
 			t.Errorf("%s must publish %s (the deterministic apply consumer; the run is the dispatch entity_id — the rule fires on the run)", id, applySubject)

@@ -58,43 +58,44 @@ func mustPage(t *testing.T, resp graph.PrefixQueryResponse) []byte {
 }
 
 // TestResolverSurfacesPhase pins the M7 phase getter (nl-conversation-intent
-// D4): ResolveRunByRef surfaces agent.run.phase alongside the run id + approved
-// state, so handleMessage can gate the NL bridge on awaiting_approval WITHOUT a
-// second query. A run with an approved fact reports approved==true and its own
-// phase; a gated run reports phase=="awaiting_approval", approved==false.
+// D4): ResolveRunByRef surfaces agent.run.phase alongside the run id + the gate
+// decision, so handleMessage can gate the NL bridge on awaiting_approval WITHOUT a
+// second query. A gated run reports phase=="awaiting_approval" and NO decision; a
+// decided run reports its own phase and its decision value (D13 — one single-valued
+// fact, never a pair of contradictable booleans).
 func TestResolverSurfacesPhase(t *testing.T) {
 	gated := runEntity("run-1", "awaiting_approval", "acme/widgets#1")
 	approved := runEntity("run-2", "executing", "acme/widgets#2")
 	approved.Triples = append(approved.Triples,
-		message.Triple{Subject: "run-2", Predicate: ApprovedPredicate, Object: "true"})
+		message.Triple{Subject: "run-2", Predicate: DecisionPredicate, Object: DecisionApprove})
 	page := mustPage(t, graph.PrefixQueryResponse{Entities: []graph.EntityState{gated, approved}})
 
-	runID, wasApproved, phase, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+	got, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
 		ResolveRunByRef(context.Background(), "acme/widgets#1")
 	if err != nil {
 		t.Fatalf("ResolveRunByRef: %v", err)
 	}
-	if runID != "run-1" {
-		t.Errorf("runID = %q, want run-1", runID)
+	if got.EntityID != "run-1" {
+		t.Errorf("EntityID = %q, want run-1", got.EntityID)
 	}
-	if wasApproved {
-		t.Errorf("approved = true, want false (no run.change.approved fact on the gated run)")
+	if got.Decided() {
+		t.Errorf("Decision = %q, want \"\" (the gated run carries no decision)", got.Decision)
 	}
-	if phase != "awaiting_approval" {
-		t.Fatalf("phase = %q, want awaiting_approval — the resolver must surface agent.run.phase (M7)", phase)
+	if got.Phase != "awaiting_approval" {
+		t.Fatalf("Phase = %q, want awaiting_approval — the resolver must surface agent.run.phase (M7)", got.Phase)
 	}
 
-	// The approved run reports its own phase + approved state.
-	_, wasApproved2, phase2, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+	// The decided run reports its own phase + decision value.
+	got2, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
 		ResolveRunByRef(context.Background(), "acme/widgets#2")
 	if err != nil {
 		t.Fatalf("ResolveRunByRef(approved): %v", err)
 	}
-	if !wasApproved2 {
-		t.Errorf("approved = false, want true")
+	if got2.Decision != DecisionApprove {
+		t.Errorf("Decision = %q, want %q", got2.Decision, DecisionApprove)
 	}
-	if phase2 != "executing" {
-		t.Errorf("phase = %q, want executing", phase2)
+	if got2.Phase != "executing" {
+		t.Errorf("phase = %q, want executing", got2.Phase)
 	}
 }
 
@@ -142,5 +143,130 @@ func TestListRunsAwaitingApprovalTransportErrorPropagates(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("on error the result must be nil, got %v", got)
+	}
+}
+
+// runEntityAt is runEntity with an explicit phase-transition timestamp — the value
+// preferRun's second tier orders on, and (D12a) the gate-open watermark.
+func runEntityAt(id, phase, ref string, at time.Time) graph.EntityState {
+	e := graph.EntityState{ID: id}
+	if phase != "" {
+		e.Triples = append(e.Triples, message.Triple{
+			Subject: id, Predicate: agentrun.PhasePredicate, Object: phase, Timestamp: at})
+	}
+	if ref != "" {
+		e.Triples = append(e.Triples, message.Triple{Subject: id, Predicate: "run.issue.ref", Object: ref})
+	}
+	return e
+}
+
+// TestResolverPrefersTheActiveGatedRun pins D12b — the deterministic resolution that
+// replaced first-match-in-page-order.
+//
+// WHY IT MATTERS: a re-triggered issue leaves an OLD run carrying the SAME run.issue.ref.
+// Under first-match, whichever run paging happened to reach first decided whose gate a
+// comment released — the enabling half of the historical-approval defect (external review
+// #1). Order is now total: at-the-gate ≻ newest gate-open ≻ entity ID.
+//
+// NOTE the sequencing hazard this pin exists to bound: making the gated run ALWAYS win
+// turns a probabilistic mis-resolution into a deterministic one, so a historical comment
+// re-read from a cursor-zero restart now reliably targets the FRESH gated run. That is
+// only safe once the D12a watermark (msg.At > gateOpenedAt) also lands.
+func TestResolverPrefersTheActiveGatedRun(t *testing.T) {
+	const ref = "acme/widgets#1"
+	older := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+
+	t.Run("a gated run beats a terminal one regardless of page order", func(t *testing.T) {
+		// The terminal run is listed FIRST, so first-match would have returned it.
+		page := mustPage(t, graph.PrefixQueryResponse{Entities: []graph.EntityState{
+			runEntityAt("run-old", "completed", ref, newer),
+			runEntityAt("run-gated", PhaseAwaitingApproval, ref, older),
+		}})
+		got, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+			ResolveRunByRef(context.Background(), ref)
+		if err != nil {
+			t.Fatalf("ResolveRunByRef: %v", err)
+		}
+		if got.EntityID != "run-gated" {
+			t.Fatalf("resolved %q, want run-gated — a decision can only apply to the run "+
+				"actually asking for one, whatever order paging returns them in", got.EntityID)
+		}
+	})
+
+	t.Run("among gated runs the newest gate-open wins, across a page boundary", func(t *testing.T) {
+		p1 := mustPage(t, graph.PrefixQueryResponse{
+			Entities:   []graph.EntityState{runEntityAt("run-a", PhaseAwaitingApproval, ref, older)},
+			NextCursor: "c1",
+		})
+		p2 := mustPage(t, graph.PrefixQueryResponse{
+			Entities: []graph.EntityState{runEntityAt("run-b", PhaseAwaitingApproval, ref, newer)},
+		})
+		got, err := newTestResolver(&fakeRequester{pages: [][]byte{p1, p2}}).
+			ResolveRunByRef(context.Background(), ref)
+		if err != nil {
+			t.Fatalf("ResolveRunByRef: %v", err)
+		}
+		if got.EntityID != "run-b" {
+			t.Fatalf("resolved %q, want run-b (the freshest proposal) — the scan must cross "+
+				"page boundaries before choosing, not return the first page's match", got.EntityID)
+		}
+	})
+
+	t.Run("identical gate-open times break on entity ID, stably", func(t *testing.T) {
+		same := older
+		forward := []graph.EntityState{
+			runEntityAt("run-b", PhaseAwaitingApproval, ref, same),
+			runEntityAt("run-a", PhaseAwaitingApproval, ref, same),
+		}
+		reversed := []graph.EntityState{forward[1], forward[0]}
+		for name, ents := range map[string][]graph.EntityState{"forward": forward, "reversed": reversed} {
+			page := mustPage(t, graph.PrefixQueryResponse{Entities: ents})
+			got, err := newTestResolver(&fakeRequester{pages: [][]byte{page}}).
+				ResolveRunByRef(context.Background(), ref)
+			if err != nil {
+				t.Fatalf("%s: ResolveRunByRef: %v", name, err)
+			}
+			if got.EntityID != "run-a" {
+				t.Fatalf("%s: resolved %q, want run-a — the tiebreak must be a TOTAL order, so "+
+					"the same graph resolves the same way on every call", name, got.EntityID)
+			}
+		}
+	})
+}
+
+// TestResolverReturnsAMatchFoundBeforePageExhaustion pins the regression the deterministic
+// scan introduced and the review caught.
+//
+// The old first-match loop short-circuited, so it never hit the page cap once it had a
+// match. Scanning every page to APPLY a preference means the cap is now reachable with a
+// perfectly good match already in hand — and discarding it turns every approval into a
+// transient error, which redelivers to MaxDeliver and then vanishes. `/semdev approve`
+// would silently stop working on EVERY run once the chain-execution prefix outgrew
+// maxRunPages*1000 entities. The ordering is a PREFERENCE, not a correctness requirement,
+// so a partial scan must degrade to "a deterministically-chosen run", never to nothing.
+func TestResolverReturnsAMatchFoundBeforePageExhaustion(t *testing.T) {
+	const ref = "acme/widgets#1"
+	pages := make([][]byte, 0, maxRunPages+2)
+	// The match is on page 1; every later page is full and keeps handing back a cursor,
+	// so the scan runs out of pages long after it found what it needed.
+	pages = append(pages, mustPage(t, graph.PrefixQueryResponse{
+		Entities:   []graph.EntityState{runEntity("run-gated", PhaseAwaitingApproval, ref)},
+		NextCursor: "more",
+	}))
+	for i := 0; i < maxRunPages+1; i++ {
+		pages = append(pages, mustPage(t, graph.PrefixQueryResponse{
+			Entities:   []graph.EntityState{runEntity("noise", "executing", "other/repo#9")},
+			NextCursor: "more",
+		}))
+	}
+
+	got, err := newTestResolver(&fakeRequester{pages: pages}).ResolveRunByRef(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("a run found before page exhaustion must RESOLVE, not error: %v — "+
+			"erroring here makes every approval transient and the gate unreachable", err)
+	}
+	if got.EntityID != "run-gated" {
+		t.Fatalf("resolved %q, want run-gated", got.EntityID)
 	}
 }

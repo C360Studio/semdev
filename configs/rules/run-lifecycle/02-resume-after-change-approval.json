@@ -2,14 +2,30 @@
   "id": "run_resume_after_change_approval",
   "type": "expression",
   "name": "Resume after change approval (awaiting_approval → executing)",
-  "description": "The dev loop SHALL NOT start until a human approves the generated change (run.change.approved). This rule is the release side of the first human gate: a run parked in awaiting_approval returns to executing only once run.change.approved is present, at which point dev_from_task becomes eligible for the run's tasks. Without the approval fact the run stays parked — the gate holds. Rule-owned transition (G2). CONTRACT (design D15): group 5's approval adapter MUST stamp run.change.approved on the RUN entity (subject = agent.run.entity-id), or the run never resumes.\n\nMUTUAL EXCLUSION with the CANCEL rule (nl-conversation-intent grp3-review M2): the run.change.rejected length_eq 0 guard is LOAD-BEARING, not decorative. The exact-command fast-paths bypass the NL routing rules' both-facts-absent guard and stamp a gate fact directly, so an authorized `/semdev reject` then `/semdev approve` on a still-gated run can leave BOTH gate facts present. This rule and run-lifecycle/07 each require the OTHER fact ABSENT, so a run holding both transitions to NEITHER instead of both resuming and cancelling. CALLED HONESTLY (grp5-review, semstreams M3): that outcome is an UNSURFACED STALL, not a park — nothing stamps run.awaiting.human, nothing posts, and the run simply sits at awaiting_approval with no human-visible signal. It is strictly safer than a double transition, and parking it is NOT the fix: a park at this gate is unrecoverable (both release rules require run.awaiting.human absent and nothing ever removes it — the B1 wedge). Recorded as a known gap in the design's Risks. Evaluated over ONE atomic mirror snapshot, which is why the partition lives in the rules (G2) and not in a Go guard racing them.",
+  "description": "The dev loop SHALL NOT start until a human approves the generated change. This rule is the release side of the first human gate: a run parked in awaiting_approval returns to executing only once run.change.decision == \"approve\" is present, at which point dev_from_task becomes eligible for the run's tasks. Without an approve decision the run stays parked — the gate holds. Rule-owned transition (G2). CONTRACT: the approval adapter MUST stamp run.change.decision on the RUN entity (subject = agent.run.entity-id), or the run never resumes.\n\nSINGLE-VALUED DECISION (nl-conversation-intent D13, group 8) — this rule and the CANCEL rule (run-lifecycle/07) are mutually exclusive BY CONSTRUCTION, not by a partition each must remember to carry. They previously read two independent booleans (run.change.approved / run.change.rejected) and each guarded on the OTHER being absent, because the exact-command fast-paths could stamp one without reading the other and leave a run holding BOTH — a run that then fired NEITHER rule and was wedged at the gate permanently, with no park, no post, and no operator surface. That cell was documented as an accepted 'unsurfaced stall'; the external review was right that documenting a permanent wedge is not fixing it. One single-valued fact under replace-by-predicate makes the contradictory state UNREPRESENTABLE, so the guards are gone and the cell no longer exists.",
   "enabled": true,
-  "entity": { "pattern": "*.*.*.*.*.*" },
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
   "conditions": [
-    { "field": "agent.run.phase", "operator": "eq", "value": "awaiting_approval", "required": true },
-    { "field": "run.change.approved", "operator": "eq", "value": "true", "required": true },
-    { "field": "run.change.rejected", "operator": "length_eq", "value": 0, "required": true },
-    { "field": "run.awaiting.human", "operator": "length_eq", "value": 0, "required": true }
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "eq",
+      "value": "approve",
+      "required": true
+    },
+    {
+      "field": "run.awaiting.human",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
   ],
   "logic": "and",
   "on_enter": [
@@ -21,5 +37,10 @@
     }
   ],
   "on_exit": [],
-  "metadata": { "pack": "run-lifecycle", "capability": "run-lifecycle", "gate": "change-approval", "task": "3.4/3.5" }
+  "metadata": {
+    "pack": "run-lifecycle",
+    "capability": "run-lifecycle",
+    "gate": "change-approval",
+    "task": "3.4/3.5"
+  }
 }
