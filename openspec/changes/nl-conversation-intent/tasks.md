@@ -194,11 +194,6 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
 
 ## 7. Spec + docs + verification + review + archive
 
-- [ ] 7.1a RECORD in the change docs: `conversation/05` publishes a HUMAN-VISIBLE comment
-  with no self-extinguish marker, so on RULE_STATE loss every still-matching historical
-  conversation loop re-posts the fallback note to its thread (rule 04 shares the unguarded
-  shape but its actions are idempotent removes). Decide deliberately between a marker and
-  accepting the replay exposure alongside the 04 replay note.
 - [ ] 7.1 The `conversation-channel` delta matches the code. Docs: the NL-intent gate in the
   runbook (approve in prose; the exact command still works; a rejection cancels a GATED run;
   NL-approve is not reversible via NL — the PR merge is the downstream stop). grp4-review

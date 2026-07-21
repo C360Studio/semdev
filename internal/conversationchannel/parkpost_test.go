@@ -328,3 +328,65 @@ func TestFaultNoteDefinitiveVsTransient(t *testing.T) {
 		}
 	})
 }
+
+// TestFaultNoteSuppressedOnceGateDecided pins the guard that keeps the note lane
+// honest, and it is load-bearing for two separate hazards.
+//
+// (1) CONTRADICTION. The apply consumer's transparency post is the ENTIRE
+// visibility case for a gate with no harness floor (D8 guard 4). If a note could
+// follow a decision, the human would read "✅ Approving this change based on @jo's
+// decision" and then "🤔 I couldn't read that" — which does not merely confuse,
+// it teaches them the announcements are unreliable, dissolving the guard.
+//
+// (2) REPLAY BLAST RADIUS. conversation/05 publishes a human-visible comment with
+// no self-extinguish marker, so if RULE_STATE were ever lost while ENTITY_STATES
+// survived, every historically-unclassified conversation loop would re-fire. This
+// suppression is what bounds that: every run whose gate was decided — which is
+// every completed run — posts nothing on replay. The residual is runs still (or
+// permanently) sitting at an undecided gate, where the note's content is still
+// true. Without this guard the same replay would re-litigate settled runs.
+func TestFaultNoteSuppressedOnceGateDecided(t *testing.T) {
+	ctx := context.Background()
+	const loopID = "c360.semdev.agent.loop.execution.classifier-1"
+	const runID = "c360.semdev.agent.chain.execution.run-1"
+	payload, err := json.Marshal(publishEnvelope{EntityID: loopID})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	runFacts := func(extra map[string]string) map[string]*graph.EntityState {
+		run := map[string]string{"run.issue.ref": "c360studio/semdev-fixture#7"}
+		for k, v := range extra {
+			run[k] = v
+		}
+		return map[string]*graph.EntityState{
+			loopID: entityWith(loopID, map[string]string{"agent.run.entity-id": runID}),
+			runID:  entityWith(runID, run),
+		}
+	}
+
+	for _, decided := range []string{admission.ApprovedPredicate, admission.RejectedPredicate} {
+		t.Run("silent once "+decided+" landed", func(t *testing.T) {
+			ch := &fakeChannel{}
+			p := newTestNotePoster(ch, &fakeFetcher{entities: runFacts(map[string]string{decided: "true"})})
+			if err := p.handleUserNote(ctx, payload); err != nil {
+				t.Fatalf("handleUserNote: %v", err)
+			}
+			if len(ch.posts) != 0 {
+				t.Errorf("posted %q after %s already landed — a decision was applied AND announced, so a note claiming semdev could not read the message is simply wrong", ch.posts[0].body, decided)
+			}
+		})
+	}
+
+	t.Run("posts while the gate is still OPEN", func(t *testing.T) {
+		// The anti-vacuity half: if this stops posting, the suppression above
+		// passes for the wrong reason and the whole lane is silent again.
+		ch := &fakeChannel{}
+		p := newTestNotePoster(ch, &fakeFetcher{entities: runFacts(nil)})
+		if err := p.handleUserNote(ctx, payload); err != nil {
+			t.Fatalf("handleUserNote: %v", err)
+		}
+		if len(ch.posts) != 1 {
+			t.Fatalf("want exactly one note while the gate is undecided, got %d — the suppression must not swallow the case the lane exists for", len(ch.posts))
+		}
+	})
+}
