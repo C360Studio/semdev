@@ -202,7 +202,7 @@ func TestRuntimeSeedsCoordinatorPersona(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	client, err := natsclient.NewClient("nats://localhost:4222")
+	client, err := natsclient.NewClient("nats://localhost:24222")
 	if err != nil {
 		t.Fatalf("persona-read NATS client: %v", err)
 	}

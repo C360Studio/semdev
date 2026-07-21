@@ -60,7 +60,7 @@ import (
 // defaultNATSURL is the fallback NATS URL when nothing else configures one —
 // the bare docker-compose NATS both binaries expect at dev time (never
 // embedded; see docker/compose/nats.yml).
-const defaultNATSURL = "nats://localhost:4222"
+const defaultNATSURL = "nats://localhost:24222"
 
 // natsURLsEnvVar overrides both RunOptions.NATSURLs and cfg.NATS.URLs — the
 // framework's own env convention for pointing an otherwise-unmodified config

@@ -139,10 +139,10 @@ grep -E "real-llm (station|milestone|TERMINAL)|EVIDENCE|LEDGER|--- (PASS|FAIL|SK
 # (b) Authoritative graph state, independent of the log — via nats-box on the
 #     compose network (the NATS image itself ships NO nats CLI; a docker exec
 #     into it is a broken filter — dry-run-proven 2026-07-19):
-docker run --rm --network compose_default natsio/nats-box:latest \
+docker run --rm --network semdev_default natsio/nats-box:latest \
   nats -s nats://nats:4222 kv ls ENTITY_STATES | grep chain.execution
 
-docker run --rm --network compose_default natsio/nats-box:latest \
+docker run --rm --network semdev_default natsio/nats-box:latest \
   nats -s nats://nats:4222 kv get ENTITY_STATES <run-entity-key> --raw \
   | python3 -c "import json,sys; e=json.load(sys.stdin); ts=sorted((t.get('timestamp',''),t.get('predicate'),str(t.get('object'))[:60]) for t in e.get('triples',[])); [print(*x) for x in ts[-8:]]"
 

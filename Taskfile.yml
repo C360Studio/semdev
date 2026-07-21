@@ -28,8 +28,33 @@ tasks:
     cmds:
       - go test -race ./...
 
+  nats:preflight:
+    desc: >-
+      Fail LOUD if semdev's NATS host port is held by a container that is not ours.
+      On a busy docker host (multiple c360 stacks) a foreign holder of that port does not
+      announce itself: semdev boots, connects to SOMEONE ELSE'S NATS, and the symptom
+      is a confusing mid-run disconnect or a config-KV that keeps reappearing — not a
+      port error. This turns that into one clear message before anything starts.
+      Remap instead of killing theirs: SEMDEV_NATS_PORT=24222 + STREAMKIT_NATS_URLS.
+    silent: true
+    vars:
+      PORT: '{{.SEMDEV_NATS_PORT | default "24222"}}'
+    cmds:
+      - |
+        holder=$(docker ps --format '{{"{{"}}.Names{{"}}"}}\t{{"{{"}}.Ports{{"}}"}}' \
+          | grep -E ":{{.PORT}}->" | grep -v '^semdev-nats' | cut -f1 | head -1)
+        if [ -n "$holder" ]; then
+          echo "ERROR: host port {{.PORT}} is held by container '$holder', which is NOT semdev's." >&2
+          echo "       semdev would connect to that NATS and behave in confusing ways." >&2
+          echo "       Either stop it, or run semdev on another port:" >&2
+          echo "         SEMDEV_NATS_PORT=24222 SEMDEV_NATS_MONITOR_PORT=28222 task nats:up" >&2
+          echo "         STREAMKIT_NATS_URLS=nats://localhost:24222 task e2e" >&2
+          exit 1
+        fi
+
   nats:up:
     desc: Start NATS JetStream (never embedded)
+    deps: [nats:preflight]
     cmds:
       - docker compose -f docker/compose/nats.yml up -d --wait
 
@@ -123,7 +148,7 @@ tasks:
     cmds:
       - grep -E "real-llm (station|milestone|TERMINAL)|EVIDENCE|LEDGER|--- (PASS|FAIL|SKIP)" /tmp/realllm-run.log | tail -5 || true
       - grep -iE "error|failed|panic" /tmp/realllm-run.log | tail -3 || true
-      - docker run --rm --network compose_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"
+      - docker run --rm --network semdev_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"
 
   serve:
     desc: >-
@@ -167,4 +192,4 @@ tasks:
       (the NATS image ships no nats CLI). Wallclock rule: any station with no new
       fact for >2× its expected step time is wedged — abort rather than wait.
     cmds:
-      - docker run --rm --network compose_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep -E "chain.execution" || echo "no run entity yet"
+      - docker run --rm --network semdev_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep -E "chain.execution" || echo "no run entity yet"

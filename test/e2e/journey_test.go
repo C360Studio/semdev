@@ -1986,7 +1986,7 @@ func tripleString(e graph.EntityState, predicate string) string {
 // wake and scanning the fact-store.
 func connectFrontDoor(ctx context.Context, t *testing.T) *natsclient.Client {
 	t.Helper()
-	client, err := natsclient.NewClient("nats://localhost:4222")
+	client, err := natsclient.NewClient("nats://localhost:24222")
 	if err != nil {
 		t.Fatalf("NATS client: %v", err)
 	}

@@ -17,7 +17,7 @@
   },
   "nats": {
     "urls": [
-      "nats://localhost:4222"
+      "nats://localhost:24222"
     ]
   },
   "streams": {
@@ -297,7 +297,7 @@
               "subject": "component.conversation-apply.dispatch",
               "stream_name": "CONVERSATION",
               "required": false,
-              "description": "The NL intent routing rules' dispatch (conversation/03a+03b). The deterministic apply consumer re-checks the gate is open, re-authorizes the harness-bound cited author, posts the transparency comment, and only then stamps the gate fact under the one approval-adapter writer. SERIALIZATION: max_ack_pending 1 makes this consumer strictly one-at-a-time GLOBALLY (one durable consumer, one exact filter subject) — NOT per-run partitioning, and NOT a substitute for the D7 rule partition (the exact-command fast-path runs on a different consumer and can stamp a gate fact concurrently). One slow forge call is therefore head-of-line blocking for every other awaiting-approval run — acceptable at M2 scale, named rather than implied. Its redelivery budget is a CRASH-LOOP backstop, not the retry budget: the consumer retries in-process and, on exhaustion, NOTIFIES the human and leaves the gate OPEN — it never parks, because a park at this gate is unrecoverable (both release rules require run.awaiting.human absent and nothing ever removes it)."
+              "description": "The NL intent routing rules' dispatch (conversation/03a+03b). The deterministic apply consumer re-checks the gate is open, re-authorizes the harness-bound cited author, posts the transparency comment, and only then stamps the gate fact under the one approval-adapter writer. max_ack_pending 1 serializes this consumer GLOBALLY (one durable consumer, one exact subject) — not per-run, and NOT a substitute for the D7 rule partition; one slow forge call head-of-line blocks other awaiting-approval runs. The redelivery budget is a crash-loop backstop, not the retry budget: the consumer retries in-process and, on exhaustion, NOTIFIES the human and leaves the gate OPEN. It never parks — a park at this gate is unrecoverable. See apply.go FAILURE POSTURE."
             }
           ],
           "outputs": []

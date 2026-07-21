@@ -2,8 +2,10 @@ package conformance
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -737,4 +739,130 @@ func compareSemver(t *testing.T, a, b string) int {
 	}
 	return 0
 
+}
+
+// frameworkMaxConfigString mirrors component.MaxStringLength (registry.go:507) —
+// the framework's per-string cap in component config validation.
+const frameworkMaxConfigString = 1024
+
+// TestComponentConfigStringsWithinFrameworkLimit guards a SILENT DEAD-LANE class
+// that a verbose description in this very change actually triggered.
+//
+// component.ValidateConfig rejects any config string longer than MaxStringLength
+// (1024). A component whose config fails validation is NOT created — and the
+// runtime still boots, still reports the agentic plane healthy, and still drives
+// every RULE-owned station, because rules live in a different component. So the
+// only symptom is that one component's lanes silently never run. In the case that
+// prompted this pin, an over-long `apply_dispatch` port description meant
+// conversation-channel never started: no poller, no approval lane, no NL lane —
+// and the offline suite was entirely green, because nothing offline builds a
+// component from the shipped config.
+//
+// The trap is that documentation quality and component liveness are in direct
+// tension here: the more carefully a port is explained, the closer it creeps to a
+// limit whose only feedback is an ERROR line in a boot log nobody greps. This pin
+// converts that into a test failure at authoring time. Long-form rationale belongs
+// in the Go doc comments and design.md; the config carries a summary and a pointer.
+func TestComponentConfigStringsWithinFrameworkLimit(t *testing.T) {
+	root := repoRoot(t)
+	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
+		raw, err := os.ReadFile(filepath.Join(root, "configs", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var cfg struct {
+			Components map[string]any `json:"components"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		var walk func(path string, v any)
+		walk = func(path string, v any) {
+			switch node := v.(type) {
+			case map[string]any:
+				for k, child := range node {
+					walk(path+"."+k, child)
+				}
+			case []any:
+				for i, child := range node {
+					walk(fmt.Sprintf("%s[%d]", path, i), child)
+				}
+			case string:
+				if len(node) > frameworkMaxConfigString {
+					t.Errorf("%s: %s is %d bytes, over the framework's %d-byte config-string limit — the component would FAIL validation and never be created, and the runtime would boot green with that component's lanes silently dead",
+						name, path, len(node), frameworkMaxConfigString)
+				}
+			}
+		}
+		for comp, v := range cfg.Components {
+			walk(comp, v)
+		}
+	}
+}
+
+// TestNatsPortMatchesComposeDefault guards the nastiest failure mode on a shared
+// docker host: semdev's compose publishing one host port while its configs dial
+// another.
+//
+// This machine runs many sem* stacks, and SIX of them (semdocs, semdragon,
+// semsage, semspec and its two UI variants, and semdev until now) all defaulted
+// their NATS to 4222. Nothing arbitrates that. If the compose file and the configs
+// drift apart, semdev does NOT fail to connect — it connects to WHOEVER holds the
+// port it dialed. It then reads that stack's config KV, writes its facts into that
+// stack's JetStream, and behaves in ways that look like deep application bugs:
+// entities that vanish, a config version that keeps reverting, runs that never
+// appear. The symptom never mentions ports.
+//
+// semdev therefore claims 24222/28222 (unused by any other c360 stack — semstreams
+// holds the 34222/44222/54222/61222/64222 family, semsource 14222) and pins the
+// two sides together here. An intentional move updates both and this test; an
+// accidental one-sided edit fails loudly, here, offline.
+func TestNatsPortMatchesComposeDefault(t *testing.T) {
+	root := repoRoot(t)
+
+	composeRaw, err := os.ReadFile(filepath.Join(root, "docker", "compose", "nats.yml"))
+	if err != nil {
+		t.Fatalf("read compose: %v", err)
+	}
+	// e.g.  - "${SEMDEV_NATS_PORT:-24222}:4222"
+	m := regexp.MustCompile(`\$\{SEMDEV_NATS_PORT:-(\d+)\}:4222`).FindSubmatch(composeRaw)
+	if m == nil {
+		t.Fatal("could not find the client port mapping in docker/compose/nats.yml — the pin cannot verify config/compose agreement (did the mapping change shape?)")
+	}
+	composePort := string(m[1])
+	if composePort == "4222" {
+		t.Error("semdev's compose default is back to 4222 — the single most contended port on this host (six c360 stacks default to it); semdev must publish a port it owns")
+	}
+
+	// The compose project name is the other half of the isolation: without it,
+	// Compose derives the project from the parent dir ("compose"), which every
+	// repo laid out as docker/compose/*.yml also derives — making them ONE project,
+	// so `down -v` from either side destroys the other's containers and volumes.
+	if !regexp.MustCompile(`(?m)^name:\s*semdev\s*$`).Match(composeRaw) {
+		t.Error(`docker/compose/nats.yml must declare "name: semdev" — without it the project name is derived from the parent directory ("compose"), colliding with every other repo laid out the same way`)
+	}
+
+	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
+		raw, err := os.ReadFile(filepath.Join(root, "configs", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var cfg struct {
+			NATS struct {
+				URLs []string `json:"urls"`
+			} `json:"nats"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		if len(cfg.NATS.URLs) == 0 {
+			t.Errorf("%s declares no nats.urls", name)
+			continue
+		}
+		want := "nats://localhost:" + composePort
+		if cfg.NATS.URLs[0] != want {
+			t.Errorf("%s dials %q but compose publishes %s — on this host that does not fail to connect, it connects to WHICHEVER stack owns the dialed port, and semdev then reads and writes another project's KV and streams",
+				name, cfg.NATS.URLs[0], want)
+		}
+	}
 }
