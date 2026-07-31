@@ -194,6 +194,49 @@ disposable target (`C360Studio/semdev-test`).
   hardcoded `max_tokens:64` truncates gemini-3.1-pro's reasoning before the tool
   call (re-probed at 512 tokens → clean `ping` — a probe artifact, not a fault)
 
+## Framework migrations
+
+### 2026-07-31 — semstreams beta.154 → beta.159 (ADR-056 projection mutation client)   [kind: migration]
+
+**Status: OFFLINE + DOCKER GREEN. No paid tokens.** The Go fact-write path moved
+off the DELETED `agentictools.OwnedFactWriter` onto `pkg/projection`'s
+contract-bound mutation client.
+
+| Evidence | Result |
+|---|---|
+| `go build ./...`, `go vet ./...`, `go vet -tags e2e ./...`, gofmt | clean |
+| `go test ./...` | 57 packages, 0 failures |
+| `openspec validate --strict` | valid |
+| `go test -race -tags=e2e ./test/e2e/...` (real docker) | **0 failures, 320s, no timeout** — minus six PRE-EXISTING red journeys (below) |
+
+All eight core bridge proofs pass through the new write path, including the full
+arc (issue→change→validate→approval→project→provision→dispatch→apply→measure→
+floors→route→review→cold-verify→deliver), the forge-clone journey, the webhook
+journey, and the station-failure park.
+
+**Six journeys are RED and this migration did not cause them.** Attributed by A/B
+against a detached worktree at `490a784` — pre-migration, still beta.154 with the
+deleted writer — where they fail IDENTICALLY (same assertions, same timings):
+`TestBridgeProofNLApprovalReleasesGate`, `TestBridgeProofNLRejectionCancelsRun`,
+`TestConservativeNoneDoesNotApprove`, `TestConflictingIntentsResolveToOneTerminal`,
+`TestClassifierBindingFaultTellsTheHuman`, `TestBridgeProofApprovalByPollNoWebhook`.
+All depend on the change-approval gate lane, which is mid-surgery in the parked
+`nl-conversation-intent` group 8. ⚠ The last of those belongs to the ARCHIVED
+`pull-first-transport` change and was recorded green there — group 8 has left an
+archived capability red. Recorded here so it is not lost; it is a group-8 finding.
+
+**What the journeys caught that the offline ladder could not.** Two runs were red
+first, on real beta.159 requirements the compile and unit suites were blind to:
+ordinary streams must declare `max_bytes`+`discard` (rejected only when a changed
+config is re-validated — so most journeys booted fine while two could not), and
+`RegisterBuiltins` hard-fails on `write_todos` without a projection mutation client
+a product shell cannot supply. Both closed; both now pinned offline.
+
+**Not claimed:** enforcement is NOT flipped (`enforce_owner_lease` stays false,
+pinned) — that is the gated group-6 step. The admission create is NOT migrated
+(design D3c: the projection client swallows the `EntityExists` signal the intake
+lane needs to skip a duplicate wake). No real-LLM run was made for this migration.
+
 ## Rung: M2 — dogfood (self-target foundation)
 
 **Status: FOUNDATION PROVEN (offline + one live delivery above).** The M2 mechanism

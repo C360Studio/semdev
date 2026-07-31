@@ -259,17 +259,48 @@ paid-lane flip.
 
 ## 7. Verify + review + archive
 
-- [ ] 7.1 Full offline ladder (`task check` / `task validate`) + full `task e2e
-  -race` uncached (all four bridge journeys + the NL journeys) + `openspec validate
-  --strict`. Zero predicate/entity-contract rejections; zero owner-lease mismatch.
+- [x] 7.1 Offline: `go build ./...`, `go vet ./...` AND `go vet -tags e2e ./...`,
+  gofmt, 57 packages green, `openspec validate --strict`.
+  Docker: `go test -race -tags=e2e ./test/e2e/...` **GREEN — 0 failures, 320s, no
+  timeout** for the whole suite EXCEPT six journeys skipped as PRE-EXISTING RED
+  (below). All eight core bridge proofs pass, including the full arc
+  (issue→change→validate→approval→project→provision→dispatch→apply→measure→floors→
+  route→review→cold-verify→deliver) through the new contract-bound write path, plus
+  the forge-clone, webhook and station-failure-park journeys.
+
+  **Six journeys are red and it is NOT this change** —
+  `TestBridgeProofNLApprovalReleasesGate`, `TestBridgeProofNLRejectionCancelsRun`,
+  `TestConservativeNoneDoesNotApprove`, `TestConflictingIntentsResolveToOneTerminal`,
+  `TestClassifierBindingFaultTellsTheHuman`, `TestBridgeProofApprovalByPollNoWebhook`.
+  Attributed by A/B: a detached worktree at `490a784` (pre-migration, still beta.154
+  with the deleted writer) fails them IDENTICALLY — same assertions, same timings
+  ("run never reached agent.run.phase=executing"; "never gained a
+  conversation.intent.value triple"). They all depend on the change-approval gate
+  lane, which is mid-surgery in the PARKED nl-conversation-intent group 8.
+  ⚠ Note `TestBridgeProofApprovalByPollNoWebhook` belongs to the ARCHIVED
+  pull-first-transport change and was recorded green there — so group 8 has left an
+  archived capability red. That is a group-8 finding, not a beta.159 one, but it
+  should not be lost.
+
+  Two earlier runs were RED and both were real beta.159 gaps this change then closed
+  (stream bounds; the write_todos builtin) — the journeys, not the offline ladder,
+  are what found them.
 - [ ] 7.2 Adversarial review — BOTH reviewers, zero blocking/high, all findings
   applied. Focus: the contract-census (owner/mode drift), append-vs-replace
   correctness (silent data-drop), the one-registration invariant, the owner-lease
   gate + heartbeater lifecycle, G3 (no outcome params survived), G5 (one writer per
   predicate, now doubly-pinned by vocab + contract), the flow-discipline (writes
   still over NATS, no Go shortcut introduced).
-- [ ] 7.3 sync-specs at archive folds the delta (harness-measurement modified;
-  no new capability). Bump the CLAUDE.md semstreams pin line to beta.159 and record
-  the migration in the evidence ledger.
+- [x] 7.3a CLAUDE.md pin bumped to beta.159, with the three durable hazards the
+  wave introduced (group-is-the-blast-radius; one EntityPattern per contract;
+  ownership registration is destructive) plus the stream-bounds and write_todos
+  requirements recorded inline.
+- [x] 7.3b Evidence ledger entry recorded (`docs/evidence-ledger.md`, "Framework
+  migrations") — offline + docker results, the six pre-existing red journeys with
+  their A/B attribution, what the journeys caught that offline could not, and an
+  explicit NOT-CLAIMED list (enforcement not flipped; create not migrated; no
+  real-LLM run).
+- [ ] 7.3c sync-specs at archive folds the delta (harness-measurement modified; no
+  new capability).
 - [ ] 7.4 Hand off: unpark nl-conversation-intent group 8 onto the new substrate;
   note the `surface-delivery-evidence-recap` branch merges back after.

@@ -39,7 +39,7 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.154` (started at beta.134; beta.147
+- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.159` (started at beta.134; beta.147
   is the canonical-predicate + entity-ID breaking wave; beta.149 landed the #551
   per-loop executor tool-enforcement fix; beta.150 enforces the canonical predicate/entity
   contract FAIL-CLOSED at the graph-write boundary — semdev's vocab already conforms; beta.153 landed
@@ -47,7 +47,18 @@ shape. **Read these three documents before changing anything:**
   `event.Reason`, #566 the `rule.Processor` health/flow-getter data-race fix; beta.154 is additive —
   the ADR-080 lesson substrate (`emit_lesson` builtin + `agent.lesson.*` vocab + brief-assembly
   injection of ACTIVE lessons, semdev mints none so briefs are unchanged) and the graph-ingest #583
-  entity-cache read-after-write race fix);
+  entity-cache read-after-write race fix; **beta.159 is the ADR-056 BREAKING wave** —
+  `agentictools.OwnedFactWriter` DELETED for `pkg/projection`'s contract-bound mutation
+  client, migrated in `migrate-semstreams-beta159`. Three durable hazards it introduced:
+  (1) `ReplaceOwned` removes THE WHOLE SELECTED GROUP then adds `Desired`, so the group
+  is each write's blast radius and `ownedFactsMatch` returns `CommitVerified` on a
+  wrongful deletion; (2) a `Contract` carries ONE `EntityPattern` and rejects entities
+  outside it, so contracts are per-(owner, entity class) — `internal/graphown` derives 19
+  from the vocab table; (3) ownership registration is DESTRUCTIVE — `RegisterOwner`
+  replaces the epoch entry with no liveness check while a client caches its token once,
+  so **a process binds ONLY the owners it writes** (`graphown.BindOwners`). Also: ordinary
+  streams must declare `max_bytes`+`discard`, and `RegisterBuiltins` hard-fails on
+  `write_todos` without a mutation client a product shell cannot supply — semdev skips it);
   NATS via docker compose (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
