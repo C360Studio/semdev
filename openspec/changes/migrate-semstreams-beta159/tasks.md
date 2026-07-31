@@ -8,17 +8,20 @@ Mirrors the archived migrate-semstreams-beta147 sweep.
 
 ## 1. Pin the framework + confirm the blast radius
 
-- [ ] 1.1 `go get github.com/c360studio/semstreams@v1.0.0-beta.159` + `go mod tidy`.
-  Confirm `nats.go` stays v1.48.0 (beta.159 requires exactly that; NO untagged
-  pin). Record the exact compile-failure set as the migration's red baseline
-  (expected: `agentictools.OwnedFactWriter` undefined across the 25 Go-writer files).
-- [ ] 1.2 Read `pkg/projection` + `pkg/ownership` from the pinned module cache and
-  record the exact API used: `Contract`/`PredicateGroup`/`WriteMode`
-  (replace-owned | append-evidence | cas-transition); the four role interfaces
-  (`EntityCreator.CreateWithTriples`, `OwnedReplacer.ReplaceOwned`,
-  `EvidenceAppender.AppendEvidence`, `AuthoritativeReader.ReadAuthoritative`);
-  `ownership.EnsureBuckets` / `registry.NewHeartbeater` / `BindMutationClient` /
-  `BindAndHeartbeat`; `ErrOwnerAlreadyBound`.
+- [x] 1.1 Pinned `v1.0.0-beta.159` + `go mod tidy`. `nats.go` STAYS v1.48.0
+  (confirmed — no untagged pin). RED baseline captured: 18 `undefined:
+  agentictools.OwnedFactWriter` across 10 production files (`go build ./...`); test
+  files add the rest of the 25.
+- [x] 1.2 API grounded against the pinned cache
+  (`~/go/pkg/mod/...@v1.0.0-beta.159`): `Contract{Name,MessageType,EntityPattern,
+  Groups,BirthPredicates,ForeignEdges}`; `PredicateGroup{Name,Mode,Predicates}`;
+  `WriteMode` ∈ {`replace-owned`,`cas-transition`,`append-evidence`}; the four role
+  interfaces + their `*Mutation` payloads (`CreateMutation`, `ReplaceOwnedMutation
+  {Group,Desired}`, `AppendEvidenceMutation{Evidence}`); `ownership.EnsureBuckets`
+  → `registry.NewHeartbeater(interval)` → `go hb.Run(ctx)`; `BindMutationClient
+  (cfg)` / `BindAndHeartbeat`; `ErrOwnerAlreadyBound`. Resolved OQ2 (only
+  `admission-check` creates) and OQ3 (enforcement opt-in, observe-only default —
+  `owner_lease_mismatch_total` metered, not rejected).
 
 ## 2. Derive the contract set from the vocab table (design D1, D2, D3)
 
@@ -45,8 +48,10 @@ Mirrors the archived migrate-semstreams-beta147 sweep.
   one process-lifetime `Heartbeater` (`go hb.Run(appCtx)`, tied to shutdown);
   bind every Go-writer owner once (`BindMutationClient`/`BindAndHeartbeat`).
   Each owner exposes only its narrow role interface(s) to its call sites.
-- [ ] 3.3 Set `enforce_owner_lease=true` on the hosted graph-ingest component in
-  the shipped configs. Pin the config carries it (`TestGraphIngestEnforcesOwnerLease`).
+- [ ] 3.3 Leave `enforce_owner_lease` OFF (observe-only default) for the change's
+  landing state (D5 Phase A). Pin that the shipped configs are observe-only
+  (`TestOwnerLeaseObserveOnlyOnLanding`) so enforcement is never flipped
+  speculatively — the flip is group 6, gated on zero-mismatch evidence.
 
 ## 4. Rework the write call sites by mode (design D3, D6, D9)
 
@@ -60,9 +65,14 @@ predicate, object) — only the client and method change.
   remove)` → `OwnedReplacer.ReplaceOwned(ReplaceOwnedMutation{...Desired})`.
 - [ ] 4.2 `append-evidence` sites: the classifier `.classified` ledger append and
   the route `.*` mirror append → `EvidenceAppender.AppendEvidence`.
-- [ ] 4.3 create sites: admission record + run mint → `EntityCreator.CreateWithTriples`
-  with birth predicates (contingent on OQ2 — if `agentrun.Mint` owns creation,
-  scope out).
+- [ ] 4.3 create site: the admission record ONLY (OQ2 — run mint is
+  framework-owned, out of scope). semdev's existing `EntityCreator`
+  (`natsEntityCreator` over `graph.CreateEntityWithTriplesRequest`) still compiles,
+  so this is not a compile break — but an un-tokened create is metered under
+  observe-only and REJECTED under enforcement, so migrate it to
+  `projection.EntityCreator.CreateWithTriples` with birth predicates BEFORE the
+  group-6 enforcement flip. Observe-only proves it un-tokened first (the meter is
+  the checklist).
 - [ ] 4.4 read-back sites: `ReadOwnedPredicates(id, prefix)` (checkfloors,
   projecttasks) → `AuthoritativeReader.ReadAuthoritative(id)` + local prefix filter.
   Leave semdev's own `changefacts` reader untouched.
@@ -77,12 +87,17 @@ predicate, object) — only the client and method change.
   image).
 - [ ] 5.2 `Taskfile.yml`: pin `natsio/nats-box:latest` → a fixed tag.
 
-## 6. Owner-lease rollout evidence (design D5)
+## 6. Enforcement flip, gated on zero-mismatch evidence (design D5 Phase B)
 
-- [ ] 6.1 Record the ADR-056 rollout evidence in `docs/evidence-ledger.md`:
-  enforcement enabled on the serving graph-ingest, owner heartbeat live before any
-  owner write, owner-lease mismatch metric zero across a bounded observation window
-  (from a mock-ladder run). Fail-closed blocker for the paid lane.
+- [ ] 6.1 Run the full mock ladder in OBSERVE-ONLY and read
+  `owner_lease_mismatch_total`. It names every still-un-tokened owned write
+  (expected: zero once groups 4.1–4.4 land, including the create path 4.3). A
+  non-zero meter is a concrete migration gap, not a warning to ignore.
+- [ ] 6.2 ONLY when the meter is provably zero across a bounded window: set
+  `enforce_owner_lease=true` on the hosted graph-ingest, re-run the ladder GREEN,
+  and record the ADR-056 rollout evidence in `docs/evidence-ledger.md` (enforcement
+  on, heartbeat live before any owner write, zero mismatch). Fail-closed blocker for
+  the paid lane. Pin the enforced config (`TestGraphIngestEnforcesOwnerLease`).
 
 ## 7. Verify + review + archive
 

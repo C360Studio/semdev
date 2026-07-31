@@ -72,10 +72,18 @@ Three modes, mapped from the fact's existing semantics:
   (the classifier dedup ledger) and the `route.*` mirror append sets. Binding one
   of these as `replace-owned` would DROP prior entries silently — the census
   asserts every declared append-set predicate carries `append-evidence`.
-- **birth / `CreateWithTriples`** — primary-subject entity creation: the admission
-  record (`intake.actor.admitted` + content-derived id, `admission-check`) and the
-  run mint (`experiment-intake`). Birth predicates authorize a fact only on create
-  and derive no ownership claim.
+- **birth / `CreateWithTriples`** — primary-subject entity creation. OQ2 RESOLVED:
+  the ONLY create owner is `admission-check` (the admission-record entity, via
+  `RecordAdmission` → semdev's existing `EntityCreator.CreateEntityWithTriples`
+  seam). `experiment-intake` is NOT a creator — it upserts a single condition label
+  onto an already-minted run (`StampCondition`, replace-owned). The run entity
+  itself is minted by the framework (`agentrun.Mint`), out of scope. The admission
+  create uses a SEPARATE path (`natsEntityCreator` over the surviving
+  `graph.CreateEntityWithTriplesRequest`) that still compiles, so it is untouched by
+  the compile break — but under enforcement (Phase B, D5) an un-tokened create is
+  rejected, so it migrates to `projection.EntityCreator.CreateWithTriples` BEFORE
+  enforcement flips. During Phase A observe-only it may stay as-is (the meter shows
+  it un-tokened, which is the signal to migrate it).
 
 ### D4 — composition-root binding (one registry, one heartbeater, one bind per owner)
 In boot (`internal/boot`): after NATS and ownership storage are ready but before
@@ -93,14 +101,27 @@ Each call site depends on the NARROW interface for its role
 (`EntityCreator` / `OwnedReplacer` / `EvidenceAppender` / `AuthoritativeReader`),
 not the concrete client — least authority per component.
 
-### D5 — the owner-lease gate on a single-binary deployment
-graph-ingest's `enforce_owner_lease=true` is set on semdev's one hosted
-graph-ingest component. Because there is exactly one serving instance reached only
-over NATS, the "every serving instance enforces" precondition is satisfied by that
-single flag — single-binary makes the ADR-056 gate trivial, not delicate. The
-rollout evidence (enforcement on, heartbeat live before writes, zero mismatch over
-a bounded window) is recorded in the evidence ledger and is a fail-closed blocker
-for the paid lane, not a warning.
+### D5 — observe-only first, then enforce (the gate is opt-in, and self-evidencing)
+graph-ingest's owner-lease check runs on BOTH `create_with_triples` and
+`update_with_triples`, but ONLY when `enforce_owner_lease=true` (ADR-056 PR-5).
+**The default posture is OBSERVE-ONLY (PR-3):** an un-tokened or stale-token write
+is METERED (`owner_lease_mismatch_total`) and Warn-logged, NOT rejected
+(`graph/mutation_responses.go:122-131`). This gives a safe two-phase landing:
+
+- **Phase A (this change's default):** migrate the write path so every owned write
+  carries its owner token, and leave enforcement OFF. semdev compiles and runs;
+  the observe-only meter reports mismatches without failing any write. This is the
+  state the change lands in.
+- **Phase B (deliberate flip):** set `enforce_owner_lease=true` on semdev's one
+  hosted graph-ingest component ONLY after `owner_lease_mismatch_total` is provably
+  ZERO across a bounded observation window on a mock-ladder run. Single-binary makes
+  the "every serving instance enforces" precondition one flag on one component.
+
+The observe-only meter IS the ADR-056 rollout evidence — it directly measures
+whether any write still lacks a valid token. Zero-mismatch across the window is the
+fail-closed gate for the paid lane; a non-zero meter names exactly which owner path
+is still un-tokened (e.g. a create path not yet migrated). Enforcement is NOT flipped
+speculatively.
 
 ### D6 — the read path
 `OwnedFactWriter.ReadOwnedPredicates(ctx, id, prefix)` (2 sites: checkfloors'
@@ -165,7 +186,12 @@ sweep: red-first per group, both reviewers (go + semstreams) before each commit.
 
 - **OQ1** — is any semdev owner append-only enough to bind with a nil heartbeater,
   or do they all carry a replace-owned group (requiring the heartbeater)? Resolve
-  during D2 contract derivation.
-- **OQ2** — does `experiment-intake`'s run mint use `CreateWithTriples` birth
-  predicates, or does the framework's `agentrun.Mint` already own creation (making
-  it out of scope)? Verify against the beta.159 mint path before D3.
+  during D2 contract derivation. (Leaning: the two append-set owners —
+  `conversation-classifier`'s `.classified` ledger and `route-mirror` — also carry
+  replace-owned groups, so a shared heartbeater is needed regardless.)
+- **OQ2 — RESOLVED (group-1 API grounding).** `experiment-intake` is a replace-owned
+  upsert, not a creator; the run entity is framework-minted (`agentrun.Mint`); the
+  only create owner is `admission-check`. See D3.
+- **OQ3 — RESOLVED (group-1 API grounding).** Owner-lease enforcement is opt-in and
+  defaults to observe-only (meter + warn, no reject), so the migration lands safely
+  in observe-only and flips enforcement only on zero-mismatch evidence. See D5.
