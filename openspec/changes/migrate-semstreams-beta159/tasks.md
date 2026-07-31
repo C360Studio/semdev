@@ -138,10 +138,11 @@ cannot run during the migration it guards is not a guard.
   runs in `NewRuntime` BEFORE anything that writes is registered, so an owner that
   failed to bind — or a typo'd Source — fails at boot instead of as a nil writer at
   its first write inside a station handler.
-- [ ] 3.3 Leave `enforce_owner_lease` OFF (observe-only default) for the change's
-  landing state (D5 Phase A). Pin that the shipped configs are observe-only
-  (`TestOwnerLeaseObserveOnlyOnLanding`) so enforcement is never flipped
-  speculatively — the flip is group 6, gated on zero-mismatch evidence.
+- [x] 3.3 `enforce_owner_lease` stays OFF for the landing state (D5 Phase A), pinned
+  by `TestOwnerLeaseObserveOnlyOnLanding` over BOTH shipped configs — so enforcement
+  is never flipped speculatively. The pin also rejects an ABSENT key: omitting it
+  reads as observe-only today but silently inherits whatever the framework default
+  becomes. RED verified on both shapes (flipped true, and key removed).
 
 ## 4. Rework the write call sites by mode (design D3, D6, D9)
 
@@ -160,15 +161,27 @@ predicate, object) — only the client and method change.
 - [ ] 4.2 (VOID — D3) no `append-evidence` sites. The classifier `.classified`
   ledger and the route mirrors stay `replace-owned` with the full computed set,
   byte-identical to today; native append is a per-ledger follow-on.
-- [ ] 4.3 create site: the admission record ONLY (OQ2 — run mint is
-  framework-owned, out of scope). semdev's existing `EntityCreator`
-  (`natsEntityCreator` over `graph.CreateEntityWithTriplesRequest`) still compiles,
-  so this is not a compile break. **The enforcement rationale is CORRECTED (D5): an
-  un-tokened create is NEITHER metered NOR rejected, in either posture, and a
-  birth-only contract is permanently un-tokened by design — so this migration buys
-  ZERO enforcement coverage and the meter is NOT a checklist for it.** Do it anyway,
-  for what it actually buys: the client validates the entity against the contract
-  pattern and authorizes the birth predicates, replacing a raw hand-rolled request.
+- [ ] 4.3 create site — **DEFERRED, with cause.** The admission record is the only
+  create (OQ2). Migrating it to `projection.EntityCreator.CreateWithTriples` was
+  planned for contract validation (D5 corrected the enforcement rationale: a
+  birth-only contract is permanently un-tokened, so it buys ZERO lease coverage).
+  **It is deferred because the projection client SWALLOWS the signal intake depends
+  on.** `intake/component.go`'s `natsEntityCreator` exists precisely so
+  `ErrorCodeEntityExists` reaches the caller — `RecordAdmission` maps it to
+  `ErrAlreadyRecorded`, and the caller SKIPS the wake; without that signal a webhook
+  redelivery double-mints a run and double-spends paid tokens.
+  `CreateWithTriples` returns `(receipt, nil)` — plain success — when the entity
+  already exists and `createFactsMatch` is true (`mutation_client.go:586-590`).
+  It would work today only by ACCIDENT: `sameFullTriple` compares `Timestamp`
+  (`mutation_client.go:1358-1371`) and `RecordAdmission` stamps a fresh
+  `time.Now().UTC()` per call, so a redelivery currently mismatches and falls to the
+  error path where the classified code survives. Make the record's facts
+  deterministic — an entirely reasonable-looking change for a content-addressed
+  idempotent record — and the redelivery silently becomes a double-run.
+  **To land it safely** the intake lane needs an explicit already-existed signal that
+  does not ride on timestamp inequality: either an upstream ask for
+  `CreateWithTriples` to distinguish created-vs-already-existed in the receipt, or a
+  deliberate in-tree pre-check. Not worth doing blind for zero enforcement gain.
 - [x] 4.4 read-back sites: `ReadOwnedPredicates(id, prefix)` (checkfloors,
   projecttasks) → `AuthoritativeReader.ReadAuthoritative(id)` + local prefix filter.
   **Carry-forward:** `ReadOwnedPredicates` was prefix-SCOPED; `ReadAuthoritative`
@@ -187,14 +200,17 @@ predicate, object) — only the client and method change.
   `TestCheckFloorsFaultsOnEmptyAttemptSet` (RED verified by removing the guard); two
   fixtures that seeded no attempt fact were corrected — a running loop always has
   one (G8).
-- [ ] 4.7 (added, D2a) PARTIALLY DONE. ✅ `station.stampDispatchFailed` surfaces a
+- [x] 4.7 (added, D2a) BOTH halves done. `station.stampDispatchFailed` surfaces a
   `ContractFor` failure with the same `logger.Error` + `c.errors` bump as a write
   failure — the path can only log, so a silent return is a lost terminal fact and a
-  run that stalls instead of parking. ❌ NOT DONE: the conformance pin that every
-  station-dispatch rule confines its firing entity to the run or loop class (all
-  eight declare the watch-all pattern `*.*.*.*.*.*`; the invariant lives only in
-  their conditions). Blast radius is bounded — a loud log, not silent loss — so this
-  carries to group 7 rather than blocking.
+  run that stalls instead of parking. AND
+  `TestStationDispatchRulesConfineTheFiringEntityClass` pins that every one of the 8
+  station-dispatch rules confines its firing entity to ONE entity class that
+  station-harness claims — derived from the entity class of the predicates each rule
+  conditions on, so it stays honest as the vocabulary moves (all 8 declare the
+  watch-all pattern `*.*.*.*.*.*`; the invariant lived only in their conditions).
+  RED verified twice: dropping a rule's class-bearing conditions, and planting
+  contradictory run+loop conditions in one rule.
 - [x] 4.5 Test doubles: `fakeWriter`/`fakeGraph` implement the narrow role
   interfaces they exercise; the stateful `fakeGraph` keeps replace-by-predicate +
   gains append semantics. All unit suites green.
@@ -216,12 +232,18 @@ branch, so an un-tokened write is never metered and never rejected. The old 6.1
 lands") was inverted — it reads zero whether or not anything migrated, and fed a
 paid-lane flip.
 
-- [ ] 6.1 Prove coverage POSITIVELY, offline, three ways: (a) a bind census that
-  every owner in `graphown.OwningOwners()` holds a live epoch claim after boot — a
-  failed registration is a whole un-tokened write path; (b) the compile break itself
-  (`OwnedFactWriter` is deleted, so no other owned-write surface survives) plus a
-  grep census that no call site hand-rolls an `update_with_triples` request; (c) the
-  group-4 checklist closed, site by site.
+- [x] 6.1 Coverage proven POSITIVELY, offline, three ways:
+  (a) `Clients.RequireBound(graphown.Owners()...)` runs in `NewRuntime` BEFORE any
+  writer is registered, so an owner that failed to bind fails at boot rather than as
+  a nil writer at its first write (task 3.6);
+  (b) the compile break itself — `OwnedFactWriter` is DELETED, so no alternative
+  owned-write surface survives — plus `TestNoCallSiteHandRollsAnOwnedWrite`, which
+  fails on any `graph.mutation.*` subject named as a string literal outside
+  `internal/graphown`. Exactly ONE sanctioned exception is listed with its reason
+  (the admission birth lane, D3c), and the list itself is capped so it cannot rot
+  into a blanket waiver. RED verified by planting a raw subject in measuretask;
+  (c) the group-4 checklist is closed site by site (4.1/4.4/4.5/4.6/4.7 ticked; 4.2
+  void; 4.3 deferred with cause).
 - [ ] 6.2 Read `owner_lease_mismatch_total` for what it IS — a STALENESS signal.
   Non-zero means a second process minted a new incarnation
   (`registry.go:379-381`), not that a site is unmigrated. Confirm single-writer-

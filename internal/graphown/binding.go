@@ -248,9 +248,24 @@ func releaseInProcess(owners []string) {
 	}
 }
 
-// ResetInProcessBindingsForTest clears the in-process bind ledger. Test-only: a test
-// binary that boots several runtimes in sequence legitimately re-binds, whereas
-// production binds once. Never call it from product code.
+// ReleaseOwners drops owners from the in-process bind ledger — the composition
+// root's teardown half, called from Runtime.Stop.
+//
+// The guard's job is to catch two SIMULTANEOUSLY-LIVE bindings of one owner, where
+// the later mints a new incarnation and silently invalidates the earlier client's
+// token. A stopped runtime is not a live holder, so releasing on shutdown is not a
+// loosening: it keeps the guard aimed at the hazard (concurrent binds) instead of
+// blocking the legitimate case (sequential boots in one process, which is exactly
+// what a journey test binary does).
+//
+// Safe on an empty/unknown owner list — releasing something never claimed is a no-op.
+func ReleaseOwners(owners ...string) {
+	releaseInProcess(owners)
+}
+
+// ResetInProcessBindingsForTest clears the whole ledger. Test-only escape hatch for
+// suites that construct clients without a Runtime to stop. Never call it from
+// product code.
 func ResetInProcessBindingsForTest() {
 	boundInProcess.mu.Lock()
 	defer boundInProcess.mu.Unlock()

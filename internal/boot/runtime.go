@@ -609,6 +609,24 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		NATSClient: natsClient,
 		Platform:   platform,
 		Logger:     logger,
+		// beta.159: RegisterBuiltins now HARD-FAILS on write_todos unless it is given
+		// a projection.MutationClient. semdev cannot supply one: the tool writes under
+		// the framework's own `agentic.loop-execution` contract, whose definition lives
+		// in semstreams' internal/builtinprojection — not importable from here — and
+		// binding a hand-copied duplicate would claim the framework's cell under a
+		// semdev owner (a two-writer hazard, G5) and rot silently the moment the
+		// framework's shape moves.
+		//
+		// Skipping is correct rather than merely expedient: semdev references
+		// write_todos NOWHERE (no persona, no allowlist, no rule), so no spawn ever
+		// advertises it — and under beta.149 executor enforcement a call to an
+		// unadvertised tool is rejected anyway. The framework's own binaries wire it
+		// via service.WireOwnership(builtinprojection.Contracts()...), which is exactly
+		// the path a product shell has no access to.
+		//
+		// If semdev ever WANTS agent-private todos, this becomes an upstream ask for an
+		// exported accessor to the builtin contracts — not a local re-declaration.
+		SkipBuiltins: []string{"write_todos"},
 	}
 	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, expCfg, checkouts, sandboxes, graphClients); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
@@ -828,6 +846,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 // released. Remove the bound once the upstream fix lands.
 func (r *Runtime) Stop(timeout time.Duration) error {
 	var errs []error
+
+	// Release this runtime's projection-owner claims FIRST and unconditionally, so a
+	// bounded/failed shutdown (the known semstreams #508 ComponentManager deadlock,
+	// which is why Stop is best-effort here) still frees them. The in-process bind
+	// guard exists to catch a SECOND live binding — two clients holding tokens for
+	// one owner, where the later silently invalidates the earlier. A runtime that is
+	// stopping is no longer a live holder, so a subsequent boot in the same process
+	// (a test binary running journeys in sequence) legitimately re-binds.
+	defer graphown.ReleaseOwners(r.graphOwners.Bound()...)
 
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- r.svcMgr.StopAll(timeout) }()

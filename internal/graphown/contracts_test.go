@@ -460,3 +460,260 @@ func loadRules(t *testing.T) []ruleDoc {
 	}
 	return out
 }
+
+// frameworkFieldClass is the entity class of the FRAMEWORK predicates semdev's rules
+// condition on. semdev's own predicates get their class from graphown.EntityClasses();
+// these are the framework's, which that table deliberately does not cover.
+//
+// Deliberately conservative: agent.run.entity-id and agent.loop.run are OMITTED
+// because they appear on both classes (the run anchor is stamped onto loops), so they
+// discriminate nothing and including them would produce false conflicts.
+var frameworkFieldClass = map[string]string{
+	"agent.run.phase":            graphown.RunPattern,
+	"agent.loop.role":            graphown.LoopPattern,
+	"agent.loop.outcome":         graphown.LoopPattern,
+	"agent.loop.terminal-reason": graphown.LoopPattern,
+}
+
+// TestStationDispatchRulesConfineTheFiringEntityClass is migrate-beta159 task 4.7's
+// second half — the pin the change previously claimed and did not have.
+//
+// The migration gave the write path an ENTITY-PATTERN GATE it never had:
+// station.stampDispatchFailed stamps on req.EntityID, the FIRING entity of a publish
+// rule, and station-harness's contract claims only the two agent-execution classes.
+// Every station-dispatch rule declares the watch-all entity pattern `*.*.*.*.*.*`, so
+// the "it is always an agent-execution entity" invariant lives ONLY in each rule's
+// conditions — where nothing checked it.
+//
+// If a rule's conditions ever admit another entity class, ContractFor errors before
+// the write. That path can only log (the dispatch lane is fire-and-forget), so the
+// terminal fact is LOST and the run stalls instead of parking — the exact class
+// station-failure-parks exists to close.
+//
+// The pin derives each rule's class from the entity class of the predicates it
+// conditions on, so it stays honest as the vocabulary moves: a rule must condition on
+// at least one class-bearing field, and every such field must agree.
+func TestStationDispatchRulesConfineTheFiringEntityClass(t *testing.T) {
+	classOf := func(field string) (string, bool) {
+		if c, ok := frameworkFieldClass[field]; ok {
+			return c, true
+		}
+		c, ok := graphown.EntityClasses()[field]
+		return c, ok
+	}
+
+	rules := loadRules(t)
+	dispatchers := 0
+	for _, r := range rules {
+		dispatches := false
+		for _, a := range r.OnEnter {
+			if a.Type == "publish" && strings.Contains(a.Subject, ".dispatch") {
+				dispatches = true
+			}
+		}
+		if !dispatches {
+			continue
+		}
+		dispatchers++
+
+		classes := map[string][]string{} // class -> the fields that implied it
+		for _, c := range r.Conditions {
+			if class, ok := classOf(c.Field); ok {
+				classes[class] = append(classes[class], c.Field)
+			}
+		}
+		switch len(classes) {
+		case 0:
+			t.Errorf("%s dispatches a station but conditions on NO class-bearing field — its firing entity is unconstrained, so stampDispatchFailed could resolve no contract and silently lose the terminal fact", r.path)
+		case 1:
+			for class := range classes {
+				// The class must be one station-harness actually claims, or the
+				// dispatch-outcome stamp cannot resolve.
+				if _, err := graphown.ContractFor("station-harness", representatives()[class]); err != nil {
+					t.Errorf("%s confines its firing entity to class %q, which station-harness does not claim: %v", r.path, class, err)
+				}
+			}
+		default:
+			t.Errorf("%s conditions on fields from %d DIFFERENT entity classes (%v) — the firing entity cannot satisfy both, so one branch is dead or the rule fires on an entity no contract covers", r.path, len(classes), classes)
+		}
+	}
+	if dispatchers == 0 {
+		t.Fatal("no station-dispatch rule matched — the pin proves nothing (did the publish subject shape change?)")
+	}
+}
+
+// TestOwnerLeaseObserveOnlyOnLanding is migrate-beta159 task 3.3 / design D5 Phase A:
+// this change LANDS with enforcement OFF, and the flip is a deliberate, evidenced
+// group-6 step — never a speculative edit.
+//
+// Flipping it early is not a small mistake. Under enforcement every owned write from
+// a process whose token went stale is REJECTED, and the token goes stale from a cause
+// this repo cannot fully prevent: a second registration of the same owner ids
+// (registry.go replaces the epoch entry with no liveness check). So the gate stays
+// shut until group 6 proves coverage POSITIVELY — the mismatch meter cannot prove it,
+// because an un-tokened write is neither metered nor rejected (D5).
+//
+// The pin also asserts the key is PRESENT: an absent key would default to false and
+// read as "observe-only" today, but silently inherit whatever the framework's default
+// becomes tomorrow.
+func TestOwnerLeaseObserveOnlyOnLanding(t *testing.T) {
+	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "configs", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var cfg struct {
+			Components map[string]struct {
+				Config struct {
+					EnforceOwnerLease *bool `json:"enforce_owner_lease"`
+				} `json:"config"`
+			} `json:"components"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		gi, ok := cfg.Components["graph-ingest"]
+		if !ok {
+			t.Errorf("%s declares no graph-ingest component — the owner-lease posture is unpinnable", name)
+			continue
+		}
+		switch {
+		case gi.Config.EnforceOwnerLease == nil:
+			t.Errorf("%s graph-ingest omits enforce_owner_lease — it must be EXPLICITLY false while this change lands, not inherited from a framework default that can change", name)
+		case *gi.Config.EnforceOwnerLease:
+			t.Errorf("%s sets enforce_owner_lease=true — the flip is group 6 and is gated on POSITIVE coverage evidence (D5); flipping it here rejects every owned write from any process whose token went stale", name)
+		}
+	}
+}
+
+// TestNoCallSiteHandRollsAnOwnedWrite is migrate-beta159 task 6.1(b) — the POSITIVE
+// coverage check that replaces the vacuous meter gate (D5).
+//
+// The owner-lease meter counts STALE tokens, not MISSING ones: graph-ingest returns
+// on `ownerToken == ""` before any enforcement branch, so an un-tokened write is
+// neither metered nor rejected. Coverage therefore has to be proven by construction,
+// and it rests on two legs. The first is the compile break itself — agentictools's
+// OwnedFactWriter is DELETED, so no alternative owned-write surface survives. The
+// second is this: nobody hand-rolls the subject to get around the contract.
+//
+// The UPDATE lane is the owned-write lane; every use must go through
+// graphown.Writer, which resolves a contract and carries the owner token. The
+// remaining sanctioned exceptions are named explicitly, so adding one is a
+// deliberate edit reviewed against ADR-056 rather than a quiet regression.
+func TestNoCallSiteHandRollsAnOwnedWrite(t *testing.T) {
+	// subject → why a raw request to it is sanctioned.
+	sanctioned := map[string]string{
+		// The admission BIRTH lane. It is deliberately un-tokened (a birth-only
+		// contract mints no token, D5) and deliberately raw: the projection client
+		// SWALLOWS ErrorCodeEntityExists as success when the stored facts match,
+		// and the intake lane needs that signal to skip a duplicate wake — see
+		// design D3c / task 4.3.
+		"graph.mutation.entity.create_with_triples": "admission birth; needs the EntityExists signal the projection client swallows (D3c)",
+	}
+
+	var offenders []string
+	err := filepath.WalkDir(filepath.Join("..", ".."), func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == ".git" || name == "vendor" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// graphown itself is the seam; it is expected to name the subjects.
+		if strings.Contains(filepath.ToSlash(path), "/internal/graphown/") {
+			return nil
+		}
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			// Only STRING LITERAL uses — a prose mention in a comment is not a call.
+			if !strings.Contains(line, `"graph.mutation.`) {
+				continue
+			}
+			ok := false
+			for subject := range sanctioned {
+				if strings.Contains(line, `"`+subject+`"`) {
+					ok = true
+				}
+			}
+			if !ok {
+				offenders = append(offenders, filepath.ToSlash(path)+": "+strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, o := range offenders {
+		t.Errorf("a graph.mutation subject is named as a string literal outside graphown — an owned write that bypasses the contract carries no owner token, and the lease meter CANNOT see it (D5):\n  %s", o)
+	}
+	// The exception list must not rot into a blanket waiver.
+	if len(sanctioned) > 2 {
+		t.Errorf("the sanctioned raw-subject list has grown to %d — each entry is an un-contracted write path; re-justify them against ADR-056", len(sanctioned))
+	}
+}
+
+// TestEveryStreamDeclaresItsBounds pins a beta.159 REQUIREMENT the migration first
+// missed: ordinary streams must declare max_bytes AND discard, or config validation
+// rejects the boot.
+//
+// It is pinned rather than left to the framework's own error because the failure is
+// LATE and PARTIAL — it surfaced only on the two journeys that re-validate a changed
+// config, so `go test ./...` and most journeys stayed green while two bridge proofs
+// could not boot at all. An offline pin makes it a one-second failure instead.
+//
+// discard is asserted to be "old" deliberately. These are all working streams with a
+// short max_age and prompt durable consumers, and "old" is the framework's own house
+// choice for AGENT/TOOL/USER (configs/agentic.json, research-graph-e2e.json — no
+// framework config uses "new"). "new" would refuse the write instead: a producer at
+// the ceiling gets NATS 503 err_code=10077 on EVERY publish until something is
+// deleted, which converts a capacity problem into a total dispatch outage. A stream
+// whose contract is permanence belongs in archival_streams, not in a bound.
+func TestEveryStreamDeclaresItsBounds(t *testing.T) {
+	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "configs", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var cfg struct {
+			Streams map[string]struct {
+				MaxAge   string `json:"max_age"`
+				MaxBytes *int64 `json:"max_bytes"`
+				Discard  string `json:"discard"`
+			} `json:"streams"`
+			ArchivalStreams map[string]any `json:"archival_streams"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if len(cfg.Streams) == 0 {
+			t.Errorf("%s declares no streams — the pin would pass vacuously", name)
+		}
+		for stream, s := range cfg.Streams {
+			if _, archival := cfg.ArchivalStreams[stream]; archival {
+				continue // an archival stream is exempt by design
+			}
+			switch {
+			case s.MaxBytes == nil:
+				t.Errorf("%s stream %q omits max_bytes — beta.159 rejects the boot, and it surfaces only when a changed config is re-validated (late and partial)", name, stream)
+			case *s.MaxBytes <= 0:
+				t.Errorf("%s stream %q has max_bytes=%d — 0 and -1 mean UNLIMITED to NATS and are not a declaration", name, stream, *s.MaxBytes)
+			}
+			if s.MaxAge == "" {
+				t.Errorf("%s stream %q omits max_age", name, stream)
+			}
+			if s.Discard != "old" {
+				t.Errorf("%s stream %q has discard=%q, want \"old\" — \"new\" refuses writes at the ceiling (NATS 503 err_code=10077 on every publish), turning a capacity problem into a total dispatch outage", name, stream, s.Discard)
+			}
+		}
+	}
+}

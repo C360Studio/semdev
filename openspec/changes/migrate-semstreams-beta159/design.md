@@ -181,6 +181,17 @@ Two modes in scope:
   enforcement flips. During Phase A observe-only it may stay as-is (the meter shows
   it un-tokened, which is the signal to migrate it).
 
+**D3c — the create migration is DEFERRED (as-built).** Beyond D5's correction that it
+buys no lease coverage, `CreateWithTriples` actively swallows the signal the intake
+lane is built on: it returns plain success when the entity already exists and
+`createFactsMatch` holds (`mutation_client.go:586-590`). semdev's `natsEntityCreator`
+exists *specifically* to surface `ErrorCodeEntityExists`, which `RecordAdmission`
+turns into `ErrAlreadyRecorded` → SKIP THE WAKE. Losing it double-mints a run on a
+webhook redelivery. The swap would pass today only because `sameFullTriple` compares
+`Timestamp` and the record stamps a fresh one per call — an accident, not a contract.
+Landing it safely needs an explicit created-vs-already-existed signal; filed as the
+follow-on, not forced here.
+
 ### D3a — the GROUP is the write's blast radius (the silent-loss axis)
 `ReplaceOwned` is **not** a drop-in for `ReplaceTriples`. The old writer sent
 `RemoveTriples` = the caller's own explicit remove list. `ReplaceOwned` sends
