@@ -42,14 +42,16 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/pkg/errs"
+
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/verifyartifact"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // ComponentName is the registered factory name and the component.<name>.> dispatch
@@ -68,7 +70,7 @@ type handler struct {
 	manifests verifyartifact.Manifests
 	prover    verifyartifact.Prover
 	store     secrets.Store // governed creds-refs (SB2c); nil at M0 (no secrets)
-	writer    agentictools.OwnedFactWriter
+	writer    *graphown.Writer
 	logger    *slog.Logger
 }
 
@@ -111,7 +113,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 // component that cannot clone the run's committed artifact must not start (never a silent
 // no-op), matching the dev-loop tools' fail-closed posture. The manifest resolver and cold
 // prover are pure adapters (no client); store is nil at M0 (no governed secrets).
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -128,8 +130,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "shared run checkouts required (the cold verify clones the run's committed artifact off the run's checkout)")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
-	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
-	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
+	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
+	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
+	// it hosts, so it resolves separately (station-harness, G5).
+	writer := clients.Writer(verifyartifact.Source)
+	cfg.FactWriter = clients.Writer(station.DispatchFailedSource)
 	h := &handler{
 		clones:    checkouts, // *runspace.Checkouts implements CloneForVerify (VerifyClones)
 		manifests: runspace.Manifests{},
@@ -146,11 +151,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // with the live instance; the conformance census passes nil (the factory registers but
 // fails loud if ever constructed, which the census never does — it only inspects the
 // registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts)
+			return newProcessor(raw, deps, checkouts, clients)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

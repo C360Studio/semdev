@@ -48,6 +48,11 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/pkg/errs"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
@@ -55,9 +60,6 @@ import (
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // ComponentName is the registered factory name and the component.<name>.> dispatch
@@ -118,7 +120,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 // shared checkout, or stand up into the shared warm-container registry measure_task reads, must
 // not start (never a silent no-op). A fixture-mode EMPTY dir is NOT a fail-loud: it makes the
 // source resolve fail closed → block → park (SB5), matching the tool.
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -143,8 +145,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	if err != nil {
 		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build run source")
 	}
-	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
-	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
+	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
+	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
+	// it hosts, so it resolves separately (station-harness, G5).
+	writer := clients.Writer(provisionsandbox.Source)
+	cfg.FactWriter = clients.Writer(station.DispatchFailedSource)
 	h := &handler{
 		deps: provisionsandbox.ProvisionDeps{
 			Sources:     sources,   // StaticSource (fixture) or the forge-clone Source (real target)
@@ -167,11 +172,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // the run's SOURCE spec. Called from boot.RegisterAll with the live instances; the conformance
 // census passes nil/zero (the factory registers but fails loud if ever constructed, which the
 // census never does — it only inspects the registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts, sandboxes, spec)
+			return newProcessor(raw, deps, checkouts, sandboxes, spec, clients)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

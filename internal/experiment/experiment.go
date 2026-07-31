@@ -18,8 +18,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semdev/internal/forge/semsource"
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // Condition values. Unconfigured ("") is the baseline DEFAULT with zero new
@@ -120,16 +122,16 @@ func CheckReadiness(ctx context.Context, r statusReader) error {
 	return nil
 }
 
-// FactWriter is the driver-side fact transport (the approval-adapter
-// precedent: agentictools.NewNATSOwnedFactWriter satisfies it).
-type FactWriter interface {
-	ReplaceTriples(ctx context.Context, entityID string, triples []message.Triple, removePredicates []string) error
-}
-
 // StampCondition writes the single evidence-label fact on the run entity
 // (writer experiment-intake, single-valued upsert). Callers only invoke it
 // for a DECLARED condition; the unconfigured default stamps nothing.
-func StampCondition(ctx context.Context, w FactWriter, runEntityID, condition string) error {
+//
+// It takes the CONCRETE *graphown.Writer, not a local interface. An interface here
+// would let a test double substitute ABOVE the seam and bypass ContractFor — and
+// that resolution is the only behavioral proof that experiment.run.condition is
+// classed onto the entity class this writer actually stamps (design D3b). Fake
+// projection.OwnedReplacer underneath instead, as the tool suites do.
+func StampCondition(ctx context.Context, w *graphown.Writer, runEntityID, condition string) error {
 	tr := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  ConditionPredicate,
@@ -138,7 +140,7 @@ func StampCondition(ctx context.Context, w FactWriter, runEntityID, condition st
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	if err := w.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, []string{ConditionPredicate}); err != nil {
+	if err := w.Replace(ctx, runEntityID, []message.Triple{tr}); err != nil {
 		return fmt.Errorf("experiment: stamp %s=%q on %s: %w", ConditionPredicate, condition, runEntityID, err)
 	}
 	return nil
@@ -170,7 +172,7 @@ func Launch(
 	probe func(context.Context) error,
 	publish func(context.Context) error,
 	bindRun func(context.Context) (string, error),
-	writer FactWriter,
+	writer *graphown.Writer,
 ) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", err

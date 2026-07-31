@@ -41,12 +41,13 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/coldproof"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // Source is stamped on the verify.result triple. It MUST equal the writer declared for
@@ -122,7 +123,7 @@ type VerifyResult struct {
 // CONTRACT: clones/manifests/prover/writer must be non-nil — the station factory
 // constructs them and fails loud on a nil seam before ever calling RunVerify. A nil
 // logger is defended (defaults to slog.Default()).
-func RunVerify(ctx context.Context, clones VerifyClones, manifests Manifests, prover Prover, store secrets.Store, writer agentictools.OwnedFactWriter, logger *slog.Logger, runEntityID string) (VerifyResult, error) {
+func RunVerify(ctx context.Context, clones VerifyClones, manifests Manifests, prover Prover, store secrets.Store, writer *graphown.Writer, logger *slog.Logger, runEntityID string) (VerifyResult, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -161,7 +162,7 @@ func RunVerify(ctx context.Context, clones VerifyClones, manifests Manifests, pr
 // stampResult upserts verify.result on the run entity (replace-by-predicate, so a
 // retry re-run replaces the prior outcome rather than appending a second one). A free
 // function so every caller of RunVerify shares one writer of verify.result (G5).
-func stampResult(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string, outcome verify.Outcome) error {
+func stampResult(ctx context.Context, writer *graphown.Writer, runEntityID string, outcome verify.Outcome) error {
 	triple := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  ResultPredicate,
@@ -170,5 +171,5 @@ func stampResult(ctx context.Context, writer agentictools.OwnedFactWriter, runEn
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	return writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
+	return writer.Replace(ctx, runEntityID, []message.Triple{triple})
 }

@@ -5,10 +5,15 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -50,13 +55,15 @@ type fakeWriter struct {
 	replaces [][]message.Triple
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
-	w.replaces = append(w.replaces, add)
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
-}
+
+// writerFor wraps the fake in the owner-bound seam the production code takes, so
+// every test exercises graphown.ContractFor for real — the behavioral proof that
+// this owner's predicates are classed onto the entity class it actually writes.
+func writerFor(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, w) }
 
 func verdictOf(o verify.Outcome) verify.Verdict { return verify.Verdict{Outcome: o} }
 
@@ -64,7 +71,7 @@ func verdictOf(o verify.Outcome) verify.Verdict { return verify.Verdict{Outcome:
 // verify.result (or "") plus RunVerify's own return values.
 func runVerify(t *testing.T, clones VerifyClones, prover Prover, w *fakeWriter) (string, VerifyResult, error) {
 	t.Helper()
-	res, err := RunVerify(context.Background(), clones, fakeManifests{m: harness.GoProfile()}, prover, nil, w, nil, runEntity)
+	res, err := RunVerify(context.Background(), clones, fakeManifests{m: harness.GoProfile()}, prover, nil, writerFor(w), nil, runEntity)
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
 			if tr.Predicate == ResultPredicate {

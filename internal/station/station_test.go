@@ -11,6 +11,10 @@ import (
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // captureHandler records every Request it is handed and returns a configurable
@@ -20,6 +24,12 @@ type captureHandler struct {
 	reqs []Request
 	err  error
 }
+
+// testRunEntity is a REAL six-position run entity id. station-harness resolves its
+// projection contract by matching the DISPATCHED entity, so a bare "run-1" is no
+// longer a usable stand-in (migrate-beta159 D2a) — and the old fixture, which
+// could never occur in production, would have hidden that (G8).
+const testRunEntity = "org.plat.agent.chain.execution.run-1"
 
 func (h *captureHandler) Handle(_ context.Context, req Request) error {
 	h.reqs = append(h.reqs, req)
@@ -38,7 +48,6 @@ func newTestComponent(h Handler) *Component {
 type replaceCall struct {
 	entityID string
 	add      []message.Triple
-	remove   []string
 }
 
 // captureWriter is the OwnedFactWriter seam for the dispatch-outcome pins —
@@ -49,20 +58,19 @@ type captureWriter struct {
 	err   error
 }
 
-func (w *captureWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, remove []string) error {
-	w.calls = append(w.calls, replaceCall{entityID: entityID, add: add, remove: remove})
-	return w.err
-}
-
-func (w *captureWriter) ReadOwnedPredicates(context.Context, string, string) ([]string, error) {
-	return nil, nil
+func (w *captureWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.calls = append(w.calls, replaceCall{entityID: m.EntityID, add: m.Desired})
+	if w.err != nil {
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
+	}
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
 // newTestComponentWithWriter builds a direct-constructed Component carrying the
 // capture writer (the booted-station shape New enforces).
 func newTestComponentWithWriter(h Handler, w *captureWriter) *Component {
 	c := newTestComponent(h)
-	c.factWriter = w
+	c.factWriter = graphown.NewWriter(DispatchFailedSource, w)
 	return c
 }
 
@@ -124,7 +132,7 @@ func TestHandleMessageIgnoresMalformedEnvelope(t *testing.T) {
 func TestHandleMessageRetriesThenMetersError(t *testing.T) {
 	h := &captureHandler{err: errors.New("boom")}
 	c := newTestComponent(h)
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	// A persistent fault is RETRIED (transient resilience, restoring the forced
 	// loop's re-call behavior): the idempotent handler runs maxHandleAttempts times,
@@ -146,7 +154,7 @@ func TestHandleMessageStopsRetryOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c.baseCtx = ctx
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 	if len(h.reqs) != 1 {
 		t.Errorf("handler called %d times under a cancelled context, want 1 (no retry during shutdown)", len(h.reqs))
 	}
@@ -172,7 +180,7 @@ func TestConfigValidateRequiresInputPort(t *testing.T) {
 }
 
 func TestNewRejectsMissingDeps(t *testing.T) {
-	cfg := Config{Ports: DefaultPorts("s"), FactWriter: &captureWriter{}}
+	cfg := Config{Ports: DefaultPorts("s"), FactWriter: graphown.NewWriter(DispatchFailedSource, &captureWriter{})}
 	h := &captureHandler{}
 	// nil NATS client / nil handler / empty name each fail loudly — a station
 	// cannot subscribe or dispatch without them, and a silent no-op start is the
@@ -208,31 +216,34 @@ func TestNewRejectsNilFactWriter(t *testing.T) {
 // the bounded retries exhaust, the harness stamps station.dispatch.failed on
 // the DISPATCHED entity — subject = the envelope's entity, object names the
 // station + the sanitized error, Source = the G5 station-harness writer, and
-// the write is replace-by-predicate (no removePredicates).
+// the write reconciles station-harness's single-predicate group (no explicit
+// remove list exists under ReplaceOwned — the group IS the removal).
 func TestRetriesExhaustedStampsDispatchFailed(t *testing.T) {
 	h := &captureHandler{err: errors.New("projection refused: target_files lacks a test")}
 	w := &captureWriter{}
 	c := newTestComponentWithWriter(h, w)
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	if len(h.reqs) != maxHandleAttempts {
 		t.Fatalf("handler called %d times, want %d (the stamp happens AFTER the bounded retries)", len(h.reqs), maxHandleAttempts)
 	}
 	if len(w.calls) != 1 {
-		t.Fatalf("ReplaceTriples called %d times, want exactly 1 after retries exhaust", len(w.calls))
+		t.Fatalf("ReplaceOwned called %d times, want exactly 1 after retries exhaust", len(w.calls))
 	}
 	call := w.calls[0]
-	if call.entityID != "run-1" {
-		t.Errorf("stamped entity = %q, want the dispatched entity run-1", call.entityID)
+	if call.entityID != testRunEntity {
+		t.Errorf("stamped entity = %q, want the dispatched entity %q", call.entityID, testRunEntity)
 	}
-	if len(call.remove) != 0 {
-		t.Errorf("removePredicates = %v, want none (pure upsert)", call.remove)
-	}
+	// Upsert with no collateral is now structural: station-harness owns exactly
+	// {station.dispatch.failed}, so the group wipe clears only that predicate before
+	// re-adding it (migrate-beta159 D3a). The pin is that the write carried exactly
+	// the one triple.
+
 	if len(call.add) != 1 {
 		t.Fatalf("add carries %d triples, want exactly 1 (the dispatch-outcome fact)", len(call.add))
 	}
 	tr := call.add[0]
-	if tr.Subject != "run-1" || tr.Predicate != DispatchFailedPredicate {
+	if tr.Subject != testRunEntity || tr.Predicate != DispatchFailedPredicate {
 		t.Errorf("triple = %s %s, want run-1 %s", tr.Subject, tr.Predicate, DispatchFailedPredicate)
 	}
 	if tr.Source != DispatchFailedSource {
@@ -259,7 +270,7 @@ func TestDispatchFailedObjectIsBounded(t *testing.T) {
 	h := &captureHandler{err: errors.New(huge)}
 	w := &captureWriter{}
 	c := newTestComponentWithWriter(h, w)
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	if len(w.calls) != 1 || len(w.calls[0].add) != 1 {
 		t.Fatalf("want exactly one stamped triple, got calls=%d", len(w.calls))
@@ -291,7 +302,7 @@ func TestDispatchFailedStripsHandlerStationPrefix(t *testing.T) {
 	h := &captureHandler{err: errors.New("test-station: boom")}
 	w := &captureWriter{}
 	c := newTestComponentWithWriter(h, w)
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	if len(w.calls) != 1 || len(w.calls[0].add) != 1 {
 		t.Fatalf("want exactly one stamped triple, got calls=%d", len(w.calls))
@@ -310,12 +321,12 @@ func TestDispatchFailedIsUpsertNotAppend(t *testing.T) {
 	h := &captureHandler{err: errors.New("boom-1")}
 	w := &captureWriter{}
 	c := newTestComponentWithWriter(h, w)
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 	h.err = errors.New("boom-2")
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	if len(w.calls) != 2 {
-		t.Fatalf("ReplaceTriples called %d times, want 2 (one per exhausted dispatch)", len(w.calls))
+		t.Fatalf("ReplaceOwned called %d times, want 2 (one per exhausted dispatch)", len(w.calls))
 	}
 	for i, call := range w.calls {
 		if len(call.add) != 1 || call.add[0].Predicate != DispatchFailedPredicate {
@@ -336,13 +347,13 @@ func TestSuccessPathStampsNothing(t *testing.T) {
 	h := &captureHandler{}
 	w := &captureWriter{}
 	c := newTestComponentWithWriter(h, w)
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	if len(h.reqs) != 1 {
 		t.Fatalf("handler called %d times, want 1", len(h.reqs))
 	}
 	if len(w.calls) != 0 {
-		t.Errorf("ReplaceTriples called %d times on SUCCESS, want 0 (no harness outcome fact, ever)", len(w.calls))
+		t.Errorf("ReplaceOwned called %d times on SUCCESS, want 0 (no harness outcome fact, ever)", len(w.calls))
 	}
 }
 
@@ -353,7 +364,7 @@ func TestSuccessPathStampsNothing(t *testing.T) {
 func TestNilWriterStaysLogOnly(t *testing.T) {
 	h := &captureHandler{err: errors.New("boom")}
 	c := newTestComponent(h) // no writer
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 	if n := atomic.LoadInt64(&c.errors); n != 1 {
 		t.Errorf("error count = %d, want 1 (metered once, log-only)", n)
 	}
@@ -372,13 +383,13 @@ func TestShutdownAbortDoesNotStampDispatchFailed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c.baseCtx = ctx
-	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"run-1","properties":{}}`))
+	c.handleMessage("component.test-station.dispatch", []byte(`{"entity_id":"org.plat.agent.chain.execution.run-1","properties":{}}`))
 
 	if len(h.reqs) != 1 {
 		t.Fatalf("handler called %d times under a cancelled context, want 1 (no retry during shutdown)", len(h.reqs))
 	}
 	if len(w.calls) != 0 {
-		t.Errorf("ReplaceTriples called %d times on a shutdown abort, want 0 (retries not exhausted — no false terminal)", len(w.calls))
+		t.Errorf("ReplaceOwned called %d times on a shutdown abort, want 0 (retries not exhausted — no false terminal)", len(w.calls))
 	}
 }
 

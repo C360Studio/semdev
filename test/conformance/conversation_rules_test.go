@@ -871,6 +871,30 @@ func TestNatsPortMatchesComposeDefault(t *testing.T) {
 		t.Error(`docker/compose/nats.yml must declare "name: semdev" — without it the project name is derived from the parent directory ("compose"), colliding with every other repo laid out the same way`)
 	}
 
+	// The SERVER image is pinned here too (migrate-semstreams-beta159 D7). beta.159's
+	// ownership substrate (OWNER_PRESENCE TTL keys, the epoch bucket) runs on the
+	// house 2.14 line; silently drifting back to 2.10 would surface as ownership
+	// bind/heartbeat misbehavior at boot, not as a config error — and never offline.
+	// A floating tag — including the MINOR line nats:2.14-alpine, which moves with
+	// every 2.14.x patch — is rejected for the same reason the
+	// nats-box sidecar is pinned: an unpinned substrate makes a green run
+	// unreproducible.
+	if m := regexp.MustCompile(`(?m)^\s*image:\s*nats:(\S+)\s*$`).FindSubmatch(composeRaw); m == nil {
+		t.Error("could not find the nats server image in docker/compose/nats.yml — the version pin cannot verify it")
+	} else if got := string(m[1]); got != "2.14.4-alpine" {
+		t.Errorf("nats server image = %q, want %q — beta.159's ownership substrate is pinned to the house 2.14 line (D7); a drift shows up as bind/heartbeat misbehavior at boot, never offline", got, "2.14.4-alpine")
+	}
+
+	// The operator sidecar's image must not float: `nats-box:latest` silently
+	// changes the CLI under a paid run's watch commands.
+	taskfile, err := os.ReadFile(filepath.Join(root, "Taskfile.yml"))
+	if err != nil {
+		t.Fatalf("read Taskfile.yml: %v", err)
+	}
+	if regexp.MustCompile(`natsio/nats-box:(latest|main)\b`).Match(taskfile) {
+		t.Error("Taskfile.yml uses a FLOATING natsio/nats-box tag — pin it, or the sidecar CLI changes under a paid run without a commit (D7)")
+	}
+
 	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
 		raw, err := os.ReadFile(filepath.Join(root, "configs", name))
 		if err != nil {

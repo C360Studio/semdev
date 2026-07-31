@@ -7,11 +7,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/graph"
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // demoRevision is the content revision create_change would stamp for "demo".
@@ -60,13 +66,27 @@ type fakeWriter struct {
 	replaces [][]message.Triple
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
-	w.replaces = append(w.replaces, add)
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) ([]string, error) {
-	return w.owned, nil
+
+// ReadAuthoritative returns the WHOLE entity, as the real client does — the owned
+// set the old prefix-scoped ReadOwnedPredicates returned is reconstructed by the
+// caller's LOCAL prefix filter. The seeded `owned` predicates become triples so a
+// dropped filter (which would make project_tasks refuse universally) is visible.
+func (w *fakeWriter) ReadAuthoritative(_ context.Context, id string) (*graph.EntityState, error) {
+	e := &graph.EntityState{ID: id}
+	for _, p := range w.owned {
+		e.Triples = append(e.Triples, message.Triple{Subject: id, Predicate: p, Object: "x"})
+	}
+	return e, nil
 }
+
+// writerFor wraps the fake in the owner-bound seam the production code takes, so
+// every test exercises graphown.ContractFor for real — the behavioral proof that
+// this owner's predicates are classed onto the entity class it actually writes.
+func writerFor(w *fakeWriter) *graphown.Writer { return graphown.NewReadWriter(Source, w, w) }
 
 // validRichTask returns index i's fully-authored rich fields (the schema-complete
 // case) — mirrors the pre-D3 validTaskFacts helper's quintet, now as the real Go
@@ -121,7 +141,7 @@ func documentFact(t *testing.T, doc changefacts.ChangeDocument) message.Triple {
 func run(t *testing.T, rich []changefacts.RichTask, w *fakeWriter) (map[string]string, int, error) {
 	t.Helper()
 	facts := []message.Triple{documentFact(t, changeDocument(rich...)), validatedAt(demoRevision), revisionAt(demoRevision)}
-	count, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	count, err := Project(context.Background(), &fakeReader{facts: facts}, writerFor(w), slog.Default(), runEntity, "demo")
 	idx := map[string]string{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -267,7 +287,7 @@ func TestProjectRejectsReProjection(t *testing.T) {
 func TestProjectRejectsUnvalidatedSlug(t *testing.T) {
 	facts := []message.Triple{documentFact(t, changeDocument(validRichTask(0))), revisionAt(demoRevision)}
 	w := &fakeWriter{}
-	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, writerFor(w), slog.Default(), runEntity, "demo")
 	if err == nil || !strings.Contains(err.Error(), "validated") {
 		t.Fatalf("an unvalidated slug must be refused, got %v", err)
 	}
@@ -287,7 +307,7 @@ func TestProjectRejectsAlternateValidatedSlug(t *testing.T) {
 		revisionAt(demoRevision),
 	}
 	w := &fakeWriter{}
-	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, writerFor(w), slog.Default(), runEntity, "demo")
 	if err == nil || !strings.Contains(err.Error(), "validated") {
 		t.Fatalf("an alternate validated slug must be refused, got %v", err)
 	}
@@ -308,7 +328,7 @@ func TestProjectRejectsReauthoredUnrevalidatedChange(t *testing.T) {
 		revisionAt("sha256:demo-content-v2"),  // re-author bumped to v2
 	}
 	w := &fakeWriter{}
-	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, writerFor(w), slog.Default(), runEntity, "demo")
 	if err == nil || !strings.Contains(err.Error(), "current content") {
 		t.Fatalf("a re-authored-since-validation change must be refused, got %v", err)
 	}
@@ -339,7 +359,7 @@ func TestProjectRejectsMultipleTasks(t *testing.T) {
 		validatedAt(demoRevision),
 		revisionAt(demoRevision),
 	}
-	_, err := Project(context.Background(), &fakeReader{facts: facts}, w, slog.Default(), runEntity, "demo")
+	_, err := Project(context.Background(), &fakeReader{facts: facts}, writerFor(w), slog.Default(), runEntity, "demo")
 	if err == nil {
 		t.Fatal("a change authoring more than one task must be refused at M0 (task.spec is single-keyed)")
 	}

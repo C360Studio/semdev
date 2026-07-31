@@ -8,14 +8,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/natsclient"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/intake/admission"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/natsclient"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // The APPROVAL ADAPTER (conversation-channel-seam D8, re-homed from issue-intake):
@@ -56,20 +58,25 @@ type approvalAdapter struct {
 	cfg      ComponentConfig
 	checker  admission.PermissionChecker
 	resolver admission.RunResolver
-	writer   agentictools.OwnedFactWriter
-	reader   changefacts.Reader
-	logger   *slog.Logger
+	// TWO owners, two clients: approval-adapter stamps the gate decision on the
+	// run, conversation-adapter stamps the pending-message slot. ADR-056 binds one
+	// owner per client, and these are distinct vocab Sources (G5).
+	writer        *graphown.Writer
+	pendingWriter *graphown.Writer
+	reader        changefacts.Reader
+	logger        *slog.Logger
 
 	ignored int64
 	granted int64
 	pending int64
 }
 
-func newApprovalAdapter(client *natsclient.Client, cfg ComponentConfig, checker admission.PermissionChecker, platform component.PlatformMeta, logger *slog.Logger) *approvalAdapter {
+func newApprovalAdapter(client *natsclient.Client, clients *graphown.Clients, cfg ComponentConfig, checker admission.PermissionChecker, platform component.PlatformMeta, logger *slog.Logger) *approvalAdapter {
 	a := &approvalAdapter{cfg: cfg, checker: checker, logger: logger}
 	if client != nil {
 		a.resolver = admission.NewRunResolver(client, platform.Org, platform.Platform)
-		a.writer = agentictools.NewNATSOwnedFactWriter(client)
+		a.writer = clients.Writer(ApprovedSource)
+		a.pendingWriter = clients.Writer(conversationintent.AdapterSource)
 		a.reader = changefacts.NewNATSReader(client)
 	}
 	return a
@@ -351,7 +358,7 @@ func (a *approvalAdapter) stampDecision(ctx context.Context, runEntityID, decisi
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	if err := a.writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil); err != nil {
+	if err := a.writer.Replace(ctx, runEntityID, []message.Triple{tr}); err != nil {
 		return "", err
 	}
 	return decision, nil
@@ -498,7 +505,7 @@ func (a *approvalAdapter) bridgeNonCommand(ctx context.Context, msg conversation
 		mk(conversationintent.PendingAuthorPredicate, msg.Author),
 		mk(conversationintent.PendingBodyPredicate, msg.Body),
 	}
-	if err := a.writer.ReplaceTriples(ctx, runEntityID, pendingTriples, nil); err != nil {
+	if err := a.pendingWriter.Replace(ctx, runEntityID, pendingTriples); err != nil {
 		return fmt.Errorf("approval: stamp %s on %s: %w", conversationintent.PendingPrefix, runEntityID, err)
 	}
 	atomic.AddInt64(&a.pending, 1)

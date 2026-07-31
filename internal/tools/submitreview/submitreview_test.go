@@ -6,11 +6,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/c360studio/semdev/internal/devtask"
-	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/types"
+
+	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/measurement"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -34,16 +39,25 @@ func (r *fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.T
 }
 
 type fakeWriter struct {
-	replaces [][]message.Triple
+	replaces  [][]message.Triple
+	entityIDs []string
+	contracts []string
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
-	w.replaces = append(w.replaces, add)
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.replaces = append(w.replaces, m.Desired)
+	w.entityIDs = append(w.entityIDs, m.EntityID)
+	w.contracts = append(w.contracts, m.Contract)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
-}
+
+// submit_review writes as TWO owners — reviewer-quinn (the verdict, on the run) and
+// route-mirror (the route mirror, on ITS review loop) — so the tool takes two bound
+// writers. Both tap the SAME fake here, so existing assertions over w.replaces still
+// see every write, while entityIDs/contracts let a test tell the two apart.
+func mustW(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, w) }
+
+func mustM(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(RouteMirrorSource, w) }
 
 // taskSpecFact builds one flat task.spec.<field> fact (beta.147 D1: single-task at
 // M0 — the per-task index is out of the predicate).
@@ -102,7 +116,7 @@ func verdictFor(w *fakeWriter, taskIndex int) string {
 // verdict (or "") and the result.
 func runTask(t *testing.T, facts []message.Triple, w *fakeWriter, taskIndex int, findings ...string) (string, agentic.ToolResult) {
 	t.Helper()
-	res, err := New(&fakeReader{facts: facts}, w, types.PlatformMeta{}, nil).Execute(context.Background(), call(taskIndex, findings...))
+	res, err := New(&fakeReader{facts: facts}, mustW(w), mustM(w), types.PlatformMeta{}, nil).Execute(context.Background(), call(taskIndex, findings...))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -251,7 +265,7 @@ func TestReviewErrorsWhenTaskNotProjected(t *testing.T) {
 func TestReviewRequiresTaskIndex(t *testing.T) {
 	c := call(0)
 	delete(c.Arguments, "task_index")
-	res, err := New(&fakeReader{facts: oneTaskPassing()}, &fakeWriter{}, types.PlatformMeta{}, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, mustW(&fakeWriter{}), mustM(&fakeWriter{}), types.PlatformMeta{}, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -291,7 +305,7 @@ func TestReviewReReviewUpserts(t *testing.T) {
 		t.Fatalf("first review verdict = %q, want approved", v)
 	}
 	// Now a finding appears on re-review of the same task.
-	res, err := New(&fakeReader{facts: oneTaskPassing()}, w, types.PlatformMeta{}, nil).Execute(context.Background(), call(0, "regression found"))
+	res, err := New(&fakeReader{facts: oneTaskPassing()}, mustW(w), mustM(w), types.PlatformMeta{}, nil).Execute(context.Background(), call(0, "regression found"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -308,7 +322,7 @@ func TestReviewReReviewUpserts(t *testing.T) {
 
 // Schema-only registration (nil reader/writer) fails loudly if executed.
 func TestReviewFailsLoudlyWithoutHarness(t *testing.T) {
-	res, err := New(nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), call(0))
+	res, err := New(nil, nil, nil, types.PlatformMeta{}, nil).Execute(context.Background(), call(0))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -336,7 +350,7 @@ func TestReviewMirrorsRouteInputsOntoLoop(t *testing.T) {
 	)
 	c := call(0, "regression found") // a finding → changes_requested
 	c.LoopID = "review-loop-abc"
-	res, err := New(&fakeReader{facts: facts}, w, platform, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: facts}, mustW(w), mustM(w), platform, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -396,7 +410,7 @@ func TestReviewMirrorAbsentBudgetErrs(t *testing.T) {
 	)
 	c := call(0, "regression found")
 	c.LoopID = "review-loop-abc"
-	res, err := New(&fakeReader{facts: facts}, w, platform, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: facts}, mustW(w), mustM(w), platform, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -435,7 +449,7 @@ func TestReviewMirrorNonCanonicalBudgetErrs(t *testing.T) {
 			message.Triple{Predicate: "task.attempt.instance", Object: "dev-loop-1", Source: "dev-dispatch-rule"})
 		c := call(0, "regression found")
 		c.LoopID = "review-loop-abc"
-		res, err := New(&fakeReader{facts: facts}, w, platform, nil).Execute(context.Background(), c)
+		res, err := New(&fakeReader{facts: facts}, mustW(w), mustM(w), platform, nil).Execute(context.Background(), c)
 		if err != nil {
 			t.Fatalf("budget %q: execute: %v", bad, err)
 		}

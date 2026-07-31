@@ -9,11 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
 	"github.com/c360studio/semdev/internal/intake/admission"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // --- fakes ---
@@ -28,6 +33,9 @@ type fakeResolver struct {
 // ResolveRunByRef reports a gate opened an hour ago for a gated run, so the D12a
 // watermark admits a message sent NOW. A fixture wanting the watermark to BITE uses
 // fakeGraph with an explicit gateOpenedAt.
+// testRunEntity is a REAL six-position run entity id (see runID above).
+const testRunEntity = "c360.semdev-001.agent.chain.execution.run-1"
+
 func (f *fakeResolver) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
 	st := admission.RunState{EntityID: f.runID, Decision: f.decision, Phase: f.phase}
 	if st.Phase == admission.PhaseAwaitingApproval {
@@ -71,6 +79,14 @@ func (f *fakeIntentReader) ReadFacts(_ context.Context, _ string, prefix string)
 type replacedFacts struct {
 	entityID string
 	add      []message.Triple
+	// contract is the projection contract the write RESOLVED to. Recording it is
+	// what makes a writer swap detectable: the adapter holds two writers
+	// (approval-adapter for the gate decision, conversation-adapter for the pending
+	// slot), and Source alone cannot tell them apart — `mk` stamps Source
+	// independently of which writer carries the triple. Production fails closed on a
+	// swap (canonicalizeReplace rejects a predicate outside the selected group), but
+	// only for a NON-empty Desired; a clearing swap has no predicate to check.
+	contract string
 }
 
 type fakeWriter struct {
@@ -81,13 +97,44 @@ type fakeWriter struct {
 	err error
 }
 
-func (f *fakeWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, _ []string) error {
-	f.calls = append(f.calls, replacedFacts{entityID: entityID, add: add})
-	return f.err
+func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	f.calls = append(f.calls, replacedFacts{entityID: m.EntityID, add: m.Desired, contract: m.Contract})
+	if f.err != nil {
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, f.err
+	}
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
-func (f *fakeWriter) ReadOwnedPredicates(context.Context, string, string) ([]string, error) {
-	return nil, nil
+// The approval adapter writes as TWO owners: approval-adapter (the gate decision)
+// and conversation-adapter (the pending-message slot). ADR-056 binds one owner per
+// client, so the adapter holds two writers. Both helpers take the framework's narrow
+// replacer interface so either double — the stateless fakeWriter or the stateful
+// fakeGraph — can back them, and both tap the SAME double so a test still sees every
+// write in one place.
+// assertGateContract fails if a gate-decision write did not go out under the
+// approval-adapter contract — the assertion that makes an adapter writer swap
+// visible. Without it, swapping a.writer and a.pendingWriter leaves every test in
+// this file green (grp3-5 review M-2).
+func assertGateContract(t *testing.T, got []replacedFacts) {
+	t.Helper()
+	for _, c := range got {
+		for _, tr := range c.add {
+			if tr.Predicate == admission.DecisionPredicate && c.contract != ApprovedSource {
+				t.Errorf("%s was written under contract %q, want %q — the gate decision must go out through the approval-adapter writer, not the pending-slot one", admission.DecisionPredicate, c.contract, ApprovedSource)
+			}
+			if strings.HasPrefix(tr.Predicate, conversationintent.PendingPrefix) && c.contract != conversationintent.AdapterSource {
+				t.Errorf("%s was written under contract %q, want %q — the pending slot must go out through the conversation-adapter writer", tr.Predicate, c.contract, conversationintent.AdapterSource)
+			}
+		}
+	}
+}
+
+func gateWriterFor2(r projection.OwnedReplacer) *graphown.Writer {
+	return graphown.NewWriter(ApprovedSource, r)
+}
+
+func pendingWriterFor2(r projection.OwnedReplacer) *graphown.Writer {
+	return graphown.NewWriter(conversationintent.AdapterSource, r)
 }
 
 // fakeGraph is a STATEFUL resolver+reader+writer triple: what the adapter writes is
@@ -104,6 +151,8 @@ type fakeGraph struct {
 	gateOpenedAt time.Time
 	facts        []message.Triple
 	writes       int
+	// contracts records the contract each write resolved to — see replacedFacts.
+	contracts []string
 }
 
 func (f *fakeGraph) ResolveRunByRef(context.Context, string) (admission.RunState, error) {
@@ -125,11 +174,16 @@ func (f *fakeGraph) ReadFacts(_ context.Context, _ string, prefix string) ([]mes
 	return out, nil
 }
 
-// ReplaceTriples mirrors the graph's replace-by-predicate semantics: a written
-// predicate REPLACES any prior triple of that predicate on the entity.
-func (f *fakeGraph) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
+// ReplaceOwned mirrors the graph's replace-by-predicate semantics: a written
+// predicate REPLACES any prior triple of that predicate on the entity. It does NOT
+// model the full group wipe, deliberately — every owner exercised here writes its
+// complete owned set in one pass, so the two are equivalent for these fixtures
+// (migrate-beta159 D3a), and the per-predicate model keeps the group-8 state pins
+// (the wedge and the watermark) readable.
+func (f *fakeGraph) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
 	f.writes++
-	for _, tr := range add {
+	f.contracts = append(f.contracts, m.Contract)
+	for _, tr := range m.Desired {
 		kept := f.facts[:0]
 		for _, existing := range f.facts {
 			if existing.Predicate != tr.Predicate {
@@ -138,11 +192,7 @@ func (f *fakeGraph) ReplaceTriples(_ context.Context, _ string, add []message.Tr
 		}
 		f.facts = append(kept, tr)
 	}
-	return nil
-}
-
-func (f *fakeGraph) ReadOwnedPredicates(context.Context, string, string) ([]string, error) {
-	return nil, nil
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
 func (f *fakeGraph) objectOf(pred string) string {
@@ -171,7 +221,7 @@ func (f *fakeGraph) gateFacts() []message.Triple {
 func newTestApprovalOnGraph(g *fakeGraph, checker admission.PermissionChecker) *approvalAdapter {
 	cfg := ComponentConfig{Repo: "c360studio/semdev-fixture", Allowlist: []string{"cglusky"}}
 	applyConfigDefaults(&cfg)
-	return &approvalAdapter{cfg: cfg, checker: checker, resolver: g, writer: g, reader: g, logger: slog.Default()}
+	return &approvalAdapter{cfg: cfg, checker: checker, resolver: g, writer: gateWriterFor2(g), pendingWriter: pendingWriterFor2(g), reader: g, logger: slog.Default()}
 }
 
 // TestOppositeCommandsCannotWedgeTheGate is the group-8 8.2 pin (external review #2,
@@ -277,7 +327,7 @@ func TestGatedButDecidedRunSpendsNoClassifier(t *testing.T) {
 func newTestApproval(resolver admission.RunResolver, writer *fakeWriter, checker admission.PermissionChecker) *approvalAdapter {
 	cfg := ComponentConfig{Repo: "c360studio/semdev-fixture", Allowlist: []string{"cglusky"}}
 	applyConfigDefaults(&cfg)
-	return &approvalAdapter{cfg: cfg, checker: checker, resolver: resolver, writer: writer, reader: &fakeIntentReader{}, logger: slog.Default()}
+	return &approvalAdapter{cfg: cfg, checker: checker, resolver: resolver, writer: gateWriterFor2(writer), pendingWriter: pendingWriterFor2(writer), reader: &fakeIntentReader{}, logger: slog.Default()}
 }
 
 func flattenedComment(t *testing.T, sender, author, body string) []byte {
@@ -316,8 +366,9 @@ func TestApprovalReadsNeutralMessage(t *testing.T) {
 		t.Fatalf("handleCommentEvent: %v", err)
 	}
 	if len(writer.calls) != 1 {
-		t.Fatalf("ReplaceTriples calls = %d, want 1", len(writer.calls))
+		t.Fatalf("ReplaceOwned calls = %d, want 1", len(writer.calls))
 	}
+	assertGateContract(t, writer.calls)
 	call := writer.calls[0]
 	if call.entityID != "c360.semdev-001.agent.chain.execution.r1" {
 		t.Errorf("stamped entity = %q, want the resolved run", call.entityID)
@@ -363,8 +414,9 @@ func TestApprovalCoreSharedByWebhookAndPoll(t *testing.T) {
 	// Both transports produced the byte-identical write on the same run.
 	for name, w := range map[string]*fakeWriter{"webhook": wWriter, "poll": pWriter} {
 		if len(w.calls) != 1 {
-			t.Fatalf("%s transport: ReplaceTriples calls = %d, want 1", name, len(w.calls))
+			t.Fatalf("%s transport: ReplaceOwned calls = %d, want 1", name, len(w.calls))
 		}
+		assertGateContract(t, w.calls)
 		call := w.calls[0]
 		if call.entityID != runID || len(call.add) != 1 {
 			t.Fatalf("%s transport: stamped entity=%q with %d triples, want %q with 1", name, call.entityID, len(call.add), runID)
@@ -400,7 +452,10 @@ func TestPollAuthorizesMessageAuthorNotAllowlisted(t *testing.T) {
 // current state is the truth) — DOCUMENTED, not claimed away.
 func TestPollHonorsEditedApproveWebhookDoesNot(t *testing.T) {
 	ctx := context.Background()
-	const runID = "run-1"
+	// A REAL six-position run entity id: the projection client validates the entity
+	// against its contract pattern, so a bare "run-1" is no longer a usable stand-in
+	// (migrate-beta159 D2a). The old fixture could never occur in production.
+	const runID = "c360.semdev-001.agent.chain.execution.run-1"
 
 	// Webhook: an EDITED comment carrying "/semdev approve" — normalizeComment
 	// rejects a non-created action, so no write ever reaches the core.
@@ -592,7 +647,7 @@ func TestHasRejectCommandTokenizing(t *testing.T) {
 func TestExactApproveCommandStillDeterministic(t *testing.T) {
 	writer := &fakeWriter{}
 	reader := &fakeIntentReader{}
-	a := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, writer, nil)
 	a.reader = reader
 
 	if err := a.handleMessage(context.Background(),
@@ -620,7 +675,7 @@ func TestExactApproveCommandStillDeterministic(t *testing.T) {
 func TestExactRejectCommandStampsRejected(t *testing.T) {
 	writer := &fakeWriter{}
 	reader := &fakeIntentReader{}
-	a := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, writer, nil)
 	a.reader = reader
 
 	if err := a.handleMessage(context.Background(),
@@ -644,7 +699,7 @@ func TestExactRejectCommandStampsRejected(t *testing.T) {
 // TestExactRejectRefusedOnApprovedRun — H1: an approval is irreversible once
 // landed, so /semdev reject on an already-approved run is a no-op (no write).
 func TestExactRejectRefusedOnApprovedRun(t *testing.T) {
-	g := &fakeGraph{runID: "run-1", phase: "executing"}
+	g := &fakeGraph{runID: testRunEntity, phase: "executing"}
 	g.facts = append(g.facts, message.Triple{Predicate: admission.DecisionPredicate, Object: admission.DecisionApprove})
 	a := newTestApprovalOnGraph(g, nil)
 	before := g.writes
@@ -671,7 +726,7 @@ func TestNonCommandAuthorizedGatedMessageStampsPending(t *testing.T) {
 
 	// Authorized author, gated run, fresh id → three pending triples on the run.
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, writer, nil)
 	msg := conversation.Message{ID: "msg-42", Author: "cglusky", Body: "yes, please ship this", At: time.Now()}
 	if err := a.handleMessage(ctx, msg, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("authorized gated non-command: %v", err)
@@ -696,7 +751,7 @@ func TestNonCommandAuthorizedGatedMessageStampsPending(t *testing.T) {
 
 	// Unauthorized author → zero writes, zero model turns.
 	uWriter := &fakeWriter{}
-	ua := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, uWriter, admission.AllowlistOnlyChecker{})
+	ua := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, uWriter, admission.AllowlistOnlyChecker{})
 	if err := ua.handleMessage(ctx, conversation.Message{ID: "m", Author: "mallory", Body: "approve it", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("unauthorized non-command: %v", err)
 	}
@@ -706,7 +761,7 @@ func TestNonCommandAuthorizedGatedMessageStampsPending(t *testing.T) {
 
 	// Non-gated run (phase != awaiting_approval) → zero writes.
 	nWriter := &fakeWriter{}
-	na := newTestApproval(&fakeResolver{runID: "run-1", phase: "executing"}, nWriter, nil)
+	na := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "executing"}, nWriter, nil)
 	if err := na.handleMessage(ctx, conversation.Message{ID: "m2", Author: "cglusky", Body: "looks good", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("non-gated non-command: %v", err)
 	}
@@ -728,7 +783,7 @@ func TestPendingDedupByAppendSetLedger(t *testing.T) {
 
 	// An id already in the ledger → no re-stamp.
 	dWriter := &fakeWriter{}
-	da := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, dWriter, nil)
+	da := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, dWriter, nil)
 	da.reader = &fakeIntentReader{facts: ledger}
 	if err := da.handleMessage(ctx, conversation.Message{ID: "old-2", Author: "cglusky", Body: "re-read", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("already-classified message: %v", err)
@@ -739,7 +794,7 @@ func TestPendingDedupByAppendSetLedger(t *testing.T) {
 
 	// A genuinely new id → stamps.
 	nWriter := &fakeWriter{}
-	na := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, nWriter, nil)
+	na := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, nWriter, nil)
 	na.reader = &fakeIntentReader{facts: ledger}
 	if err := na.handleMessage(ctx, conversation.Message{ID: "new-3", Author: "cglusky", Body: "ship it", At: time.Now()}, conversation.ThreadRef(thread)); err != nil {
 		t.Fatalf("new message: %v", err)
@@ -753,7 +808,7 @@ func TestPendingDedupByAppendSetLedger(t *testing.T) {
 // TRANSIENT (redeliver), never a silent drop of an authorized message.
 func TestNonCommandLedgerReadFaultRedelivers(t *testing.T) {
 	writer := &fakeWriter{}
-	a := newTestApproval(&fakeResolver{runID: "run-1", phase: "awaiting_approval"}, writer, nil)
+	a := newTestApproval(&fakeResolver{runID: testRunEntity, phase: "awaiting_approval"}, writer, nil)
 	a.reader = &fakeIntentReader{err: errors.New("graph read blip")}
 	if err := a.handleMessage(context.Background(),
 		conversation.Message{ID: "x", Author: "cglusky", Body: "ship it", At: time.Now()},

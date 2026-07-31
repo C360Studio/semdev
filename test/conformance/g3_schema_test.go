@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/c360studio/semdev/internal/boot"
-	"github.com/c360studio/semdev/internal/experiment"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
+
+	"github.com/c360studio/semdev/internal/boot"
+	"github.com/c360studio/semdev/internal/experiment"
 )
 
 // semdevToolRegistry builds the tool registry through boot.RegisterTools — the
@@ -25,7 +26,7 @@ func semdevToolRegistry(t *testing.T) *agentictools.ExecutorRegistry {
 	// schemas — only advertisement is condition-gated). Nil
 	// checkouts/sandboxes keep every tool's runspace seam literal-nil, so the schema scan
 	// takes the schema-only path (no live NATS client either).
-	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", experiment.Config{}, nil, nil); err != nil {
+	if err := boot.RegisterTools(context.Background(), reg, executors.ToolDependencies{}, "", experiment.Config{}, nil, nil, nil); err != nil {
 		t.Fatalf("boot.RegisterTools: %v", err)
 	}
 	return reg

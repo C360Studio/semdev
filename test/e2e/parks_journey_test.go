@@ -23,9 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c360studio/semdev/internal/mockllm"
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+
+	"github.com/c360studio/semdev/internal/mockllm"
 )
 
 // parkJourneyChangeArgs is journeyChangeArgs with the ONE mutation that recreates
@@ -65,7 +66,7 @@ func TestBridgeProofStationFailureParks(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
 	// Front of arc through approval — the change authors and VALIDATES clean
 	// (awaiting_approval is the validated-gate phase), exactly as run 1 did.
@@ -74,7 +75,7 @@ func TestBridgeProofStationFailureParks(t *testing.T) {
 	runEntityID := requireRunAnchor(ctx, t, taskID)
 	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
-	approveChange(ctx, t, runEntityID)
+	approveChange(ctx, t, rt, runEntityID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	t.Logf("park station 1: change authored WITHOUT its test in target_files, validated, approved — projection dispatch fires next")
 

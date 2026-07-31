@@ -26,15 +26,17 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/pkg/errs"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/openpr"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // ComponentName is the registered factory name and the component.<name>.>
@@ -80,7 +82,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 // SHARED run checkouts (the push reads the run's committed git objects — the
 // same instance the dev-loop tools committed into; a private instance would
 // never find the checkout).
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg stationConfig
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -97,8 +99,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "shared run checkouts required (delivery pushes the run's committed attempt branch)")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
-	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
-	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
+	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
+	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
+	// it hosts, so it resolves separately (station-harness, G5).
+	writer := clients.Writer(openpr.Source)
+	cfg.FactWriter = clients.Writer(station.DispatchFailedSource)
 
 	tokenEnv := cfg.Forge.TokenEnv
 	if tokenEnv == "" {
@@ -142,11 +147,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // Called from boot.RegisterAll with the live instance; the conformance census
 // passes nil (the factory registers but fails loud if ever constructed, which
 // the census never does — it only inspects the registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts)
+			return newProcessor(raw, deps, checkouts, clients)
 		},
 		Schema:      deliverySchema,
 		Type:        "processor",

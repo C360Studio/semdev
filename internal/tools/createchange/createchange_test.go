@@ -6,35 +6,44 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/types"
+
+	"github.com/c360studio/semdev/internal/changefacts"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // testPlatform matches the org/platform of runEntity so a loop entity id built
 // from a test LoopID shares the same 6-part prefix.
 var testPlatform = types.PlatformMeta{Org: "org", Platform: "plat"}
 
-// fakeWriter records replace calls and returns a scripted prior owned package, so
-// the replace-by-predicate path is testable without a live NATS graph.
+// fakeWriter records every ReplaceOwned mutation — including the CONTRACT it
+// resolved to, which is what proves create_change's two entity classes (the change
+// blob on the run, the authored marker on the loop) are classed correctly.
 type fakeWriter struct {
-	owned    []string // what ReadOwnedPredicates returns (the prior package)
 	replaces []replaceCall
 }
 
 type replaceCall struct {
-	add    []message.Triple
-	remove []string
+	add      []message.Triple
+	contract string
+	group    string
 }
 
-func (f *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, remove []string) error {
-	f.replaces = append(f.replaces, replaceCall{add: add, remove: remove})
-	return nil
+func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	f.replaces = append(f.replaces, replaceCall{add: m.Desired, contract: m.Contract, group: m.Group})
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (f *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) ([]string, error) {
-	return f.owned, nil
-}
+
+// writerFor wraps the fake in the owner-bound seam the tool takes, so every test
+// exercises graphown.ContractFor for real. create-change-author-tool is one of the
+// two owners with TWO contracts, so this is the site where a run/loop
+// misclassification actually surfaces.
+func writerFor(f *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, f) }
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
 
@@ -75,7 +84,7 @@ func sampleCall() agentic.ToolCall {
 func stampedDocument(t *testing.T, call agentic.ToolCall) (changefacts.ChangeDocument, []message.Triple) {
 	t.Helper()
 	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
+	res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), call)
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
@@ -97,7 +106,7 @@ func stampedDocument(t *testing.T, call agentic.ToolCall) (changefacts.ChangeDoc
 // content.
 func TestCreateChangeStampsFactsOnRunEntity(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
+	res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -164,7 +173,7 @@ func TestCreateChangeStampsAuthoredMarkerOnLoop(t *testing.T) {
 	w := &fakeWriter{}
 	call := sampleCall()
 	call.LoopID = "loop-1"
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), call)
+	res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), call)
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
@@ -191,8 +200,13 @@ func TestCreateChangeStampsAuthoredMarkerOnLoop(t *testing.T) {
 	if !strings.HasSuffix(tr.Subject, ".execution.loop-1") || tr.Subject == runEntity {
 		t.Errorf("marker subject = %q, want the authoring loop entity (…execution.loop-1)", tr.Subject)
 	}
-	if !contains(marker.remove, AuthoredPredicate) {
-		t.Errorf("marker mutation must clear the prior %q (upsert), remove=%v", AuthoredPredicate, marker.remove)
+	// Upsert is now the group wipe: the marker write resolves to this owner's LOOP
+	// contract, whose replace-owned group is exactly {openspec.change.authored}, so
+	// re-adding it replaces the prior value (migrate-beta159 D2a/D3a). Asserting the
+	// contract is strictly stronger than the old remove-list check — it also proves
+	// the marker did not go out under the run contract.
+	if marker.contract != Source+"-loop" {
+		t.Errorf("marker mutation resolved to contract %q, want %q — the loop marker must go out under the LOOP contract, or its group wipe would clear the run's change blob", marker.contract, Source+"-loop")
 	}
 }
 
@@ -200,7 +214,7 @@ func TestCreateChangeStampsAuthoredMarkerOnLoop(t *testing.T) {
 // the change facts still land — the tool does not fail an otherwise-authored change.
 func TestCreateChangeSkipsMarkerWithoutLoopID(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
+	res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
@@ -217,7 +231,7 @@ func TestCreateChangeSkipsMarkerWithoutLoopID(t *testing.T) {
 // author wrote.
 func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
+	res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -227,15 +241,23 @@ func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 	if len(w.replaces) != 1 {
 		t.Fatalf("expected one replace mutation, got %d", len(w.replaces))
 	}
-	got := w.replaces[0].remove
+	// The explicit remove list is gone. A re-author now clears the prior package
+	// because ReplaceOwned wipes this owner's RUN group — exactly
+	// {document, slug, revision} — before adding Desired. So the pin becomes: the
+	// write resolved to the run contract, and Desired re-supplies the full package
+	// (anything it omits would be DELETED, which is the D3a hazard).
+	got := w.replaces[0]
+	if got.contract != Source+"-run" || got.group != graphown.OwnedGroup {
+		t.Errorf("change facts resolved to contract %q group %q, want %q/%q", got.contract, got.group, Source+"-run", graphown.OwnedGroup)
+	}
 	want := []string{changefacts.DocumentPredicate, SlugPredicate, RevisionPredicate}
 	for _, p := range want {
-		if !contains(got, p) {
-			t.Errorf("re-author did not clear owned predicate %q — a phantom fact would linger", p)
+		if objectOf(got.add, p) == "" {
+			t.Errorf("re-author did not re-supply owned predicate %q — the group wipe would DELETE it", p)
 		}
 	}
-	if len(got) != len(want) {
-		t.Errorf("remove-list = %v, want exactly the fixed owned package %v", got, want)
+	if len(got.add) != len(want) {
+		t.Errorf("desired set = %d triples, want exactly the fixed owned package %v", len(got.add), want)
 	}
 }
 
@@ -245,7 +267,7 @@ func TestCreateChangeReAuthorReplacesPackage(t *testing.T) {
 // re-author overwrites it.
 func TestCreateChangeStampsRunSlugPointer(t *testing.T) {
 	w := &fakeWriter{}
-	res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall())
+	res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), sampleCall())
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
@@ -253,18 +275,11 @@ func TestCreateChangeStampsRunSlugPointer(t *testing.T) {
 	if got := objectOf(run.add, SlugPredicate); got != "fix-null-deref" {
 		t.Errorf("run slug pointer %s = %q, want the slug %q", SlugPredicate, got, "fix-null-deref")
 	}
-	if !contains(run.remove, SlugPredicate) {
-		t.Errorf("slug pointer %s must be in removePredicates so a re-author overwrites it", SlugPredicate)
+	// The pointer is inside this owner's run group, so the group wipe overwrites it
+	// on a re-author — provided the write goes out under the RUN contract.
+	if run.contract != Source+"-run" {
+		t.Errorf("run facts resolved to contract %q, want %q", run.contract, Source+"-run")
 	}
-}
-
-func contains(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // objectOf returns the object stamped for a predicate in a replace batch, or "".
@@ -285,7 +300,7 @@ func objectOf(triples []message.Triple, predicate string) string {
 // sha256 prefix (so the rule engine never compares it numerically).
 func TestCreateChangeStampsContentRevision(t *testing.T) {
 	w := &fakeWriter{}
-	if res, err := New(w, testPlatform, nil).Execute(context.Background(), sampleCall()); err != nil || res.Error != "" {
+	if res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), sampleCall()); err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
 	triples := w.replaces[0].add
@@ -313,7 +328,7 @@ func TestCreateChangeRevisionTracksContent(t *testing.T) {
 		if mutate != nil {
 			mutate(c)
 		}
-		if res, err := New(w, testPlatform, nil).Execute(context.Background(), c); err != nil || res.Error != "" {
+		if res, err := New(writerFor(w), testPlatform, nil).Execute(context.Background(), c); err != nil || res.Error != "" {
 			t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 		}
 		return objectOf(w.replaces[0].add, RevisionPredicate)
@@ -360,7 +375,7 @@ func TestCreateChangeRejectsUnsafeSlug(t *testing.T) {
 		call := sampleCall()
 		call.Arguments["slug"] = bad
 		w := &fakeWriter{}
-		res, _ := New(w, testPlatform, nil).Execute(context.Background(), call)
+		res, _ := New(writerFor(w), testPlatform, nil).Execute(context.Background(), call)
 		if res.Error == "" {
 			t.Errorf("slug %q was accepted; want a rejection", bad)
 		}
@@ -374,7 +389,7 @@ func TestCreateChangeRejectsUnsafeSlug(t *testing.T) {
 func TestCreateChangeFailsWithoutRunEntity(t *testing.T) {
 	call := sampleCall()
 	call.Metadata = nil
-	res, _ := New(&fakeWriter{}, testPlatform, nil).Execute(context.Background(), call)
+	res, _ := New(writerFor(&fakeWriter{}), testPlatform, nil).Execute(context.Background(), call)
 	if res.Error == "" {
 		t.Error("expected an error when agent.run_entity_id is missing")
 	}

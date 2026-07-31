@@ -6,12 +6,17 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/verifyartifact"
 	sverify "github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // fakeClones stands in for runspace.Checkouts.CloneForVerify.
@@ -19,6 +24,15 @@ type fakeClones struct {
 	root string
 	err  error
 }
+
+// Real six-position entity ids: the projection client validates the entity against
+// its contract pattern, so bare "run-1"/"review-loop-1" no longer stand in for one
+// (migrate-beta159 D2a). The loop id carries the agentic-loop grammar, the run the
+// chain grammar — a distinction the old fixtures could not express (G8).
+const (
+	runEntity        = "org.plat.agent.chain.execution.run-1"
+	reviewLoopEntity = "org.plat.agent.agentic-loop.execution.review-loop-1"
+)
 
 func (f fakeClones) CloneForVerify(_ context.Context, _ string) (string, error) {
 	return f.root, f.err
@@ -41,12 +55,9 @@ func (p fakeProver) ProveArtifact(_ context.Context, _, _ string, _ harness.Mani
 
 type okWriter struct{ replaces [][]message.Triple }
 
-func (w *okWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
-	w.replaces = append(w.replaces, add)
-	return nil
-}
-func (w *okWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
+func (w *okWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
 func verdictOf(o sverify.Outcome) sverify.Verdict { return sverify.Verdict{Outcome: o} }
@@ -56,7 +67,7 @@ func newHandler(clones fakeClones, prover fakeProver, w *okWriter) *handler {
 		clones:    clones,
 		manifests: fakeManifests{},
 		prover:    prover,
-		writer:    w,
+		writer:    graphown.NewWriter(verifyartifact.Source, w),
 		logger:    slog.Default(),
 	}
 }
@@ -66,7 +77,7 @@ func newHandler(clones fakeClones, prover fakeProver, w *okWriter) *handler {
 // it errors rather than verifying against "".
 func TestHandleRejectsMissingRunEntity(t *testing.T) {
 	h := newHandler(fakeClones{root: "/c"}, fakeProver{verdict: verdictOf(sverify.OutcomePass)}, &okWriter{})
-	err := h.Handle(context.Background(), station.Request{EntityID: "review-loop-1", Properties: map[string]string{}})
+	err := h.Handle(context.Background(), station.Request{EntityID: reviewLoopEntity, Properties: map[string]string{}})
 	if err == nil {
 		t.Error("verify handler must error when the dispatch carries no run_entity_id property")
 	}
@@ -77,7 +88,7 @@ func TestHandleRejectsMissingRunEntity(t *testing.T) {
 func TestHandlePassStampsAndSucceeds(t *testing.T) {
 	w := &okWriter{}
 	h := newHandler(fakeClones{root: "/c"}, fakeProver{verdict: verdictOf(sverify.OutcomePass)}, w)
-	if err := h.Handle(context.Background(), station.Request{EntityID: "review-loop-1", Properties: map[string]string{RunEntityProperty: "run-1"}}); err != nil {
+	if err := h.Handle(context.Background(), station.Request{EntityID: reviewLoopEntity, Properties: map[string]string{RunEntityProperty: runEntity}}); err != nil {
 		t.Fatalf("pass verdict must succeed: %v", err)
 	}
 	got := ""
@@ -98,7 +109,7 @@ func TestHandlePassStampsAndSucceeds(t *testing.T) {
 func TestHandleFailsClosedOnCloneError(t *testing.T) {
 	w := &okWriter{}
 	h := newHandler(fakeClones{err: errors.New("no checkout materialized for run")}, fakeProver{verdict: verdictOf(sverify.OutcomePass)}, w)
-	err := h.Handle(context.Background(), station.Request{EntityID: "review-loop-1", Properties: map[string]string{RunEntityProperty: "run-1"}})
+	err := h.Handle(context.Background(), station.Request{EntityID: reviewLoopEntity, Properties: map[string]string{RunEntityProperty: runEntity}})
 	if err == nil {
 		t.Error("verify handler must fail closed when the artifact cannot be cloned")
 	}
@@ -112,7 +123,7 @@ func TestHandleFailsClosedOnCloneError(t *testing.T) {
 func TestHandleRetryReturnsErrorForBaseRetry(t *testing.T) {
 	w := &okWriter{}
 	h := newHandler(fakeClones{root: "/c"}, fakeProver{verdict: verdictOf(sverify.OutcomeRetry)}, w)
-	err := h.Handle(context.Background(), station.Request{EntityID: "review-loop-1", Properties: map[string]string{RunEntityProperty: "run-1"}})
+	err := h.Handle(context.Background(), station.Request{EntityID: reviewLoopEntity, Properties: map[string]string{RunEntityProperty: runEntity}})
 	if err == nil {
 		t.Error("a retry verdict must return an error so the base retries the cold proof (transient resilience)")
 	}

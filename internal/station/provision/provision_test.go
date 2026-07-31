@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/coldproof"
 	"github.com/c360studio/semdev/internal/forge/clone"
@@ -15,7 +17,10 @@ import (
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/provisionsandbox"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -67,15 +72,12 @@ type fakeWriter struct {
 	err   error
 }
 
-func (w *fakeWriter) ReplaceTriples(context.Context, string, []message.Triple, []string) error {
+func (w *fakeWriter) ReplaceOwned(context.Context, projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
 	if w.err != nil {
-		return w.err
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
 	}
 	w.calls++
-	return nil
-}
-func (w *fakeWriter) ReadOwnedPredicates(context.Context, string, string) ([]string, error) {
-	return nil, nil
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
 func readyBaseline() coldproof.Baseline {
@@ -93,7 +95,7 @@ func newHandler(prover fakeProver, warmers fakeWarmers, w *fakeWriter) *handler 
 		Warmers:     warmers,
 		Prover:      prover,
 		Reader:      fakeReader{},
-		Writer:      w,
+		Writer:      graphown.NewWriter(provisionsandbox.Source, w),
 		DockerCheck: func(context.Context, string) error { return nil },
 		Logger:      slog.Default(),
 	}}

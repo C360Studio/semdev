@@ -8,11 +8,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/openpr"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // The handler is a thin driver over openpr.Delivery (unit-pinned in its own
@@ -25,16 +30,18 @@ type fakeWriter struct {
 	err      error
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
-	if w.err != nil {
-		return w.err
-	}
-	w.replaces = append(w.replaces, add)
-	return nil
-}
+// runEntity is a REAL six-position run entity id. The projection client validates
+// the entity against its contract pattern, so a bare "run-7" no longer stands in
+// for one (migrate-beta159 D2a) — and a fixture that could never occur in
+// production was hiding that (G8).
+const runEntity = "org.plat.agent.chain.execution.run-7"
 
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	if w.err != nil {
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
+	}
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
 type fakeReader struct {
@@ -83,14 +90,14 @@ func newTestHandler(reader *fakeReader, writer *fakeWriter) (*handler, *fakeForg
 	// pushes THAT sha and fails closed without it — openpr's own pins).
 	if reader.err == nil {
 		reader.triples = append(reader.triples, message.Triple{
-			Subject: "run-7", Predicate: "attempt.commit.sha", Object: "abc123def", Source: "patch-committer",
+			Subject: runEntity, Predicate: "attempt.commit.sha", Object: "abc123def", Source: "patch-committer",
 		})
 	}
 	forge := &fakeForge{}
 	return &handler{
 		delivery: &openpr.Delivery{
 			Reader: reader,
-			Writer: writer,
+			Writer: graphown.NewWriter(openpr.Source, writer),
 			API:    forge,
 			Roots:  fixedRoots{},
 			Runner: okRunner{},
@@ -104,7 +111,7 @@ func TestHandleDeliversAndStampsPRRefOnFiringEntity(t *testing.T) {
 	w := &fakeWriter{}
 	h, forge := newTestHandler(&fakeReader{}, w)
 	// The delivery rule fires on the RUN, so req.EntityID is the run.
-	if err := h.Handle(context.Background(), station.Request{EntityID: "run-7"}); err != nil {
+	if err := h.Handle(context.Background(), station.Request{EntityID: runEntity}); err != nil {
 		t.Fatalf("Handle returned %v, want nil", err)
 	}
 	if forge.created != 1 {
@@ -114,7 +121,7 @@ func TestHandleDeliversAndStampsPRRefOnFiringEntity(t *testing.T) {
 		t.Fatalf("expected exactly one pr.ref triple stamped, got %v", w.replaces)
 	}
 	tr := w.replaces[0][0]
-	if tr.Subject != "run-7" || tr.Predicate != openpr.RefPredicate || tr.Source != openpr.Source {
+	if tr.Subject != runEntity || tr.Predicate != openpr.RefPredicate || tr.Source != openpr.Source {
 		t.Errorf("stamped %s on %s (Source %s), want %s on run-7 (Source %s)",
 			tr.Predicate, tr.Subject, tr.Source, openpr.RefPredicate, openpr.Source)
 	}
@@ -128,7 +135,7 @@ func TestHandleFailsClosedOnDeliveryFault(t *testing.T) {
 	// A delivery fault returns an error (logged + metered by the generic
 	// Component); after the base's retries exhaust, station.dispatch.failed
 	// lands and the run parks (station-failure-parks).
-	if err := h.Handle(context.Background(), station.Request{EntityID: "run-7"}); err == nil {
+	if err := h.Handle(context.Background(), station.Request{EntityID: runEntity}); err == nil {
 		t.Error("Handle must return an error on a delivery fault (fail closed — no false delivery)")
 	}
 }
@@ -161,12 +168,12 @@ func TestHandleIsIdempotentOnRedispatch(t *testing.T) {
 	r := &fakeReader{}
 	h, forge := newTestHandler(r, w)
 
-	if err := h.Handle(context.Background(), station.Request{EntityID: "run-7"}); err != nil {
+	if err := h.Handle(context.Background(), station.Request{EntityID: runEntity}); err != nil {
 		t.Fatalf("first Handle: %v", err)
 	}
 	r.triples = append(r.triples, w.replaces[0]...)
 
-	if err := h.Handle(context.Background(), station.Request{EntityID: "run-7"}); err != nil {
+	if err := h.Handle(context.Background(), station.Request{EntityID: runEntity}); err != nil {
 		t.Fatalf("redispatch Handle: %v", err)
 	}
 	if len(w.replaces) != 1 || forge.created != 1 {

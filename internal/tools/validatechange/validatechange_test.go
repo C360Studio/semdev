@@ -7,12 +7,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/vocab"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -56,17 +61,23 @@ func (r *fakeRunner) Run(_ context.Context, dir, name string, args ...string) (c
 type fakeWriter struct{ replaces []replaceCall }
 
 type replaceCall struct {
-	add    []message.Triple
-	remove []string
+	add      []message.Triple
+	contract string
+	group    string
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, remove []string) error {
-	w.replaces = append(w.replaces, replaceCall{add: add, remove: remove})
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	// The explicit remove list is gone: ReplaceOwned clears the owner's whole
+	// replace-owned group and re-adds Desired, so a clear is Desired == nil
+	// (migrate-beta159 D3a).
+	w.replaces = append(w.replaces, replaceCall{add: m.Desired, contract: m.Contract, group: m.Group})
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _ string, _ string) ([]string, error) {
-	return nil, nil
-}
+
+// writerFor wraps the fake in the owner-bound seam the production code takes, so
+// every test exercises graphown.ContractFor for real — the behavioral proof that
+// this owner's predicates are classed onto the entity class it actually writes.
+func writerFor(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, w) }
 
 // stamped returns the triples create_change would have written for a change
 // (beta.147 D3): the whole change serialized into the ONE document blob
@@ -109,7 +120,7 @@ func TestValidatePassStampsMarker(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	runner := &fakeRunner{res: cliexec.Result{ExitCode: 0, Stdout: `{"valid":true}`}}
 	w := &fakeWriter{}
-	res, err := Validate(context.Background(), r, runner, w, runEntity, "fix-null-deref")
+	res, err := Validate(context.Background(), r, runner, writerFor(w), runEntity, "fix-null-deref")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -155,15 +166,23 @@ func TestValidateFailClearsMarkerAndReturnsIssues(t *testing.T) {
 	issues := `{"valid":false,"issues":["missing scenario"]}`
 	runner := &fakeRunner{res: cliexec.Result{ExitCode: 1, Stdout: issues}}
 	w := &fakeWriter{}
-	res, err := Validate(context.Background(), r, runner, w, runEntity, "fix-null-deref")
+	res, err := Validate(context.Background(), r, runner, writerFor(w), runEntity, "fix-null-deref")
 	if err != nil {
 		t.Fatalf("a failed validation is a verdict, not an error: %v", err)
 	}
 	if res.Validated {
 		t.Fatalf("want Validated false on a CLI failure, got %+v", res)
 	}
-	if len(w.replaces) != 1 || len(w.replaces[0].add) != 0 || len(w.replaces[0].remove) != 1 || w.replaces[0].remove[0] != ValidatedPredicate {
-		t.Fatalf("fail must clear (remove) the marker, not stamp it: %+v", w.replaces)
+	// Clearing the marker is now an EMPTY Desired: ReplaceOwned removes the owner's
+	// whole replace-owned group — which for openspec-validate-harness is exactly
+	// {openspec.change.validated} — and re-adds nothing (migrate-beta159 D3a). The
+	// CONTRACT assertion is what makes "exactly that group" checkable: an empty
+	// Desired under any other contract would clear a different owner's package.
+	if len(w.replaces) != 1 || len(w.replaces[0].add) != 0 {
+		t.Fatalf("fail must clear the marker (one write, empty Desired), not stamp it: %+v", w.replaces)
+	}
+	if got := w.replaces[0]; got.contract != Source || got.group != graphown.OwnedGroup {
+		t.Errorf("the clear targeted contract %q group %q, want %q/%q — an empty Desired under another owner's contract wipes THAT owner's package", got.contract, got.group, Source, graphown.OwnedGroup)
 	}
 	if !strings.Contains(res.Issues, "missing scenario") {
 		t.Errorf("failure result should carry the validator's issues, got: %s", res.Issues)
@@ -177,7 +196,7 @@ func TestValidateRunnerErrorRecordsNothing(t *testing.T) {
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	runner := &fakeRunner{err: exec.ErrNotFound}
 	w := &fakeWriter{}
-	_, err := Validate(context.Background(), r, runner, w, runEntity, "fix-null-deref")
+	_, err := Validate(context.Background(), r, runner, writerFor(w), runEntity, "fix-null-deref")
 	if err == nil {
 		t.Fatal("expected a transport error when the CLI cannot be run")
 	}
@@ -205,7 +224,7 @@ func TestValidateFailsWithoutRevision(t *testing.T) {
 	}
 	r := &fakeReader{triples: content}
 	runner := &fakeRunner{}
-	_, err := Validate(context.Background(), r, runner, &fakeWriter{}, runEntity, "fix-null-deref")
+	_, err := Validate(context.Background(), r, runner, writerFor(&fakeWriter{}), runEntity, "fix-null-deref")
 	if err == nil || !strings.Contains(err.Error(), "revision") {
 		t.Fatalf("a change with no content revision must be refused, got %v", err)
 	}
@@ -223,7 +242,7 @@ func TestValidateFailsWithoutRevision(t *testing.T) {
 func TestValidateFailsOnEmptyChange(t *testing.T) {
 	r := &fakeReader{} // nothing authored — no openspec.change.document fact at all
 	runner := &fakeRunner{}
-	_, err := Validate(context.Background(), r, runner, &fakeWriter{}, runEntity, "never-authored")
+	_, err := Validate(context.Background(), r, runner, writerFor(&fakeWriter{}), runEntity, "never-authored")
 	if err == nil {
 		t.Error("expected an error validating a run with no authored change")
 	}
@@ -234,7 +253,7 @@ func TestValidateFailsOnEmptyChange(t *testing.T) {
 
 func TestValidateRejectsUnsafeSlug(t *testing.T) {
 	runner := &fakeRunner{}
-	_, err := Validate(context.Background(), &fakeReader{}, runner, &fakeWriter{}, runEntity, "../../etc")
+	_, err := Validate(context.Background(), &fakeReader{}, runner, writerFor(&fakeWriter{}), runEntity, "../../etc")
 	if err == nil {
 		t.Error("expected a rejection for a traversal slug")
 	}
@@ -251,7 +270,7 @@ func TestValidateEndToEndWithRealCLI(t *testing.T) {
 	}
 	r := &fakeReader{triples: stamped(runEntity, sampleChange())}
 	w := &fakeWriter{}
-	res, err := Validate(context.Background(), r, cliexec.OSRunner{}, w, runEntity, "fix-null-deref")
+	res, err := Validate(context.Background(), r, cliexec.OSRunner{}, writerFor(w), runEntity, "fix-null-deref")
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}

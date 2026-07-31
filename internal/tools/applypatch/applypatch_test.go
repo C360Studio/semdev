@@ -8,6 +8,9 @@ import (
 
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -26,25 +29,29 @@ func (f *fakePatcher) Apply(_ context.Context, runEntityID, diff string) ([]stri
 	return f.touched, f.sha, f.err
 }
 
-// fakeWriter captures the last ReplaceTriples call so a test can assert the stamped
-// attempt.commit. err makes ReplaceTriples fail (the retryable-transport posture).
+// fakeWriter captures the last ReplaceOwned mutation so a test can assert the
+// stamped attempt.commit AND the contract/group the write resolved to. err makes
+// the mutation fail (the retryable-transport posture).
 type fakeWriter struct {
-	err        error
-	gotEntity  string
-	gotTriples []message.Triple
-	gotReplace []string
+	err         error
+	gotEntity   string
+	gotTriples  []message.Triple
+	gotContract string
+	gotGroup    string
 }
 
-func (f *fakeWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, removePredicates []string) error {
-	f.gotEntity = entityID
-	f.gotTriples = add
-	f.gotReplace = removePredicates
-	return f.err
+func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	f.gotEntity = m.EntityID
+	f.gotTriples = m.Desired
+	f.gotContract = m.Contract
+	f.gotGroup = m.Group
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, f.err
 }
 
-func (f *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
-}
+// writerFor wraps the fake in the owner-bound seam the tool takes, so every test
+// exercises graphown.ContractFor for real — the behavioral proof that
+// attempt.commit.sha is classed onto the entity class this tool actually writes.
+func writerFor(f *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, f) }
 
 func call(diff string) agentic.ToolCall {
 	return agentic.ToolCall{
@@ -61,7 +68,7 @@ func call(diff string) agentic.ToolCall {
 func TestApplyPassesDiffAndReportsFiles(t *testing.T) {
 	p := &fakePatcher{touched: []string{"pkg/health/health.go"}, sha: "abc1234def"}
 	w := &fakeWriter{}
-	res, err := New(p, w, nil).Execute(context.Background(), call("--- a/x\n+++ b/x\n"))
+	res, err := New(p, writerFor(w), nil).Execute(context.Background(), call("--- a/x\n+++ b/x\n"))
 	if err != nil || res.Error != "" {
 		t.Fatalf("execute: err=%v toolErr=%s", err, res.Error)
 	}
@@ -87,8 +94,11 @@ func TestApplyPassesDiffAndReportsFiles(t *testing.T) {
 	if w.gotTriples[0].Source != Source {
 		t.Errorf("attempt.commit Source = %q, want the single writer %q (G5)", w.gotTriples[0].Source, Source)
 	}
-	if len(w.gotReplace) != 1 || w.gotReplace[0] != CommitPredicate {
-		t.Errorf("replace-predicates = %v, want [%s] (latest-wins)", w.gotReplace, CommitPredicate)
+	// Latest-wins is now expressed as the owner's replace-owned GROUP: ReplaceOwned
+	// clears the whole group and re-adds Desired, so a re-apply replaces the prior
+	// SHA rather than appending a second one.
+	if w.gotContract != Source || w.gotGroup != graphown.OwnedGroup {
+		t.Errorf("mutation resolved to contract %q group %q, want %q/%q — the write must go through this owner's own contract", w.gotContract, w.gotGroup, Source, graphown.OwnedGroup)
 	}
 }
 
@@ -97,7 +107,7 @@ func TestApplyPassesDiffAndReportsFiles(t *testing.T) {
 func TestApplyStampFailureIsRetryableNotStopLoop(t *testing.T) {
 	p := &fakePatcher{touched: []string{"x"}, sha: "deadbeef"}
 	w := &fakeWriter{err: errors.New("kv unavailable")}
-	res, err := New(p, w, nil).Execute(context.Background(), call("--- a/x\n+++ b/x\n"))
+	res, err := New(p, writerFor(w), nil).Execute(context.Background(), call("--- a/x\n+++ b/x\n"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -113,7 +123,7 @@ func TestApplyStampFailureIsRetryableNotStopLoop(t *testing.T) {
 // developer re-authors from — never a silent success.
 func TestApplyRejectionIsAToolError(t *testing.T) {
 	p := &fakePatcher{err: errors.New("target \"../etc/x\" escapes the checkout")}
-	res, err := New(p, &fakeWriter{}, nil).Execute(context.Background(), call("--- a/../etc/x\n+++ b/../etc/x\n"))
+	res, err := New(p, writerFor(&fakeWriter{}), nil).Execute(context.Background(), call("--- a/../etc/x\n+++ b/../etc/x\n"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -135,7 +145,7 @@ func TestApplyFailsLoudlyWithoutPatcher(t *testing.T) {
 
 // A call with no run-entity id fails loudly — the tool cannot target a checkout.
 func TestApplyMissingRunEntityFailsLoudly(t *testing.T) {
-	res, err := New(&fakePatcher{}, &fakeWriter{}, nil).Execute(context.Background(), agentic.ToolCall{ID: "c1", Name: ToolName, Arguments: map[string]any{"diff": "x"}})
+	res, err := New(&fakePatcher{}, writerFor(&fakeWriter{}), nil).Execute(context.Background(), agentic.ToolCall{ID: "c1", Name: ToolName, Arguments: map[string]any{"diff": "x"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

@@ -5,10 +5,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semdev/internal/conversationintent"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -37,16 +42,24 @@ func (r *fakeReader) ReadFacts(_ context.Context, _, prefix string) ([]message.T
 
 type fakeWriter struct {
 	entityIDs []string
+	contracts []string
 	replaces  [][]message.Triple
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, _ []string) error {
-	w.entityIDs = append(w.entityIDs, entityID)
-	w.replaces = append(w.replaces, add)
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.entityIDs = append(w.entityIDs, m.EntityID)
+	w.contracts = append(w.contracts, m.Contract)
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
+
+// writerFor wraps the fake in the owner-bound seam the tool takes, so every test
+// exercises graphown.ContractFor for real. conversation-classifier is one of the two
+// owners with TWO contracts (intent facts on the RUN, the recorded marker on the
+// LOOP), so this is where a run/loop misclassification actually surfaces — the
+// loop-entity assertion below is what makes it bite.
+func writerFor(w *fakeWriter) *graphown.Writer {
+	return graphown.NewWriter(conversationintent.ClassifierSource, w)
 }
 
 // pendingFact builds one conversation.pending.<field> triple on the run.
@@ -162,7 +175,7 @@ func TestClassifyIntentStampsOnRunFromPending(t *testing.T) {
 		classifiedFact("issuecomment-7"),  // a prior classification the append-set must preserve
 	}
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call("approve", "the author said to ship it"))
+	res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), call("approve", "the author said to ship it"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -235,7 +248,7 @@ func TestClassifyIntentIgnoresModelSuppliedIdentity(t *testing.T) {
 	c.Arguments["message-id"] = "forged-99"
 	c.Arguments["approved"] = true
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), c)
+	res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), c)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -269,7 +282,7 @@ func TestClassifyIntentDedupIsIdempotentOnRedelivery(t *testing.T) {
 		classifiedFact("issuecomment-42"), // already classified — the redelivery case
 	}
 	w := &fakeWriter{}
-	res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call("approve", "ship it"))
+	res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), call("approve", "ship it"))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -305,7 +318,7 @@ func TestClassifyIntentFaultsWhenPendingSlotMoved(t *testing.T) {
 	}
 	for name, facts := range cases {
 		w := &fakeWriter{}
-		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call("approve", "ship it"))
+		res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), call("approve", "ship it"))
 		if err != nil {
 			t.Fatalf("%s: execute: %v", name, err)
 		}
@@ -331,7 +344,7 @@ func TestClassifyIntentRejectsOffTaxonomy(t *testing.T) {
 	}
 	for _, bad := range []string{"ship_it", "approved", "yes", ""} {
 		w := &fakeWriter{}
-		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), call(bad, "looks good"))
+		res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), call(bad, "looks good"))
 		if err != nil {
 			t.Fatalf("execute(%q): %v", bad, err)
 		}
@@ -389,7 +402,7 @@ func TestClassifyIntentMirrorsRecordedOnItsLoop(t *testing.T) {
 			dispatchedFact("issuecomment-42"),
 		}
 		w := &fakeWriter{}
-		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), loopCall("approve", "ship it"))
+		res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), loopCall("approve", "ship it"))
 		if err != nil || res.Error != "" {
 			t.Fatalf("Execute: err=%v result.Error=%q", err, res.Error)
 		}
@@ -445,7 +458,7 @@ func TestClassifyIntentMirrorsRecordedOnItsLoop(t *testing.T) {
 			dispatchedFact("issuecomment-42"), // this loop was dispatched for 42
 		}
 		w := &fakeWriter{}
-		res, err := New(&fakeReader{facts: facts}, w, testPlatform, nil).Execute(context.Background(), loopCall("approve", "ship it"))
+		res, err := New(&fakeReader{facts: facts}, writerFor(w), testPlatform, nil).Execute(context.Background(), loopCall("approve", "ship it"))
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
 		}

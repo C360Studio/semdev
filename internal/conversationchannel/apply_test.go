@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c360studio/semstreams/graph"
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/intake/admission"
-	"github.com/c360studio/semstreams/graph"
-	"github.com/c360studio/semstreams/message"
 )
 
 // --- fixtures (the fakeFetcher / fakeChannel / fakeWriter fakes are shared with
@@ -49,7 +50,7 @@ func newTestApply(fetcher admission.EntityFetcher, ch conversation.Channel, chec
 	// reader means "undecided", which is what these fixtures intend — the
 	// already-decided cases seed the decision on the FETCHER's run snapshot, which
 	// the consumer's own gate-still-open guard reads first.
-	adapter := &approvalAdapter{cfg: cfg, writer: writer, reader: &fakeIntentReader{}, logger: slog.Default()}
+	adapter := &approvalAdapter{cfg: cfg, writer: gateWriterFor2(writer), pendingWriter: pendingWriterFor2(writer), reader: &fakeIntentReader{}, logger: slog.Default()}
 	return &applyConsumer{
 		cfg:     cfg,
 		channel: ch,

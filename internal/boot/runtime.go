@@ -37,12 +37,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c360studio/semdev/internal/cliexec"
-	"github.com/c360studio/semdev/internal/experiment"
-	"github.com/c360studio/semdev/internal/forge/clone"
-	"github.com/c360studio/semdev/internal/runspace"
-	"github.com/c360studio/semdev/internal/station/provision"
-	"github.com/c360studio/semdev/internal/vocab"
+	"github.com/c360studio/semdev/internal/graphown"
+
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/config"
 	"github.com/c360studio/semstreams/metric"
@@ -55,6 +51,13 @@ import (
 	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
 	"github.com/c360studio/semstreams/service"
 	"github.com/c360studio/semstreams/types"
+
+	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/experiment"
+	"github.com/c360studio/semdev/internal/forge/clone"
+	"github.com/c360studio/semdev/internal/runspace"
+	"github.com/c360studio/semdev/internal/station/provision"
+	"github.com/c360studio/semdev/internal/vocab"
 )
 
 // defaultNATSURL is the fallback NATS URL when nothing else configures one —
@@ -207,8 +210,19 @@ type Runtime struct {
 	// containers so a shutdown leaks no docker resource. nil is a valid zero (no
 	// live tools wired), so Stop nil-guards it.
 	sandboxes *runspace.Sandboxes
-	logger    *slog.Logger
+	// graphOwners is the process's ONE set of bound projection owners. Exposed via
+	// GraphOwners so an in-process caller (the e2e stand-ins) reuses it instead of
+	// binding again: a second registration mints a new incarnation and invalidates
+	// THIS runtime's tokens for every owner it re-binds (ADR-056; see
+	// graphown.BindOwners).
+	graphOwners *graphown.Clients
+	logger      *slog.Logger
 }
+
+// GraphOwners returns the bound projection owners this runtime registered. Callers
+// that need to stamp an owned fact in-process MUST draw their writer from here
+// rather than binding their own — binding again supersedes the runtime's lease.
+func (r *Runtime) GraphOwners() *graphown.Clients { return r.graphOwners }
 
 // resolveNATSURLs implements the documented precedence: an explicit
 // RunOptions override beats the environment variable, which beats the config
@@ -518,6 +532,9 @@ type runtimeRegistries struct {
 	// docker container per run). Created only on the live path (a real NATS client);
 	// nil for the schema-scanning censuses.
 	sandboxes *runspace.Sandboxes
+	// graphOwners is the process's ONE set of bound projection owners (ADR-056),
+	// threaded to every component and tool that stamps an owned fact.
+	graphOwners *graphown.Clients
 }
 
 // buildRuntimeRegistries wires every registry a component or tool can be
@@ -554,8 +571,31 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	if err != nil {
 		return nil, err
 	}
+	// ADR-056 ownership setup, BEFORE any component or tool that writes facts is
+	// registered: ensure the buckets, start the one process-lifetime heartbeater on
+	// ctx, and bind every derived owner to its complete contract set. A bind failure
+	// is fatal — an unbound owner's writes would be un-tokened, and the owner-lease
+	// meter cannot see that (design D5), so the failure must surface HERE or not at all.
+	graphClients, err := graphown.BindAll(ctx, natsClient, logger)
+	if err != nil {
+		return nil, fmt.Errorf("bind projection owners: %w", err)
+	}
+
 	componentReg := component.NewRegistry()
-	if err := RegisterAll(componentReg, checkouts, sandboxes, spec); err != nil {
+	// Boot census (D5 task 6.1a): every owner the vocab table declares must have a
+	// live client BEFORE anything that writes is registered. Without this, an owner
+	// that failed to bind — or a typo'd Source at a call site — surfaces only as a
+	// nil writer at its FIRST WRITE, deep inside a station handler where several
+	// paths can do nothing but log. Fail at boot instead.
+	declaredOwners, err := graphown.Owners()
+	if err != nil {
+		return nil, err
+	}
+	if err := graphClients.RequireBound(declaredOwners...); err != nil {
+		return nil, err
+	}
+
+	if err := RegisterAll(componentReg, checkouts, sandboxes, spec, graphClients); err != nil {
 		return nil, fmt.Errorf("register components: %w", err)
 	}
 
@@ -570,7 +610,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		Platform:   platform,
 		Logger:     logger,
 	}
-	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, expCfg, checkouts, sandboxes); err != nil {
+	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, expCfg, checkouts, sandboxes, graphClients); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 
@@ -585,6 +625,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		toolReg:      toolReg,
 		lifecycleMgr: lifecycleMgr,
 		sandboxes:    sandboxes,
+		graphOwners:  graphClients,
 	}, nil
 }
 
@@ -750,6 +791,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 		svcMgr:       svcMgr,
 		toolRegistry: regs.toolReg,
 		sandboxes:    regs.sandboxes,
+		graphOwners:  regs.graphOwners,
 		logger:       logger,
 	}, nil
 }

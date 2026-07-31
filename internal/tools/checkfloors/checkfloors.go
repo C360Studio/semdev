@@ -25,13 +25,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/floors"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/measurement"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
-	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 )
 
 // Source is stamped on every floor.finding triple. It MUST equal the writer declared for
@@ -150,13 +151,13 @@ type FloorResult struct {
 // chaining signal the route rules trigger on) follows, so a mirror-write failure surfaces
 // only AFTER the findings are durable. Fails closed: a resolve/check fault CLEARS this
 // task's findings (so no stale pass is readable) before returning the error.
-func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger, runEntityID, routeLoopEntityID string, taskIndex int) (FloorResult, error) {
+func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader, findingsWriter, mirrorWriter *graphown.Writer, logger *slog.Logger, runEntityID, routeLoopEntityID string, taskIndex int) (FloorResult, error) {
 	attempt, err := attempts.Resolve(ctx, runEntityID, taskIndex)
 	if err != nil {
 		// A resolve/check failure must NOT leave a prior attempt's PASS readable as if it
 		// were the current attempt's — a direct route to a stale false-green once the route
 		// reads these facts. Clear this task's findings, then surface the fault (retryable).
-		if cerr := clearFindings(ctx, writer, runEntityID, taskIndex); cerr != nil {
+		if cerr := clearFindings(ctx, findingsWriter, runEntityID, taskIndex); cerr != nil {
 			logger.Warn("check_floors: could not clear stale findings after a resolve fault",
 				slog.Int("task_index", taskIndex), slog.Any("clear_error", cerr))
 		}
@@ -167,7 +168,7 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 	rejected := floors.AnyRejected(findings)
 	attemptID := floors.AttemptID(attempt)
 	out := findingTriples(runEntityID, taskIndex, attemptID, rejected, findings, time.Now().UTC())
-	if err := writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
+	if err := findingsWriter.Replace(ctx, runEntityID, out); err != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: stamp floor.finding for task %d on %s: %w", taskIndex, runEntityID, err)
 	}
 
@@ -187,6 +188,18 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 	attemptObjs, err := readAttemptObjects(ctx, reader, runEntityID, taskIndex)
 	if err != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: read task.attempt for the route mirror on %s: %w", runEntityID, err)
+	}
+	// D7 / migrate-beta159 task 4.6: an EMPTY attempt set is a projection-contract
+	// violation, never a normal input — the dispatching rule appends one
+	// task.attempt.instance AT SPAWN, so a loop that is running has at least one.
+	// Under the OLD writer an empty read was harmless: route.attempt.instance was not
+	// in the remove list, so the prior mirror survived. Under ReplaceOwned the group
+	// wipe DELETES it, and a zeroed count reads as budget-unexhausted — the run then
+	// retries past its budget on paid tokens, with a CommitVerified receipt on the
+	// deletion. So withhold the whole mirror and fault loudly, exactly as the budget
+	// read below does.
+	if len(attemptObjs) == 0 {
+		return FloorResult{}, fmt.Errorf("check_floors: task.attempt.instance is EMPTY on %s — the dispatch rule appends one at spawn, so this is a projection-contract violation; mirroring now would group-wipe the prior attempt count and read as budget-unexhausted", runEntityID)
 	}
 	// D7: the per-task budget is authored + clamped [1,5] on every task, so an absent or
 	// unparseable value on the run is a projection-contract violation, never a normal input.
@@ -215,14 +228,15 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 		return FloorResult{}, fmt.Errorf("check_floors: read the loop terminal reason for the route mirror on %s: %w", routeLoopEntityID, err)
 	}
 	mirror := routeMirrorTriples(routeLoopEntityID, taskIndex, passed, rejected, budget, transientReasons[reason], attemptObjs, transientObjs, time.Now().UTC())
-	// ReplaceTriples → MergeTriples FULL-SET-REPLACES per predicate: route.passed/rejected,
+	// ReplaceOwned wipes route-mirror's whole loop group and re-adds Desired, so:
+	// route.passed/rejected,
 	// route.task.budget, and route.attempt.transient (single-valued) are replaced, and
 	// route.attempt.<i> is set to the COMPLETE current attempt set (all N objects) — writing
 	// only the newest would DROP the prior ones. The budget AND the transient flag ride the
 	// SAME pass as route.attempt.* (D7 atomicity — the routes never see the count without
 	// the budget, and never see unclean's inputs without the transient classification).
 	// Idempotent on a retry (the same complete set replaces itself).
-	if merr := writer.ReplaceTriples(ctx, routeLoopEntityID, mirror, []string{RoutePassedPredicate, RouteRejectedPredicate, RouteBudgetPredicate, RouteTransientFlagPredicate}); merr != nil {
+	if merr := mirrorWriter.Replace(ctx, routeLoopEntityID, mirror); merr != nil {
 		return FloorResult{}, fmt.Errorf("check_floors: stamp the route mirror on %s: %w", routeLoopEntityID, merr)
 	}
 	return FloorResult{Rejected: rejected, Findings: findings, AttemptID: attemptID}, nil
@@ -442,7 +456,7 @@ func readTaskBudget(ctx context.Context, reader changefacts.Reader, runEntityID 
 // clearFindings removes the entire floor.finding.* package (the "clear my prefix"
 // pattern), so a stale earlier attempt's pass is not left readable when the current
 // attempt cannot be evaluated. A no-op when nothing is stamped yet.
-func clearFindings(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string, idx int) error {
+func clearFindings(ctx context.Context, writer *graphown.Writer, runEntityID string, idx int) error {
 	_ = idx
 	preds, err := writer.ReadOwnedPredicates(ctx, runEntityID, floors.FindingPrefix)
 	if err != nil {
@@ -451,5 +465,9 @@ func clearFindings(ctx context.Context, writer agentictools.OwnedFactWriter, run
 	if len(preds) == 0 {
 		return nil
 	}
-	return writer.ReplaceTriples(ctx, runEntityID, nil, preds)
+	// Desired nil clears floor-tools' whole replace-owned group on the run — which
+	// is exactly the floor.finding.* package preds enumerates (design D3a). The
+	// read-back is retained as the no-op gate: it keeps a clear that has nothing to
+	// clear off the mutation lane entirely.
+	return writer.Replace(ctx, runEntityID, nil)
 }

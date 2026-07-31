@@ -8,25 +8,44 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semdev/internal/forge/semsource"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 type fakeWriter struct {
-	entities []string
-	triples  [][]message.Triple
-	removes  [][]string
-	err      error
+	entities  []string
+	triples   [][]message.Triple
+	err       error
+	contracts []string
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, entityID string, triples []message.Triple, removes []string) error {
+// A real six-position run entity id — see the launch suite for why a bare "run"
+// no longer stands in for one (migrate-beta159 D2a, G8).
+const (
+	runEntity  = "c360.semdev.agent.chain.execution.run-1"
+	runEntity2 = "c360.semdev.agent.chain.execution.run-2"
+)
+
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
 	if w.err != nil {
-		return w.err
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
 	}
-	w.entities = append(w.entities, entityID)
-	w.triples = append(w.triples, triples)
-	w.removes = append(w.removes, removes)
-	return nil
+	w.entities = append(w.entities, m.EntityID)
+	w.triples = append(w.triples, m.Desired)
+	w.contracts = append(w.contracts, m.Contract)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
+}
+
+// writerFor wraps the fake in the owner-bound seam StampCondition takes, so the
+// suite exercises graphown.ContractFor for real — the behavioral proof that
+// experiment.run.condition is classed onto the entity class this writer stamps.
+func writerFor(w *fakeWriter) *graphown.Writer {
+	return graphown.NewWriter(Source, w)
 }
 
 type fakeStatus struct {
@@ -145,7 +164,7 @@ func TestLaunchStampsDeclaredCondition(t *testing.T) {
 	publishOK := func(context.Context) error { return nil }
 	bindRun := func(context.Context) (string, error) { return "org.plat.agent.chain.execution.run-1", nil }
 
-	runID, err := Launch(context.Background(), Config{Condition: ConditionBaseline}, nil, publishOK, bindRun, w)
+	runID, err := Launch(context.Background(), Config{Condition: ConditionBaseline}, nil, publishOK, bindRun, writerFor(w))
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -156,12 +175,16 @@ func TestLaunchStampsDeclaredCondition(t *testing.T) {
 	if tr.Subject != runID || tr.Predicate != ConditionPredicate || tr.Object != ConditionBaseline || tr.Source != Source {
 		t.Fatalf("stamp = %+v, want %s=%q on %s from writer %s", tr, ConditionPredicate, ConditionBaseline, runID, Source)
 	}
-	if len(w.removes[0]) != 1 || w.removes[0][0] != ConditionPredicate {
-		t.Fatalf("the condition must be a single-valued upsert (predicate in the replace set), got %v", w.removes[0])
+	// Single-valued upsert is now expressed by the owner's replace-owned GROUP:
+	// experiment-intake owns exactly {experiment.run.condition}, so ReplaceOwned
+	// clears that predicate and re-adds the one desired triple (migrate-beta159 D3a).
+	// The pin is therefore that the write carries exactly ONE condition triple.
+	if len(w.triples[0]) != 1 || w.triples[0][0].Predicate != ConditionPredicate {
+		t.Fatalf("the condition must be a single-valued upsert (one triple, the condition predicate), got %v", w.triples[0])
 	}
 
 	w = &fakeWriter{}
-	if _, err := Launch(context.Background(), Config{}, nil, publishOK, bindRun, w); err != nil {
+	if _, err := Launch(context.Background(), Config{}, nil, publishOK, bindRun, writerFor(w)); err != nil {
 		t.Fatalf("unconfigured Launch: %v", err)
 	}
 	if len(w.triples) != 0 {
@@ -181,8 +204,8 @@ func TestLaunchSemsourceProbeFailsClosed(t *testing.T) {
 	_, err := Launch(context.Background(), cfg,
 		func(context.Context) error { return errors.New("index not ready") },
 		func(context.Context) error { published = true; return nil },
-		func(context.Context) (string, error) { bound = true; return "run", nil },
-		w)
+		func(context.Context) (string, error) { bound = true; return runEntity, nil },
+		writerFor(w))
 	if err == nil || !strings.Contains(err.Error(), "no run minted") {
 		t.Fatalf("a failed probe must abort the launch loudly, got %v", err)
 	}
@@ -193,7 +216,7 @@ func TestLaunchSemsourceProbeFailsClosed(t *testing.T) {
 	// A nil probe under the semsource condition is a wiring fault, not a pass.
 	_, err = Launch(context.Background(), cfg, nil,
 		func(context.Context) error { published = true; return nil },
-		func(context.Context) (string, error) { return "run", nil }, w)
+		func(context.Context) (string, error) { return runEntity, nil }, writerFor(w))
 	if err == nil || !strings.Contains(err.Error(), "wiring fault") {
 		t.Fatalf("a nil probe under the semsource condition must fail, got %v", err)
 	}
@@ -206,8 +229,8 @@ func TestLaunchSemsourceProbeFailsClosed(t *testing.T) {
 	runID, err := Launch(context.Background(), cfg,
 		func(context.Context) error { return nil },
 		func(context.Context) error { return nil },
-		func(context.Context) (string, error) { return "run-2", nil }, w)
-	if err != nil || runID != "run-2" {
+		func(context.Context) (string, error) { return runEntity2, nil }, writerFor(w))
+	if err != nil || runID != runEntity2 {
 		t.Fatalf("Launch after a passing probe: %v (run %q)", err, runID)
 	}
 	if len(w.triples) != 1 || w.triples[0][0].Object != ConditionSemsource {

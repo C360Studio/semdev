@@ -45,12 +45,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // Source is the value stamped on the openspec.validated triple. It MUST equal the
@@ -92,7 +93,7 @@ type Result struct {
 // unrunnable case wraps ErrOracleUnrunnable); a CLI REJECTION is Result{Validated:
 // false, Issues:...} with a nil error. The validation station (R6) is the sole
 // caller, so openspec.validated keeps one writer (G5).
-func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Runner, writer agentictools.OwnedFactWriter, runEntityID, slug string) (Result, error) {
+func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Runner, writer *graphown.Writer, runEntityID, slug string) (Result, error) {
 	if slug == "" {
 		return Result{}, fmt.Errorf("validate_change: slug is required")
 	}
@@ -163,7 +164,7 @@ func Validate(ctx context.Context, reader changefacts.Reader, runner cliexec.Run
 // (replace-by-predicate, so a re-validation replaces rather than appends a second
 // marker). The value is the revision — not the slug — so it binds to the exact
 // content the validator blessed (D15 #0).
-func stampValidated(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID, rev string) error {
+func stampValidated(ctx context.Context, writer *graphown.Writer, runEntityID, rev string) error {
 	triple := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  ValidatedPredicate,
@@ -172,7 +173,7 @@ func stampValidated(ctx context.Context, writer agentictools.OwnedFactWriter, ru
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	return writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil)
+	return writer.Replace(ctx, runEntityID, []message.Triple{triple})
 }
 
 // readRevision returns the object of the exact revision predicate on the run
@@ -194,8 +195,10 @@ func readRevision(ctx context.Context, reader changefacts.Reader, runEntityID, p
 
 // clearValidated removes the openspec.validated marker this harness owns, so a
 // now-failing change does not retain a stale pass.
-func clearValidated(ctx context.Context, writer agentictools.OwnedFactWriter, runEntityID string) error {
-	return writer.ReplaceTriples(ctx, runEntityID, nil, []string{ValidatedPredicate})
+func clearValidated(ctx context.Context, writer *graphown.Writer, runEntityID string) error {
+	// Desired nil clears the owner's whole replace-owned group — which for
+	// openspec-validate-harness is exactly ValidatedPredicate (design D3a).
+	return writer.Replace(ctx, runEntityID, nil)
 }
 
 // validatorOutput returns the CLI's JSON stdout verbatim (its issue list) when

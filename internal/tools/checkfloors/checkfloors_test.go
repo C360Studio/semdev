@@ -7,13 +7,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/floors"
 	"github.com/c360studio/semdev/internal/measurement"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/graph"
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
-const loopEntity = "org.plat.agent.chain.execution.floors-loop-1"
+
+// loopEntity is the floors LOOP the route mirror lands on. It must carry the
+// agentic-loop grammar (agent.agentic-loop.execution.*), not the chain grammar the
+// RUN uses: route-mirror's projection contract claims only the loop class, so a
+// chain-shaped "loop" here is rejected at the write (migrate-beta159 D2a). The old
+// fixture used the chain grammar and no assertion could see it.
+const loopEntity = "org.plat.agent.agentic-loop.execution.floors-loop-1"
 
 type fakeAttempts struct {
 	attempt floors.Attempt
@@ -100,20 +112,51 @@ func terminalReasonFact(reason string) message.Triple {
 }
 
 type fakeWriter struct {
-	owned    []string // predicates ReadOwnedPredicates returns (the stale set)
-	entities []string // the entity each ReplaceTriples call targeted (index-aligned with replaces)
-	replaces [][]message.Triple
-	removes  [][]string
+	owned     []string // the stale predicates ReadAuthoritative reports on the run
+	entities  []string // the entity each ReplaceOwned targeted (index-aligned with replaces)
+	contracts []string // the contract each ReplaceOwned resolved to (findings vs mirror)
+	replaces  [][]message.Triple
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, entityID string, add []message.Triple, rm []string) error {
-	w.entities = append(w.entities, entityID)
-	w.replaces = append(w.replaces, add)
-	w.removes = append(w.removes, rm)
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.entities = append(w.entities, m.EntityID)
+	w.contracts = append(w.contracts, m.Contract)
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return w.owned, nil
+
+// ReadAuthoritative returns the WHOLE entity as the real client does; the caller's
+// LOCAL prefix filter reconstructs the owned set the old scoped read returned.
+func (w *fakeWriter) ReadAuthoritative(_ context.Context, id string) (*graph.EntityState, error) {
+	e := &graph.EntityState{ID: id}
+	for _, p := range w.owned {
+		e.Triples = append(e.Triples, message.Triple{Subject: id, Predicate: p, Object: "stale"})
+	}
+	return e, nil
+}
+
+// clearedFindings reports whether any write CLEARED floor-tools' owned group. Under
+// ReplaceOwned that is a write with an EMPTY Desired: the mutation wipes the whole
+// group and re-adds nothing, which is exactly what clearFindings now issues in place
+// of the old explicit remove list (migrate-beta159 D3a).
+func (w *fakeWriter) clearedFindings() bool {
+	for i, batch := range w.replaces {
+		if len(batch) == 0 && w.contracts[i] == Source {
+			return true
+		}
+	}
+	return false
+}
+
+// check_floors writes as TWO owners — floor-tools (the findings, on the RUN; it also
+// reads its own package back) and route-mirror (the route inputs, on the firing
+// LOOP). Both tap the same fake so existing assertions over replaces see every write.
+func findingsWriterFor(w *fakeWriter) *graphown.Writer {
+	return graphown.NewReadWriter(Source, w, w)
+}
+
+func mirrorWriterFor(w *fakeWriter) *graphown.Writer {
+	return graphown.NewWriter(RouteMirrorSource, w)
 }
 
 // passingAttempt authors production source plus a real test that asserts on computed
@@ -144,7 +187,7 @@ func vacuousAttempt() floors.Attempt {
 // and collapses the writer's stamped triples into a predicate->object map for assertions.
 func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[string]string, FloorResult, error) {
 	t.Helper()
-	res, err := RunFloors(context.Background(), fakeAttempts{attempt: attempt}, fakeReader{}, w, slog.Default(), runEntity, "", idx)
+	res, err := RunFloors(context.Background(), fakeAttempts{attempt: attempt}, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", idx)
 	facts := map[string]string{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -236,7 +279,7 @@ func TestCheckFloorsForwardsTaskIndexToResolve(t *testing.T) {
 	var gotIdx int
 	fa := fakeAttempts{attempt: passingAttempt(), gotIdx: &gotIdx}
 	w := &fakeWriter{}
-	_, err := RunFloors(context.Background(), fa, fakeReader{}, w, slog.Default(), runEntity, "", 2)
+	_, err := RunFloors(context.Background(), fa, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 2)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -254,10 +297,8 @@ func TestCheckFloorsReEvalUpserts(t *testing.T) {
 	if len(w.replaces) != 2 {
 		t.Fatalf("expected two upserts, got %d", len(w.replaces))
 	}
-	for _, rm := range w.removes {
-		if len(rm) != 0 {
-			t.Errorf("RunFloors cleared predicates %v; the fixed floor set should upsert without clears", rm)
-		}
+	if w.clearedFindings() {
+		t.Error("RunFloors cleared floor-tools' owned group; the fixed floor set should upsert without clears")
 	}
 }
 
@@ -296,19 +337,15 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 		floors.DetailPredicate,
 	}
 	w := &fakeWriter{owned: stale}
-	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, slog.Default(), runEntity, "", 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 0)
 	if err == nil {
 		t.Fatal("a failed resolve must surface an error")
 	}
 	// The stale findings must have been cleared (removed), and nothing new stamped.
-	cleared := false
-	for _, rm := range w.removes {
-		if len(rm) == len(stale) {
-			cleared = true
-		}
-	}
-	if !cleared {
-		t.Errorf("a resolve failure must CLEAR the task's stale findings, got removes=%v", w.removes)
+	// The clear is now an EMPTY Desired on floor-tools' contract (the group wipe),
+	// not an explicit remove list of the stale predicates.
+	if !w.clearedFindings() {
+		t.Errorf("a resolve failure must CLEAR the task's stale findings (%v), got writes=%v", stale, w.replaces)
 	}
 	for _, batch := range w.replaces {
 		if len(batch) > 0 {
@@ -320,7 +357,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 // An attempt that cannot be resolved (checkout read fault) is an error, not a silent pass.
 func TestCheckFloorsResolveErrorFails(t *testing.T) {
 	w := &fakeWriter{}
-	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, w, slog.Default(), runEntity, "", 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 0)
 	if err == nil {
 		t.Fatal("a failed attempt resolve must error")
 	}
@@ -350,7 +387,7 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 		attemptFact("dev-loop-2"),
 		budgetFact("3"),
 	}}
-	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -395,9 +432,11 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 // route.attempt.passed is copied as "false" — the route treats it as a red attempt, not green.
 func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 	w := &fakeWriter{}
-	// No measurement fact seeded → route.attempt.passed must fail closed to "false". A budget
-	// IS seeded (the mirror requires it — D7 — and this test is about measurement absence).
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{facts: []message.Triple{budgetFact("3")}}, w, slog.Default(), runEntity, loopEntity, 0)
+	// No measurement fact seeded → route.attempt.passed must fail closed to "false". A
+	// budget AND an attempt ARE seeded: the mirror requires both (D7 / task 4.6 — the
+	// dispatch rule appends an attempt at spawn, so a running loop always has one),
+	// and this test is about measurement absence, not a half-provisioned run.
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{facts: []message.Triple{budgetFact("3"), attemptFact("dev-loop-1")}}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -430,8 +469,11 @@ func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 		measuredCommit("sha-a"),
 		attemptCommitFact("sha-b"),
 		budgetFact("3"),
+		// A running loop always carries an attempt (task 4.6); this test is about a
+		// STALE measurement, not a half-provisioned run.
+		attemptFact("dev-loop-1"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -457,7 +499,7 @@ func TestCheckFloorsMirrorStampsBudget(t *testing.T) {
 		attemptFact("dev-loop-1"),
 		budgetFact("4"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -512,7 +554,7 @@ func TestCheckFloorsMirrorAbsentBudgetFaultsFindingsIntact(t *testing.T) {
 		measuredPassed("false"),
 		attemptFact("dev-loop-1"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err == nil {
 		t.Fatal("an absent task.spec.budget must fault the mirror loudly (D7), got nil error")
 	}
@@ -535,12 +577,8 @@ func TestCheckFloorsMirrorAbsentBudgetFaultsFindingsIntact(t *testing.T) {
 	}
 	// findings MUST NOT be cleared: the budget fault is not a resolve fault. No ReplaceTriples
 	// remove list may carry a floor.finding predicate.
-	for _, rm := range w.removes {
-		for _, pred := range rm {
-			if strings.HasPrefix(pred, floors.FindingPrefix) {
-				t.Errorf("the budget fault cleared %q — the current attempt's genuine findings must stay durable (only a stale PRIOR pass is cleared, on a resolve fault)", pred)
-			}
-		}
+	if w.clearedFindings() {
+		t.Error("the budget fault cleared floor-tools' owned group — the current attempt's genuine findings must stay durable (only a stale PRIOR pass is cleared, on a resolve fault)")
 	}
 }
 
@@ -553,7 +591,7 @@ func TestCheckFloorsMirrorNonCanonicalBudgetFaults(t *testing.T) {
 	for _, bad := range []string{"", " 3 ", "3.0", "abc"} {
 		w := &fakeWriter{}
 		reader := fakeReader{facts: []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact(bad)}}
-		_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+		_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 		if err == nil {
 			t.Errorf("budget %q: a non-canonical budget must fault the mirror (D7), got nil error", bad)
 		}
@@ -581,7 +619,7 @@ func TestCheckFloorsMirrorStampsTransientCounter(t *testing.T) {
 		transientFact("dev-loop-1a"),
 		transientFact("dev-loop-1b"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -609,7 +647,7 @@ func TestCheckFloorsMirrorStampsTransientCounter(t *testing.T) {
 func TestCheckFloorsMirrorAbsentTransientIsZeroNoFault(t *testing.T) {
 	w := &fakeWriter{}
 	reader := fakeReader{facts: []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("an absent transient counter must NOT fault (valid count 0): %v", err)
 	}
@@ -646,7 +684,7 @@ func TestCheckFloorsMirrorTransientFlagClassification(t *testing.T) {
 				facts:     []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")},
 				loopFacts: tc.loopFacts,
 			}
-			_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+			_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 			if err != nil {
 				t.Fatalf("RunFloors: %v", err)
 			}
@@ -685,7 +723,7 @@ func TestCheckFloorsMirrorTransientFlagAtomicWithPassed(t *testing.T) {
 		facts:     []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")},
 		loopFacts: []message.Triple{terminalReasonFact("model_error")},
 	}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, w, slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -710,16 +748,14 @@ func TestCheckFloorsMirrorTransientFlagAtomicWithPassed(t *testing.T) {
 		if !hasFlag {
 			t.Fatalf("route.attempt.passed stamped WITHOUT %s in the same ReplaceTriples — the transient classification must be atomic with the mirror or the convergence routes race it (the pinned double-dispatch)", RouteTransientFlagPredicate)
 		}
-		// The single-valued flag must also be in the replace (remove-first) set so a
-		// re-mirror upserts rather than accreting a second value.
-		inRemove := false
-		for _, p := range w.removes[i] {
-			if p == RouteTransientFlagPredicate {
-				inRemove = true
-			}
-		}
-		if !inRemove {
-			t.Errorf("%s missing from the mirror's replace predicates — a re-mirror would accrete a second value instead of upserting", RouteTransientFlagPredicate)
+		// Upsert (rather than accreting a second value on a re-mirror) is now the
+		// group wipe: ReplaceOwned clears route-mirror's whole loop group before
+		// adding Desired, so the single-valued flag replaces its prior value by
+		// construction — provided the write goes out under the ROUTE-MIRROR contract
+		// and not floor-tools'. That contract check is the assertion the old
+		// remove-list pin becomes (migrate-beta159 D3a).
+		if w.contracts[i] != RouteMirrorSource {
+			t.Errorf("the mirror resolved to contract %q, want %q — under floor-tools' contract the mirror predicates are outside the group and the write is rejected", w.contracts[i], RouteMirrorSource)
 		}
 	}
 	if !found {
@@ -767,5 +803,38 @@ func TestCheckFloorsMatchesPureVerdict(t *testing.T) {
 	wantDetail := floors.FormatDetail(want)
 	if facts[floors.DetailPredicate] != wantDetail {
 		t.Errorf("stamped detail = %q, want %q (FormatDetail of the pure findings)", facts[floors.DetailPredicate], wantDetail)
+	}
+}
+
+// TestCheckFloorsFaultsOnEmptyAttemptSet is the migrate-beta159 task 4.6 pin.
+//
+// Under the OLD writer an empty task.attempt.instance read was HARMLESS: the mirror's
+// remove list was [passed, rejected, budget, transient-flag], so a previously
+// mirrored route.attempt.instance survived untouched. Under ReplaceOwned the group
+// wipe removes all seven route.* predicates and re-adds only Desired — so an empty
+// read DELETES the attempt count, the retry/escalate routes read length 0 as
+// budget-unexhausted, and the run retries past its budget on paid tokens. Worse, the
+// deletion returns CommitVerified, so nothing downstream can tell.
+//
+// The empty set cannot occur on a healthy run (the dispatch rule appends one at
+// spawn), which is exactly why it must fault loudly rather than be tolerated.
+func TestCheckFloorsFaultsOnEmptyAttemptSet(t *testing.T) {
+	w := &fakeWriter{}
+	// Budget present, measurement present — ONLY the attempt set is empty.
+	reader := fakeReader{facts: []message.Triple{measuredPassed("true"), budgetFact("3")}}
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader,
+		findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	if err == nil {
+		t.Fatal("an EMPTY task.attempt.instance must fault — mirroring would group-wipe the prior attempt count and read as budget-unexhausted")
+	}
+	if !strings.Contains(err.Error(), RouteAttemptPredicate) && !strings.Contains(err.Error(), "task.attempt.instance") {
+		t.Errorf("error %q must name the empty predicate", err)
+	}
+	// Nothing may be mirrored onto the loop: a partial mirror is what the D7
+	// atomicity invariant forbids.
+	for i, batch := range w.replaces {
+		if w.entities[i] == loopEntity && len(batch) > 0 {
+			t.Errorf("the mirror wrote %d triples on the loop despite the fault — no route fact may be stamped without the attempt count", len(batch))
+		}
 	}
 }

@@ -31,14 +31,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/natsclient"
+	"github.com/c360studio/semstreams/pkg/errs"
 
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/intake/admission"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/natsclient"
-	"github.com/c360studio/semstreams/pkg/errs"
 )
 
 // ComponentName is the registered factory name.
@@ -207,7 +210,7 @@ var (
 )
 
 // NewProcessor is the component factory.
-func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
+func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg ComponentConfig
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -250,7 +253,7 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		nats:   deps.NATSClient,
 		logger: logger,
 	}
-	c.approv = newApprovalAdapter(deps.NATSClient, cfg, checker, deps.Platform, logger)
+	c.approv = newApprovalAdapter(deps.NATSClient, clients, cfg, checker, deps.Platform, logger)
 	// The deterministic apply consumer (nl-conversation-intent D6). It shares this
 	// component's forge client, checker, and — structurally, via the injected stamp
 	// func — the ONE sanctioned gate writer the exact-command fast-path uses (G5/D11).
@@ -312,10 +315,12 @@ func applyConfigDefaults(cfg *ComponentConfig) {
 
 // Register registers the conversation-channel component with the component registry
 // (called from boot.RegisterAll so both binaries pick it up together).
-func Register(reg *component.Registry) error {
+func Register(reg *component.Registry, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
-		Name:        ComponentName,
-		Factory:     NewProcessor,
+		Name: ComponentName,
+		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
+			return NewProcessor(raw, deps, clients)
+		},
 		Schema:      Schema,
 		Type:        "processor",
 		Domain:      "conversation-channel",

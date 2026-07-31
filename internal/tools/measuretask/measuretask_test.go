@@ -7,12 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c360studio/semstreams/agentic"
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/measurement"
-	"github.com/c360studio/semstreams/agentic"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -77,7 +82,7 @@ func warmSandboxOf(runner *cleanroom.MockRunner) *fakeSandboxes {
 
 // execWith builds an executor over a scripted reader + warm sandbox + writer.
 func execWith(reader *fakeReader, runner *cleanroom.MockRunner, w *fakeWriter) *Executor {
-	return New(reader, warmSandboxOf(runner), w, nil)
+	return New(reader, warmSandboxOf(runner), writerFor(w), nil)
 }
 
 // fakeWriter records replace calls. It owns no immutability guard: a measurement is
@@ -87,15 +92,16 @@ type fakeWriter struct {
 	removes  [][]string
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, rm []string) error {
-	w.replaces = append(w.replaces, add)
-	w.removes = append(w.removes, rm)
-	return nil
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+	w.replaces = append(w.replaces, m.Desired)
+	w.removes = append(w.removes, nil)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
-}
+// writerFor wraps the fake in the owner-bound seam the production code takes, so
+// every test exercises graphown.ContractFor for real — the behavioral proof that
+// this owner's predicates are classed onto the entity class it actually writes.
+func writerFor(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, w) }
 
 func callFor(idx int) agentic.ToolCall {
 	return agentic.ToolCall{
@@ -187,7 +193,7 @@ func TestMeasureDoesNotStopTheLoopNorStampAMarker(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(devtask.FactTestCommand, "go test ./...")}}
 	runner := &cleanroom.MockRunner{Execs: []cleanroom.MockExec{{Result: cleanroom.Result{ExitCode: 1}}}} // a FAILING measurement
 	w := &fakeWriter{}
-	e := New(reader, warmSandboxOf(runner), w, nil)
+	e := New(reader, warmSandboxOf(runner), writerFor(w), nil)
 
 	call := callFor(0)
 	call.LoopID = "dev-loop-abc"
@@ -288,7 +294,7 @@ func TestMeasureTimeoutIsRecordedAndNotPass(t *testing.T) {
 	// A caller ctx with a short deadline propagates as the effective exec deadline
 	// (the earlier of it and measureTimeout), so the blocking runner is killed by
 	// DeadlineExceeded — exactly what a real hung suite does at measureTimeout.
-	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, w, nil)
+	e := New(reader, &fakeSandboxes{runner: blockingRunner{}, sb: cleanroom.Sandbox{WorkDir: "/work", Handle: "warm"}}, writerFor(w), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
@@ -412,7 +418,7 @@ func TestMeasureFailsLoudlyWithoutHarness(t *testing.T) {
 func TestMeasureFailsClosedWithoutSandbox(t *testing.T) {
 	reader := &fakeReader{facts: []message.Triple{taskSpecFact(devtask.FactTestCommand, "go test ./...")}}
 	w := &fakeWriter{}
-	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, w, nil)
+	e := New(reader, &fakeSandboxes{err: errors.New("runspace: no warm sandbox for run")}, writerFor(w), nil)
 
 	res := exec(t, e, 0)
 	if res.Error == "" || !strings.Contains(res.Error, "sandbox") {

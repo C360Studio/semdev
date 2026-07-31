@@ -59,13 +59,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
 	"github.com/nats-io/nats.go"
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
 	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // SubjectPrefix is the NATS namespace every station dispatch rides. A rule
@@ -181,7 +182,7 @@ type Config struct {
 	// never boot writer-less (the boot-wiring census, task 1.4); direct
 	// Component construction in unit tests may leave it nil (log-only, the
 	// pre-park behavior).
-	FactWriter agentictools.OwnedFactWriter `json:"-"`
+	FactWriter *graphown.Writer `json:"-"`
 }
 
 // Validate requires at least one input port — a station with no subscription
@@ -210,7 +211,7 @@ type Component struct {
 	// factWriter stamps the harness-owned dispatch-outcome fact (see
 	// Config.FactWriter). Nil only under direct test construction — New
 	// enforces it for every booted station.
-	factWriter agentictools.OwnedFactWriter
+	factWriter *graphown.Writer
 
 	// One mutex guards the lifecycle flag + startTime + the base context so a
 	// concurrent Health/DataFlow read cannot see a torn read (mirrors the framework
@@ -470,9 +471,9 @@ func stringProps(in map[string]any) map[string]string {
 
 // stampDispatchFailed records the harness-owned TERMINAL dispatch outcome on
 // the dispatched entity after runHandler exhausted its bounded retries
-// (station-failure-parks D1). ReplaceTriples is replace-by-predicate, so a
-// crash-loop of repeated dispatches converges to ONE triple — never an append
-// pile. The write failing is logged + metered and nothing more: the dispatch
+// (station-failure-parks D1). station-harness owns exactly this one predicate, so
+// ReplaceOwned's group wipe re-supplies it and a crash-loop of repeated dispatches
+// converges to ONE triple — never an append pile. The write failing is logged + metered and nothing more: the dispatch
 // lane is fire-and-forget, and the run then honestly remains in the pre-park
 // stall (the log states it) rather than false-greening anything.
 func (c *Component) stampDispatchFailed(entityID string, handleErr error) {
@@ -500,7 +501,12 @@ func (c *Component) stampDispatchFailed(entityID string, handleErr error) {
 	// lost park.
 	ctx, cancel := context.WithTimeout(context.Background(), dispatchFailedStampTimeout)
 	defer cancel()
-	if err := c.factWriter.ReplaceTriples(ctx, entityID, []message.Triple{triple}, nil); err != nil {
+	// A ContractFor failure inside Replace (the entity is outside station-harness's
+	// claimed classes) is NOT a transport blip — it means a station was dispatched on
+	// an entity class no contract covers, and the terminal fact is lost. This path can
+	// only log, so it MUST log at the same volume as a write failure: a silent return
+	// here is a run that stalls forever instead of parking (migrate-beta159 task 4.7).
+	if err := c.factWriter.Replace(ctx, entityID, []message.Triple{triple}); err != nil {
 		atomic.AddInt64(&c.errors, 1)
 		c.logger.Error("station could not stamp station.dispatch.failed; the run will NOT park (dispatch-outcome write failed)",
 			slog.String("entity_id", entityID), slog.Any("write_error", err), slog.Any("handle_error", handleErr))

@@ -42,6 +42,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c360studio/semstreams/agentic/agentrun"
+	"github.com/c360studio/semstreams/graph"
+	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/natsclient"
+	"github.com/c360studio/semstreams/service"
+	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
+
 	"github.com/c360studio/semdev/internal/boot"
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/experiment"
@@ -51,13 +58,8 @@ import (
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/mockllm"
-	"github.com/c360studio/semstreams/agentic/agentrun"
-	"github.com/c360studio/semstreams/graph"
-	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/natsclient"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
-	"github.com/c360studio/semstreams/service"
-	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // journeyIssueRef is the host-neutral issue ref this journey admits. It is
@@ -330,7 +332,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// container — so this journey needs a wide budget over the pure-routing stations before it.
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 	taskID := publishCoordinatorWake(ctx, t)
 
 	// Station 2 — the coordinator routed. Poll the graph until the coordinator's
@@ -380,7 +382,7 @@ func TestBridgeProofIssueToPRAgainstMock(t *testing.T) {
 	// real approval fact; the transition is rule-owned (G2), no product Go advances
 	// it. (Station 5 asserted awaiting_approval immediately above, so this
 	// executing assertion cannot false-match the pre-gate executing state.)
-	approveChange(ctx, t, runEntityID)
+	approveChange(ctx, t, rt, runEntityID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	t.Logf("station 6: human approved → run resumed to executing (mock RequestCount=%d)", mock.RequestCount())
 
@@ -586,11 +588,11 @@ func TestBridgeProofRetryFailThenPass(t *testing.T) {
 	// the only one in a clean durable graph — no stale run from the prior journey to interfere.
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
 	// Drive the shared front-of-arc exactly as the bridge proof does, through human approval,
 	// projection, and the cold-proved sandbox — the retry only diverges inside the dev loop.
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	// Wide-window RETRY gate (the direct proof a retry fired, positioned to absorb attempt 1's
 	// COLD in-container compile): exactly TWO attempts were dispatched — dispatch-developer (04)
@@ -651,10 +653,10 @@ func TestBridgeProofReviewRejectionReentry(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
 	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	// Wide-window RE-ENTRY gate (absorbs attempt 1's COLD compile): TWO attempts were dispatched —
 	// 04 appended #1, the REVIEW-RETRY route 07b appended #2 after Quinn's rejection. Since both
@@ -718,10 +720,10 @@ func TestBridgeProofBudgetExhaustionParks(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
 	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	// Wide-window EXHAUSTION gate (absorbs attempt 1's COLD compile): the budget is fully spent —
 	// TWO attempts were dispatched (04 = #1, one 07b re-entry = #2). The second rejection at count 2
@@ -772,10 +774,10 @@ func TestBridgeProofBudgetOneEscalatesOnFirstRed(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
 	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	// Exactly ONE attempt: dispatch (04) appended count 1 at spawn; the RED measurement makes the
 	// floors route not_clean, and 06d escalates at count 1 ≥ budget 1 — it does NOT re-dispatch (06c
@@ -840,10 +842,10 @@ func TestBridgeProofTransientGraceRetries(t *testing.T) {
 	// full recovering dev loop + review + cold verify → a wider window than the happy path.
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
 	// Shared front-of-arc through approval, projection, and the cold-proved sandbox.
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	// The transient grace fired: a transient counter is stamped (the model_error re-dispatch) and
 	// the run RECOVERED — the retried loop measured green and delivered. requirePRDelivered fails
@@ -888,9 +890,9 @@ func TestBridgeProofTransientCapParks(t *testing.T) {
 	// Three loop deaths each behind the model client's retry backoff, then the park.
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
-	startJourneyRuntime(ctx, t, mock)
+	rt := startJourneyRuntime(ctx, t, mock)
 
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	parkMsg := requireRunParked(ctx, t, runEntityID, 4*time.Minute)
 	if !strings.Contains(parkMsg, "TRANSIENT") || !strings.Contains(parkMsg, "model_error") {
@@ -915,14 +917,14 @@ func TestBridgeProofTransientCapParks(t *testing.T) {
 // driver-side mirror of journeyFrontOfArcFixtures (the mock-side prefix), so the shared front
 // cannot drift between the retry/rejection/exhaustion journeys. (The bridge proof keeps its own
 // inline, per-station-logged copy as the annotated reference walk-through.)
-func driveSharedFrontOfArc(ctx context.Context, t *testing.T) (runEntityID string) {
+func driveSharedFrontOfArc(ctx context.Context, t *testing.T, rt *boot.Runtime) (runEntityID string) {
 	t.Helper()
 	taskID := publishCoordinatorWake(ctx, t)
 	requireCoordinatorDecision(ctx, t, taskID, journeyDecideAction)
 	runEntityID = requireRunAnchor(ctx, t, taskID)
 	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
-	approveChange(ctx, t, runEntityID)
+	approveChange(ctx, t, rt, runEntityID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	requireTaskSpecProjected(ctx, t, runEntityID)
 	requireSandboxReady(ctx, t, runEntityID)
@@ -935,9 +937,9 @@ func driveSharedFrontOfArc(ctx context.Context, t *testing.T) (runEntityID strin
 // share ONE boot path. Callers create the ctx (with a wide timeout — the provision station
 // builds the fixture image and cold-proves it on real docker, and measure runs `go test` in
 // the warm container) and drive the arc after this returns.
-func startJourneyRuntime(ctx context.Context, t *testing.T, mock *mockllm.Harness) {
+func startJourneyRuntime(ctx context.Context, t *testing.T, mock *mockllm.Harness) *boot.Runtime {
 	t.Helper()
-	startJourneyRuntimeExperiment(ctx, t, mock, "")
+	return startJourneyRuntimeExperiment(ctx, t, mock, "")
 }
 
 // startJourneyRuntimeExperiment is startJourneyRuntime with an optional
@@ -946,7 +948,7 @@ func startJourneyRuntime(ctx context.Context, t *testing.T, mock *mockllm.Harnes
 // into the journey's temp bootstrap, so boot swaps the -semsource variant
 // dispatch pack in and constructs the live proxy client — the exact operator
 // path, not a test-only wiring.
-func startJourneyRuntimeExperiment(ctx context.Context, t *testing.T, mock *mockllm.Harness, semsourceEndpoint string) {
+func startJourneyRuntimeExperiment(ctx context.Context, t *testing.T, mock *mockllm.Harness, semsourceEndpoint string) *boot.Runtime {
 	t.Helper()
 
 	// Wipe NATS so THIS journey boots against a clean durable state (see resetNATS). Multiple
@@ -998,6 +1000,11 @@ func startJourneyRuntimeExperiment(ctx context.Context, t *testing.T, mock *mock
 	})
 
 	requireAgenticHealthy(ctx, t, rt)
+
+	// Returned so the stand-ins (approveChange, the semsource condition stamp) draw
+	// their writers from THIS runtime's bound owners instead of binding their own —
+	// see boundWriter.
+	return rt
 }
 
 // journeyForgeDouble / journeyForgeBare expose the CURRENT test's forge double
@@ -1185,16 +1192,16 @@ func TestBridgeProofSemsourceConditionPlumbing(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
-	startJourneyRuntimeExperiment(ctx, t, mock, endpoint)
+	rt := startJourneyRuntimeExperiment(ctx, t, mock, endpoint)
 
-	runEntityID := driveSharedFrontOfArc(ctx, t)
+	runEntityID := driveSharedFrontOfArc(ctx, t, rt)
 
 	// The launch path's post-bind step: stamp the condition on the minted run
 	// (writer experiment-intake — the probe already passed above, D4 order).
 	func() {
 		client := connectFrontDoor(ctx, t)
 		defer func() { _ = client.Close(context.Background()) }()
-		if err := experiment.StampCondition(ctx, agentictools.NewNATSOwnedFactWriter(client), runEntityID, experiment.ConditionSemsource); err != nil {
+		if err := experiment.StampCondition(ctx, boundWriter(t, rt, experiment.Source), runEntityID, experiment.ConditionSemsource); err != nil {
 			t.Fatalf("stamp the semsource condition: %v", err)
 		}
 	}()
@@ -1324,16 +1331,13 @@ func publishCoordinatorWake(ctx context.Context, t *testing.T) string {
 // approveChange stands in for the REAL approval adapter (which SHIPPED with
 // forge-io-real-lanes: internal/intake/approval.go, proven end-to-end by the
 // webhook journey's comment-event station): it stamps run.change.decision="approve"
-// on the run entity via the same OwnedFactWriter transport, with the vocab
-// writer Source (approval-adapter) — impersonating the adapter's exact triple.
+// on the run entity through the SAME contract-bound mutation client the adapter
+// uses (owner approval-adapter, migrate-beta159) — impersonating its exact triple.
 // It remains legitimate for journeys that do not drive the webhook lane (no
 // issue ref to bind a comment to); the webhook journey is the adapter's proof.
-func approveChange(ctx context.Context, t *testing.T, runEntityID string) {
+func approveChange(ctx context.Context, t *testing.T, rt *boot.Runtime, runEntityID string) {
 	t.Helper()
-	client := connectFrontDoor(ctx, t)
-	defer func() { _ = client.Close(context.Background()) }()
-
-	writer := agentictools.NewNATSOwnedFactWriter(client)
+	writer := boundWriter(t, rt, "approval-adapter")
 	tr := message.Triple{
 		Subject:    runEntityID,
 		Predicate:  admission.DecisionPredicate,
@@ -1342,9 +1346,31 @@ func approveChange(ctx context.Context, t *testing.T, runEntityID string) {
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	if err := writer.ReplaceTriples(ctx, runEntityID, []message.Triple{tr}, nil); err != nil {
+	if err := writer.Replace(ctx, runEntityID, []message.Triple{tr}); err != nil {
 		t.Fatalf("stamp %s on %s: %v", admission.DecisionPredicate, runEntityID, err)
 	}
+}
+
+// boundWriter returns owner's write surface FROM THE RUNNING RUNTIME's bound
+// clients. It must not bind its own: a second registration mints a fresh
+// incarnation and replaces the epoch entry with no liveness check, while a
+// MutationClient never refreshes its captured token — so a stand-in that bound
+// again would leave the runtime writing under a stale lease for the ENTIRE rest of
+// the journey (a warn + meter tick per predicate per write today, a hard reject of
+// every owned write once enforcement flips). The arc would then be proven in a
+// state production must never be in, and task 7.1's "zero owner-lease mismatch"
+// could never hold.
+//
+// Reusing the runtime's clients is also what production does — the real approval
+// adapter draws from the same composition root — so the stand-in is MORE faithful,
+// not less.
+func boundWriter(t *testing.T, rt *boot.Runtime, owner string) *graphown.Writer {
+	t.Helper()
+	w := rt.GraphOwners().Writer(owner)
+	if w == nil {
+		t.Fatalf("runtime has no bound projection client for owner %q", owner)
+	}
+	return w
 }
 
 // requireCoordinatorDecision polls the ENTITY_STATES fact-store until THIS run's

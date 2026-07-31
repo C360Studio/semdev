@@ -6,9 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -18,16 +23,18 @@ type fakeWriter struct {
 	err      error
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, _ []string) error {
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
 	if w.err != nil {
-		return w.err
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
 	}
-	w.replaces = append(w.replaces, add)
-	return nil
+	w.replaces = append(w.replaces, m.Desired)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
-}
+
+// writerFor wraps the fake in the owner-bound seam the production code takes, so
+// every test exercises graphown.ContractFor for real — the behavioral proof that
+// this owner's predicates are classed onto the entity class it actually writes.
+func writerFor(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, w) }
 
 // fakeReader satisfies changefacts.Reader: it returns its seeded triples, prefix-scoped
 // (mirroring the NATS reader's filter), or an injected fault. An empty reader models a
@@ -100,7 +107,7 @@ func newTestDelivery(reader *fakeReader, writer *fakeWriter, forge *fakeForge, r
 	})
 	return &Delivery{
 		Reader: reader,
-		Writer: writer,
+		Writer: writerFor(writer),
 		API:    forge,
 		Roots:  fakeRoots{root: "/tmp/checkout"},
 		Runner: runner,
@@ -266,7 +273,7 @@ func TestDeliverFailsClosedWithoutVerifiedCommit(t *testing.T) {
 	runner := &fakeRunner{}
 	d := &Delivery{
 		Reader: &fakeReader{}, // no attempt.commit.sha
-		Writer: &fakeWriter{},
+		Writer: writerFor(&fakeWriter{}),
 		API:    &fakeForge{},
 		Roots:  fakeRoots{root: "/tmp/checkout"},
 		Runner: runner,

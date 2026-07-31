@@ -26,13 +26,15 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/pkg/errs"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // ComponentName is the registered factory name and the component.<name>.>
@@ -51,7 +53,7 @@ const (
 type handler struct {
 	reader changefacts.Reader
 	runner cliexec.Runner
-	writer agentictools.OwnedFactWriter
+	writer *graphown.Writer
 	logger *slog.Logger
 }
 
@@ -77,7 +79,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 // NewProcessor is the component factory. The validation station is self-sufficient — the
 // change-fact reader and owned-fact writer are stateless wrappers over the NATS client, and
 // the OpenSpec CLI runs via a plain os/exec runner (no shared runspace state).
-func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
+func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -91,8 +93,11 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "NATSClient required")
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
-	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
-	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
+	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
+	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
+	// it hosts, so it resolves separately (station-harness, G5).
+	writer := clients.Writer(validatechange.Source)
+	cfg.FactWriter = clients.Writer(station.DispatchFailedSource)
 	h := &handler{
 		reader: changefacts.NewNATSReader(deps.NATSClient),
 		runner: cliexec.OSRunner{},
@@ -104,10 +109,12 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 
 // Register registers the validation station with the component registry, called from
 // boot.RegisterAll so both semdev binaries pick it up together.
-func Register(reg *component.Registry) error {
+func Register(reg *component.Registry, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
-		Name:        ComponentName,
-		Factory:     NewProcessor,
+		Name: ComponentName,
+		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
+			return NewProcessor(raw, deps, clients)
+		},
 		Schema:      station.Schema,
 		Type:        "processor",
 		Domain:      "openspec-io",

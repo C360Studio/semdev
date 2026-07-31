@@ -3,10 +3,11 @@
 // the RUN entity, so the graph is authoritative and the artifacts are a
 // projection of it. It is the graph-first "openspec new" step.
 //
-// It OWNS the openspec.change.<slug>.* package on the run entity and REPLACES it
-// on every re-author (an author→validate→fix→re-author loop), so it takes an
-// OwnedFactWriter, not an append-only TriplePublisher — appending would leave
-// phantom index/rid-keyed facts and make reconstruction nondeterministic.
+// It OWNS the openspec.change.* package on the run entity and REPLACES it on every
+// re-author (an author→validate→fix→re-author loop), so it writes through its
+// contract-bound projection client (graphown.Writer), not an append-only
+// TriplePublisher — appending would leave phantom facts and make reconstruction
+// nondeterministic.
 //
 // G3: the input schema takes only the change CONTENT (proposal/deltas/tasks) —
 // never an outcome/validated/pass field. G5: openspec.change.* has a single
@@ -21,18 +22,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"github.com/c360studio/semdev/internal/changefacts"
-	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/types"
+
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/openspec"
 )
 
 // ToolName is the registered tool name and the coordinator's create_change action
@@ -89,7 +89,7 @@ func Revision(document string) string {
 
 // Executor stamps authored change content onto the run entity as facts.
 type Executor struct {
-	writer   agentictools.OwnedFactWriter
+	writer   *graphown.Writer
 	platform types.PlatformMeta
 	logger   *slog.Logger
 }
@@ -98,7 +98,7 @@ type Executor struct {
 // registration (the tool censuses inspect ListTools without a live NATS client);
 // Execute fails loudly if it is nil. platform builds the authoring loop's entity
 // ID for the authored marker.
-func New(writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
+func New(writer *graphown.Writer, platform types.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -165,14 +165,18 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	// re-author overwrites cleanly (no stale tree, no phantom rid-keyed facts). They are
 	// distinct predicates from the other openspec.change.* writers (validate/archive), so
 	// the explicit remove-list clears only what this tool owns (G5).
-	owned := []string{changefacts.DocumentPredicate, SlugPredicate, RevisionPredicate}
+	// The explicit remove list is gone: ReplaceOwned clears this owner's whole
+	// replace-owned group for the RUN class — which is exactly
+	// {document, slug, revision} — and re-adds Desired (design D3a). The other
+	// openspec.change.* writers (validate/archive) are different owners, so their
+	// facts are outside this group and untouched (G5).
 	triples := []message.Triple{
 		runFactTriple(runEntityID, changefacts.DocumentPredicate, docJSON, now),
 		runFactTriple(runEntityID, SlugPredicate, p.Slug, now),
 		runFactTriple(runEntityID, RevisionPredicate, rev, now),
 	}
-	if err := e.writer.ReplaceTriples(ctx, runEntityID, triples, owned); err != nil {
-		return errResult(call, writeErrKind(err), "create_change: replace the change document on %s: %v", runEntityID, err)
+	if err := e.writer.Replace(ctx, runEntityID, triples); err != nil {
+		return errResult(call, graphown.WriteErrorKind(err), "create_change: replace the change document on %s: %v", runEntityID, err)
 	}
 
 	// Stamp the authored marker on THIS loop entity (value = slug) so the validate
@@ -205,8 +209,8 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 			Timestamp:  now,
 			Confidence: 1.0,
 		}}
-		if err := e.writer.ReplaceTriples(ctx, loopEntityID, marker, []string{AuthoredPredicate}); err != nil {
-			return errResult(call, writeErrKind(err), "create_change: stamp %s on %s: %v", AuthoredPredicate, loopEntityID, err)
+		if err := e.writer.Replace(ctx, loopEntityID, marker); err != nil {
+			return errResult(call, graphown.WriteErrorKind(err), "create_change: stamp %s on %s: %v", AuthoredPredicate, loopEntityID, err)
 		}
 	}
 
@@ -252,14 +256,6 @@ func runFactTriple(runEntityID, predicate, rev string, now time.Time) message.Tr
 // entity_not_found or other graph error — internal/ordering, not retryable as
 // transport) from a genuine transport failure. entity_not_found is NOT a network
 // error.
-func writeErrKind(err error) agentic.ToolErrorKind {
-	var ce *errs.ClassifiedError
-	if errors.As(err, &ce) {
-		return agentic.ToolErrorInternal
-	}
-	return agentic.ToolErrorNetwork
-}
-
 func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
 	return agentic.ToolResult{
 		CallID:    call.ID,

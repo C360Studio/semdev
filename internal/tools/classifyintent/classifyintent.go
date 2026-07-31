@@ -41,12 +41,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/c360studio/semdev/internal/changefacts"
-	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/conversationintent"
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // ToolName is the registered tool name and the classifier's intent handler.
@@ -63,7 +64,7 @@ const Source = conversationintent.ClassifierSource
 // on the RUN.
 type Executor struct {
 	reader   changefacts.Reader
-	writer   agentictools.OwnedFactWriter
+	writer   *graphown.Writer
 	platform component.PlatformMeta
 	logger   *slog.Logger
 }
@@ -74,7 +75,7 @@ type Executor struct {
 // org/platform the classifier LOOP entity id is derived from for the recorded
 // mirror — a wrong value faults the call closed (before anything routes) rather
 // than silently mirroring onto an entity no rule reads.
-func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, platform component.PlatformMeta, logger *slog.Logger) *Executor {
+func New(reader changefacts.Reader, writer *graphown.Writer, platform component.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -219,7 +220,7 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 
 	if err := e.stampIntent(ctx, runEntityID, p.Intent, pendingID, pendingAuthor, p.Reason, ledger); err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "classify_intent: stamp %s on %s: %v", conversationintent.IntentValuePredicate, runEntityID, err)
+		return errResult(call, graphown.WriteErrorKind(err), "classify_intent: stamp %s on %s: %v", conversationintent.IntentValuePredicate, runEntityID, err)
 	}
 
 	// THE LOOP MIRROR, PART 2 — record that a classification actually landed.
@@ -242,8 +243,8 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 			Timestamp:  time.Now().UTC(),
 			Confidence: 1.0,
 		}
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, []message.Triple{mirror}, nil); merr != nil {
-			return errResult(call, changefacts.ReadErrorKind(merr), "classify_intent: stamp %s on %s: %v", conversationintent.ClassifierRecordedPredicate, loopEntityID, merr)
+		if merr := e.writer.Replace(ctx, loopEntityID, []message.Triple{mirror}); merr != nil {
+			return errResult(call, graphown.WriteErrorKind(merr), "classify_intent: stamp %s on %s: %v", conversationintent.ClassifierRecordedPredicate, loopEntityID, merr)
 		}
 	}
 
@@ -265,8 +266,9 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 // single-valued facts (value/message-id/author/reason) are replaced by predicate;
 // the multi-valued conversation.intent.classified ledger is written as the full
 // deduped set (append-set semantics over a replace-by-predicate writer). All
-// carry Source (G5). No removePredicates: every predicate written is present in
-// add, and the ledger's full set is supplied.
+// carry Source (G5). No remove list exists under ReplaceOwned — the owner's
+// replace-owned group IS the removal, and every predicate in it is re-supplied here
+// (the ledger as its full deduped set), so nothing is dropped (migrate-beta159 D3a).
 func (e *Executor) stampIntent(ctx context.Context, runEntityID, intent, messageID, author, reason string, ledger []string) error {
 	now := time.Now().UTC()
 	mk := func(pred, obj string) message.Triple {
@@ -281,7 +283,7 @@ func (e *Executor) stampIntent(ctx context.Context, runEntityID, intent, message
 	for _, id := range ledger {
 		triples = append(triples, mk(conversationintent.IntentClassifiedPredicate, id))
 	}
-	return e.writer.ReplaceTriples(ctx, runEntityID, triples, nil)
+	return e.writer.Replace(ctx, runEntityID, triples)
 }
 
 // firstObject returns the first string object of pred among triples, or "". A

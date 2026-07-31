@@ -44,14 +44,15 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/c360studio/semstreams/agentic"
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/measurement"
-	"github.com/c360studio/semstreams/agentic"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // ToolName is the registered tool name and the dev loop's measurement handler.
@@ -82,14 +83,14 @@ type Sandboxes interface {
 type Executor struct {
 	reader    changefacts.Reader
 	sandboxes Sandboxes
-	writer    agentictools.OwnedFactWriter
+	writer    *graphown.Writer
 	logger    *slog.Logger
 }
 
 // New builds the measure_task executor. reader/sandboxes/writer may be nil for
 // schema-only registration (the tool censuses inspect ListTools without a live NATS
 // client or a provisioned sandbox); Execute fails loudly if any is nil.
-func New(reader changefacts.Reader, sandboxes Sandboxes, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+func New(reader changefacts.Reader, sandboxes Sandboxes, writer *graphown.Writer, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -185,8 +186,8 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		Subject: runEntityID, Predicate: measurement.ResultPrefix + measurement.FactCommit,
 		Object: measuredCommit, Source: Source, Timestamp: now, Confidence: 1.0,
 	})
-	if err := e.writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
-		return errResult(call, changefacts.ReadErrorKind(err), "measure_task: stamp measurement.result.%d on %s: %v", idx, runEntityID, err)
+	if err := e.writer.Replace(ctx, runEntityID, out); err != nil {
+		return errResult(call, graphown.WriteErrorKind(err), "measure_task: stamp measurement.result.%d on %s: %v", idx, runEntityID, err)
 	}
 
 	e.logger.Info("measure_task recorded measurement",

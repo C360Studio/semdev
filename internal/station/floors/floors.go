@@ -40,13 +40,15 @@ import (
 	"log/slog"
 	"strconv"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/pkg/errs"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/station"
 	"github.com/c360studio/semdev/internal/tools/checkfloors"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/pkg/errs"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // ComponentName is the registered factory name and the component.<name>.> dispatch
@@ -65,7 +67,8 @@ const (
 type handler struct {
 	attempts checkfloors.Attempts
 	reader   changefacts.Reader
-	writer   agentictools.OwnedFactWriter
+	writer   *graphown.Writer
+	mirror   *graphown.Writer
 	logger   *slog.Logger
 }
 
@@ -81,7 +84,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 	}
 	idx := parseTaskIndex(req.Prop(TaskIndexProperty))
 	// req.EntityID is the developer loop L_n — the entity the route rules fire on.
-	res, err := checkfloors.RunFloors(ctx, h.attempts, h.reader, h.writer, h.logger, runEntityID, req.EntityID, idx)
+	res, err := checkfloors.RunFloors(ctx, h.attempts, h.reader, h.writer, h.mirror, h.logger, runEntityID, req.EntityID, idx)
 	if err != nil {
 		return fmt.Errorf("floors-station: run floors for task %d on %s: %w", idx, runEntityID, err)
 	}
@@ -109,7 +112,7 @@ func parseTaskIndex(s string) int {
 // checkouts (captured by Register). It fails loud if the checkouts seam is nil — a floors
 // component that cannot read the run's authored attempt must not start (never a silent
 // no-op), matching the dev-loop tools' fail-closed posture.
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -127,12 +130,17 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
 	factReader := changefacts.NewNATSReader(deps.NATSClient)
-	writer := agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
-	cfg.FactWriter = writer // the harness's own dispatch-outcome stamp (station-failure-parks)
+	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
+	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
+	// it hosts, so it resolves separately (station-harness, G5).
+	writer := clients.ReadWriter(checkfloors.Source)
+	mirrorWriter := clients.Writer(checkfloors.RouteMirrorSource)
+	cfg.FactWriter = clients.Writer(station.DispatchFailedSource)
 	h := &handler{
 		attempts: runspace.NewAttempts(factReader, checkouts),
 		reader:   factReader,
 		writer:   writer,
+		mirror:   mirrorWriter,
 		logger:   logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)
@@ -143,11 +151,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // with the live instance; the conformance census passes nil (the factory registers but
 // fails loud if ever constructed, which the census never does — it only inspects the
 // registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts)
+			return newProcessor(raw, deps, checkouts, clients)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

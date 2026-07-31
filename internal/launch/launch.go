@@ -23,11 +23,13 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/intake/admission"
-	"github.com/c360studio/semstreams/message"
 )
 
 // launchSource labels the wake's BaseMessage origin — the operator front door, distinct from
@@ -55,7 +57,7 @@ type Deps struct {
 	Issues   IssueReader
 	Pub      Publisher
 	Resolver RunSetResolver
-	Writer   experiment.FactWriter
+	Writer   *graphown.Writer
 	// Probe is the semsource per-signal readiness check; REQUIRED for the semsource condition,
 	// nil for baseline (experiment.Launch enforces this exclusivity).
 	Probe  func(context.Context) error

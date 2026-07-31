@@ -23,14 +23,15 @@ import (
 	"slices"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/coldproof"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/harness"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // Source is stamped on every sandbox.* triple this package owns. It MUST equal the
@@ -52,12 +53,6 @@ const (
 	// AttestationTierPredicate is the sandbox-scope tier the readiness rests on.
 	AttestationTierPredicate = "sandbox.attestation.tier"
 )
-
-// readinessPackage is the set of readiness/attestation predicates a block CLEARS so
-// a re-prove that now fails cannot leave a stale green (SB5). Keep it in sync with
-// what ready() writes: a new sandbox.attestation.* predicate must be added here too,
-// else a block would leave that attestation triple behind.
-var readinessPackage = []string{ReadyPredicate, AttestationImagePredicate, AttestationTierPredicate}
 
 // dockerBin is the docker CLI binary the cold proof shells (matches cleanroom's
 // default). A field would let a test override it, but tests inject a fake Prover
@@ -148,7 +143,7 @@ type ProvisionDeps struct {
 	Prover    Prover
 	Store     secrets.Store
 	Reader    changefacts.Reader
-	Writer    agentictools.OwnedFactWriter
+	Writer    *graphown.Writer
 	// DockerCheck probes the docker daemon before provisioning so an absent daemon parks the
 	// HUMAN (SB5), distinct from a declared image that cannot build (parks the operator).
 	// Defaulted to cleanroom.DockerAvailable when nil.
@@ -275,7 +270,7 @@ func ready(ctx context.Context, deps ProvisionDeps, runEntityID, imageDigest, ti
 		provisionTriple(runEntityID, AttestationImagePredicate, imageDigest),
 		provisionTriple(runEntityID, AttestationTierPredicate, tier),
 	}
-	if err := deps.Writer.ReplaceTriples(ctx, runEntityID, add, []string{BlockedPredicate}); err != nil {
+	if err := deps.Writer.Replace(ctx, runEntityID, add); err != nil {
 		return ProvisionResult{}, fmt.Errorf("provision_sandbox: stamp readiness on %s: %w", runEntityID, err)
 	}
 	deps.Logger.Info("provision recorded sandbox readiness",
@@ -297,7 +292,7 @@ func ready(ctx context.Context, deps ProvisionDeps, runEntityID, imageDigest, ti
 // they land in a fact or the surfaced result.
 func block(ctx context.Context, deps ProvisionDeps, runEntityID, reason string) (ProvisionResult, error) {
 	add := []message.Triple{provisionTriple(runEntityID, BlockedPredicate, reason)}
-	if err := deps.Writer.ReplaceTriples(ctx, runEntityID, add, readinessPackage); err != nil {
+	if err := deps.Writer.Replace(ctx, runEntityID, add); err != nil {
 		return ProvisionResult{}, fmt.Errorf("provision_sandbox: stamp block on %s: %w", runEntityID, err)
 	}
 	deps.Logger.Warn("provision blocked the run (sandbox not ready)",

@@ -22,10 +22,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // ToolName is the registered tool name.
@@ -51,7 +51,7 @@ type Patcher interface {
 // Executor is the apply_patch tool.
 type Executor struct {
 	patcher Patcher
-	writer  agentictools.OwnedFactWriter
+	writer  *graphown.Writer
 	logger  *slog.Logger
 }
 
@@ -59,7 +59,7 @@ type Executor struct {
 // (the censuses scan ListTools without a live checkout or NATS client); Execute fails
 // loudly if either is missing — a change that cannot be applied is a park, never a silent
 // skip (SB5).
-func New(patcher Patcher, writer agentictools.OwnedFactWriter, logger *slog.Logger) *Executor {
+func New(patcher Patcher, writer *graphown.Writer, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -122,8 +122,8 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}}
-	if werr := e.writer.ReplaceTriples(ctx, runEntityID, commit, []string{CommitPredicate}); werr != nil {
-		return errResult(call, changefacts.ReadErrorKind(werr), "apply_patch: stamp %s on %s: %v", CommitPredicate, runEntityID, werr)
+	if werr := e.writer.Replace(ctx, runEntityID, commit); werr != nil {
+		return errResult(call, graphown.WriteErrorKind(werr), "apply_patch: stamp %s on %s: %v", CommitPredicate, runEntityID, werr)
 	}
 
 	e.logger.Info("apply_patch applied a diff to the checkout and committed the attempt",

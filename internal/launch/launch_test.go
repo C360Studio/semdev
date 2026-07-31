@@ -7,9 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const testRef = "acme/widget#7"
@@ -18,6 +23,15 @@ type fakeIssues struct {
 	issue github.Issue
 	err   error
 }
+
+// Real six-position run entity ids: the projection client validates the entity
+// against experiment-intake's contract pattern, so a bare "run-new" is no longer a
+// usable stand-in (migrate-beta159 D2a) — and a fixture that could never occur in
+// production was hiding that (G8).
+const (
+	runNew = "c360.semdev.agent.chain.execution.run-new"
+	runOld = "c360.semdev.agent.chain.execution.run-old"
+)
 
 func (f fakeIssues) GetIssue(context.Context, string, string, int) (github.Issue, error) {
 	return f.issue, f.err
@@ -59,16 +73,20 @@ func (f *fakeResolver) ResolveRunIDsByRef(context.Context, string) ([]string, er
 }
 
 type fakeWriter struct {
-	calls      int
-	predicates []string
-	triples    []message.Triple
+	calls   int
+	triples []message.Triple
 }
 
-func (f *fakeWriter) ReplaceTriples(_ context.Context, _ string, triples []message.Triple, removePredicates []string) error {
+func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
 	f.calls++
-	f.triples = append(f.triples, triples...)
-	f.predicates = append(f.predicates, removePredicates...)
-	return nil
+	f.triples = append(f.triples, m.Desired...)
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
+}
+
+// writerFor wraps the fake in the owner-bound seam Deps.Writer takes, so the launch
+// suite exercises graphown.ContractFor for real (design D3b).
+func writerFor(w *fakeWriter) *graphown.Writer {
+	return graphown.NewWriter(experiment.Source, w)
 }
 
 func fast(p Params) Params {
@@ -87,14 +105,14 @@ func TestLaunchBaselineMintsAndBinds(t *testing.T) {
 	d := Deps{
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Title: "T", Body: "the ask body"}},
 		Pub:      pub,
-		Resolver: &fakeResolver{responses: [][]string{{}, {"run-new"}}}, // snapshot empty, then minted
-		Writer:   writer,
+		Resolver: &fakeResolver{responses: [][]string{{}, {runNew}}}, // snapshot empty, then minted
+		Writer:   writerFor(writer),
 	}
 	id, err := Launch(context.Background(), d, fast(Params{}))
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if id != "run-new" {
+	if id != runNew {
 		t.Errorf("bound id = %q, want run-new", id)
 	}
 	if len(pub.subjects) != 1 {
@@ -112,8 +130,8 @@ func TestLaunchWakeCarriesBodyOnly(t *testing.T) {
 	d := Deps{
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Title: "TITLE-SENTINEL", Body: "BODY-SENTINEL"}},
 		Pub:      pub,
-		Resolver: &fakeResolver{responses: [][]string{{}, {"run-new"}}},
-		Writer:   &fakeWriter{},
+		Resolver: &fakeResolver{responses: [][]string{{}, {runNew}}},
+		Writer:   writerFor(&fakeWriter{}),
 	}
 	if _, err := Launch(context.Background(), d, fast(Params{})); err != nil {
 		t.Fatalf("Launch: %v", err)
@@ -135,7 +153,7 @@ func TestLaunchContentlessIssueFailsBeforePublish(t *testing.T) {
 		Issues:   fakeIssues{err: errors.New("404 not found")},
 		Pub:      pub,
 		Resolver: &fakeResolver{responses: [][]string{{}}},
-		Writer:   writer,
+		Writer:   writerFor(writer),
 	}
 	if _, err := Launch(context.Background(), d, fast(Params{})); err == nil {
 		t.Error("an unreadable issue must fail the launch")
@@ -155,14 +173,14 @@ func TestLaunchBindsTheRunItMintedNotAPreExisting(t *testing.T) {
 	d := Deps{
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Body: "ask"}},
 		Pub:      &fakePub{},
-		Resolver: &fakeResolver{responses: [][]string{{"run-old"}, {"run-old", "run-new"}}},
-		Writer:   &fakeWriter{},
+		Resolver: &fakeResolver{responses: [][]string{{runOld}, {runOld, runNew}}},
+		Writer:   writerFor(&fakeWriter{}),
 	}
 	id, err := Launch(context.Background(), d, fast(Params{Force: true}))
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if id != "run-new" {
+	if id != runNew {
 		t.Errorf("bound id = %q, want run-new (the pre-existing run-old must be excluded)", id)
 	}
 }
@@ -177,7 +195,7 @@ func TestLaunchRefusesDuplicateWhenRunExists(t *testing.T) {
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Body: "ask"}},
 		Pub:      pub,
 		Resolver: &fakeResolver{responses: [][]string{{"run-existing"}}},
-		Writer:   writer,
+		Writer:   writerFor(writer),
 	}
 	if _, err := Launch(context.Background(), d, fast(Params{})); err == nil {
 		t.Error("a launch against an already-running ref must refuse to mint a duplicate")
@@ -191,7 +209,7 @@ func TestLaunchRefusesDuplicateWhenRunExists(t *testing.T) {
 
 	// --force overrides the guard.
 	force := &fakeResolver{responses: [][]string{{"run-existing"}, {"run-existing", "run-forced"}}}
-	id, err := Launch(context.Background(), Deps{Issues: d.Issues, Pub: &fakePub{}, Resolver: force, Writer: &fakeWriter{}}, fast(Params{Force: true}))
+	id, err := Launch(context.Background(), Deps{Issues: d.Issues, Pub: &fakePub{}, Resolver: force, Writer: writerFor(&fakeWriter{})}, fast(Params{Force: true}))
 	if err != nil {
 		t.Fatalf("forced launch: %v", err)
 	}
@@ -208,7 +226,7 @@ func TestLaunchAmbiguousBindFailsClosed(t *testing.T) {
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Body: "ask"}},
 		Pub:      &fakePub{},
 		Resolver: &fakeResolver{responses: [][]string{{}, {"run-a", "run-b"}}},
-		Writer:   writer,
+		Writer:   writerFor(writer),
 	}
 	_, err := Launch(context.Background(), d, fast(Params{Condition: experiment.Config{Condition: experiment.ConditionBaseline}}))
 	if err == nil {
@@ -227,7 +245,7 @@ func TestLaunchBindTimeoutFailsLoudWithoutStamping(t *testing.T) {
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Body: "ask"}},
 		Pub:      &fakePub{},
 		Resolver: &fakeResolver{responses: [][]string{{}}}, // never a new id
-		Writer:   writer,
+		Writer:   writerFor(writer),
 	}
 	// A DECLARED condition, so a bind failure would otherwise reach the stamp — prove it does not.
 	_, err := Launch(context.Background(), d, fast(Params{Condition: experiment.Config{Condition: experiment.ConditionBaseline}}))
@@ -245,14 +263,14 @@ func TestLaunchDeclaredConditionIsStamped(t *testing.T) {
 	d := Deps{
 		Issues:   fakeIssues{issue: github.Issue{Number: 7, Body: "ask"}},
 		Pub:      &fakePub{},
-		Resolver: &fakeResolver{responses: [][]string{{}, {"run-new"}}},
-		Writer:   writer,
+		Resolver: &fakeResolver{responses: [][]string{{}, {runNew}}},
+		Writer:   writerFor(writer),
 	}
 	id, err := Launch(context.Background(), d, fast(Params{Condition: experiment.Config{Condition: experiment.ConditionBaseline}}))
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if id != "run-new" {
+	if id != runNew {
 		t.Errorf("bound id = %q, want run-new", id)
 	}
 	if writer.calls != 1 {

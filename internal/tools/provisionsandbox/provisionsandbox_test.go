@@ -5,8 +5,11 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/c360studio/semstreams/message"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/cliexec"
@@ -15,7 +18,10 @@ import (
 	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
-	"github.com/c360studio/semstreams/message"
+
+	"github.com/c360studio/semstreams/pkg/projection"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 const runEntity = "org.plat.agent.chain.execution.run-1"
@@ -108,16 +114,26 @@ type fakeWriter struct {
 	err   error
 }
 
-func (w *fakeWriter) ReplaceTriples(_ context.Context, _ string, add []message.Triple, remove []string) error {
+func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
 	if w.err != nil {
-		return w.err
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
 	}
-	w.calls = append(w.calls, replaceCall{add: add, remove: remove})
-	return nil
+	// remove is empty by construction now: sandbox-provisioner's ready/block paths
+	// each reconcile the WHOLE four-predicate group, which is what the old explicit
+	// remove lists achieved — [blocked] on the ready path, and the readiness/
+	// attestation trio on the block path (migrate-beta159 D3a).
+	w.calls = append(w.calls, replaceCall{add: m.Desired})
+	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
-func (w *fakeWriter) ReadOwnedPredicates(_ context.Context, _, _ string) ([]string, error) {
-	return nil, nil
-}
+
+// writerFor wraps the fake in the owner-bound seam the production code takes, so
+// every test exercises graphown.ContractFor for real — the behavioral proof that
+// this owner's predicates are classed onto the entity class it actually writes.
+func writerFor(w *fakeWriter) *graphown.Writer { return graphown.NewWriter(Source, w) }
+
+// ownedGroup is sandbox-provisioner's replace-owned predicate group — the exact
+// blast radius of each ReplaceOwned it issues (migrate-beta159 D3a).
+var ownedGroup = []string{ReadyPredicate, BlockedPredicate, AttestationImagePredicate, AttestationTierPredicate}
 
 // okDocker is the injected docker probe for the unit tests (no real daemon).
 func okDocker(context.Context, string) error { return nil }
@@ -142,7 +158,7 @@ func newDeps(sources Sources, checkouts Checkouts, manifests Manifests, prover P
 		Warmers:     warmers,
 		Prover:      prover,
 		Reader:      reader,
-		Writer:      w,
+		Writer:      writerFor(w),
 		DockerCheck: okDocker,
 	}
 	return deps, warmers
@@ -162,15 +178,28 @@ func firstObject(calls []replaceCall, predicate string) string {
 	return ""
 }
 
+// removed reports that predicate is absent from the entity after the LAST write.
+//
+// Under ReplaceOwned each write clears sandbox-provisioner's whole four-predicate
+// group and re-adds only its Desired, so survival is decided by the FINAL mutation
+// alone — not by absence from every one. (An earlier version scanned all calls,
+// which would wrongly report "not removed" for a ready()-then-block() sequence
+// where block's wipe did clear it.) It is also scoped to the owner's group: a
+// predicate outside it was never in the wipe's blast radius, so this write had no
+// power to clear it and reporting true would be a lie.
 func removed(calls []replaceCall, predicate string) bool {
-	for _, c := range calls {
-		for _, p := range c.remove {
-			if p == predicate {
-				return true
-			}
+	if len(calls) == 0 {
+		return false // nothing was written, so nothing was cleared
+	}
+	if !slices.Contains(ownedGroup, predicate) {
+		return false // outside sandbox-provisioner's group — not this write's to clear
+	}
+	for _, t := range calls[len(calls)-1].add {
+		if t.Predicate == predicate {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // --- tests ---
@@ -239,7 +268,7 @@ func TestWarmProvisionFailureBlocks(t *testing.T) {
 		Warmers:     warmers,
 		Prover:      &fakeProver{baseline: readyBaseline("sha256:x")},
 		Reader:      fakeReader{},
-		Writer:      w,
+		Writer:      writerFor(w),
 		DockerCheck: okDocker,
 	}
 
@@ -367,7 +396,7 @@ func TestDockerAbsentBlocks(t *testing.T) {
 		Warmers:   &fakeWarmers{},
 		Prover:    prover,
 		Reader:    fakeReader{},
-		Writer:    w,
+		Writer:    writerFor(w),
 		DockerCheck: func(context.Context, string) error {
 			return errors.New("cannot connect to the docker daemon")
 		},
@@ -452,7 +481,7 @@ func TestProvisionRealFixtureReady(t *testing.T) {
 		Warmers:     sandboxes,
 		Prover:      DefaultProver(),
 		Reader:      fakeReader{},
-		Writer:      w,
+		Writer:      writerFor(w),
 		DockerCheck: cleanroom.DockerAvailable,
 	}
 

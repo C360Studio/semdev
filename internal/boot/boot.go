@@ -17,6 +17,15 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
+	"github.com/c360studio/semstreams/agentic/agentrun"
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/componentregistry"
+	"github.com/c360studio/semstreams/pkg/lifecycle"
+	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/conversationchannel"
@@ -42,12 +51,6 @@ import (
 	"github.com/c360studio/semdev/internal/tools/semsourceproxy"
 	"github.com/c360studio/semdev/internal/tools/submitreview"
 	"github.com/c360studio/semdev/internal/tools/writechange"
-	"github.com/c360studio/semstreams/agentic/agentrun"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/componentregistry"
-	"github.com/c360studio/semstreams/pkg/lifecycle"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
-	"github.com/c360studio/semstreams/processor/agentic-tools/executors"
 )
 
 // RegisterAll registers every component semdev's binaries run into reg. It wraps
@@ -71,7 +74,7 @@ import (
 // loud if ever CONSTRUCTED without the seam — which the census never does (it only
 // inspects the registry). The live boot passes the shared instances + source spec,
 // created before this call.
-func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceSpec provision.SourceSpec) error {
+func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceSpec provision.SourceSpec, clients *graphown.Clients) error {
 	if err := componentregistry.Register(reg); err != nil {
 		return fmt.Errorf("register framework components: %w", err)
 	}
@@ -79,25 +82,25 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	// from the NATS client via component.Dependencies at component-manager start.
 	// Delivery captures the SHARED checkouts since forge-io-real-lanes: the real
 	// delivery pushes the run's committed attempt branch from its warm checkout.
-	if err := delivery.Register(reg, checkouts); err != nil {
+	if err := delivery.Register(reg, checkouts, clients); err != nil {
 		return fmt.Errorf("register delivery station: %w", err)
 	}
-	if err := projection.Register(reg); err != nil {
+	if err := projection.Register(reg, clients); err != nil {
 		return fmt.Errorf("register projection station: %w", err)
 	}
-	if err := validation.Register(reg); err != nil {
+	if err := validation.Register(reg, clients); err != nil {
 		return fmt.Errorf("register validation station: %w", err)
 	}
 	// Checkout/sandbox-dependent R6 stations — capture boot's shared runspace instances.
-	if err := floors.Register(reg, checkouts); err != nil {
+	if err := floors.Register(reg, checkouts, clients); err != nil {
 		return fmt.Errorf("register floors station: %w", err)
 	}
-	if err := stationverify.Register(reg, checkouts); err != nil {
+	if err := stationverify.Register(reg, checkouts, clients); err != nil {
 		return fmt.Errorf("register verify station: %w", err)
 	}
 	// provision captures BOTH shared instances (it materializes the checkout AND stands up
 	// the warm container measure_task reads) plus the operator's run source dir.
-	if err := provision.Register(reg, checkouts, sandboxes, sourceSpec); err != nil {
+	if err := provision.Register(reg, checkouts, sandboxes, sourceSpec, clients); err != nil {
 		return fmt.Errorf("register provision station: %w", err)
 	}
 	// The forge-io front door (forge-io-real-lanes): webhook receiver + durable
@@ -109,7 +112,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	// The conversation-channel front door (conversation-channel-seam): the human
 	// approval + park-post lanes behind the channel-neutral Channel port. Both
 	// binaries register it through this one seam (the half-wired-in-one-binary class).
-	if err := conversationchannel.Register(reg); err != nil {
+	if err := conversationchannel.Register(reg, clients); err != nil {
 		return fmt.Errorf("register conversation-channel component: %w", err)
 	}
 	return nil
@@ -134,7 +137,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 // station components capture the SAME instances these tools use. The census passes
 // nil for both, so those seams stay literal-nil and the tools register schema-only;
 // the live boot passes the shared instances.
-func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, exp experiment.Config, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes) error {
+func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps executors.ToolDependencies, githubToken string, exp experiment.Config, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, clients *graphown.Clients) error {
 	if err := executors.RegisterBuiltins(ctx, reg, deps); err != nil {
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
@@ -146,11 +149,14 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// is never silently dropped. RegisterExecutor derives the tool name from the
 	// executor's own ListTools, so the registered name cannot drift from its
 	// advertised schema.
-	var changeWriter agentictools.OwnedFactWriter
-	if deps.NATSClient != nil {
-		changeWriter = agentictools.NewNATSOwnedFactWriter(deps.NATSClient)
-	}
-	if err := reg.RegisterExecutor(createchange.New(changeWriter, deps.Platform, deps.Logger)); err != nil {
+	// ADR-056 binds a client to exactly ONE owner, so the old single shared
+	// changeWriter becomes one bound writer PER OWNER, resolved from the
+	// composition root's registry. A nil *Clients (the schema-scanning censuses,
+	// which pass no NATS client) yields nil writers, so each tool registers
+	// schema-only and fails loudly if a write is ever attempted — the same posture
+	// the nil OwnedFactWriter gave. submit_review writes as TWO owners
+	// (reviewer-quinn on the run, route-mirror on its loop), so it takes two.
+	if err := reg.RegisterExecutor(createchange.New(clients.Writer(createchange.Source), deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", createchange.ToolName, err)
 	}
 
@@ -270,7 +276,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// the outcome is of the artifact built cold in the operator-declared image, never a
 	// host process over an unproven environment. Each nil dep makes Execute fail loudly;
 	// an unprovisioned sandbox makes Resolve fail closed (park) — never a silent host exec.
-	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(measuretask.New(factReader, measureSandboxes, clients.Writer(measuretask.Source), deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", measuretask.ToolName, err)
 	}
 
@@ -281,7 +287,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// via the shared OwnedFactWriter (its own Source, reviewer-quinn — G5-safe). Takes
 	// no runner/workspace (it runs nothing). Both nil in the census (schema-only);
 	// Execute fails loudly if either is missing.
-	if err := reg.RegisterExecutor(submitreview.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(submitreview.New(factReader, clients.Writer(submitreview.Source), clients.Writer(submitreview.RouteMirrorSource), deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", submitreview.ToolName, err)
 	}
 
@@ -300,7 +306,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// consequential gate fact is stamped deterministically downstream (approval-adapter),
 	// never here, and no lifecycle transition fires (G2). Both nil in the census
 	// (schema-only); Execute fails loudly if either is missing.
-	if err := reg.RegisterExecutor(classifyintent.New(factReader, changeWriter, deps.Platform, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(classifyintent.New(factReader, clients.Writer(classifyintent.Source), deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", classifyintent.ToolName, err)
 	}
 
@@ -319,7 +325,7 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 	// the commit SHA the harness created as attempt.commit via the shared OwnedFactWriter
 	// (its own Source, patch-committer — G5-safe), the immutable-snapshot pointer the cold
 	// verify + read_diff target. Nil patcher/writer (the census) makes Execute fail loudly.
-	if err := reg.RegisterExecutor(applypatch.New(patcher, changeWriter, deps.Logger)); err != nil {
+	if err := reg.RegisterExecutor(applypatch.New(patcher, clients.Writer(applypatch.Source), deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", applypatch.ToolName, err)
 	}
 

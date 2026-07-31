@@ -6,12 +6,13 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/c360studio/semdev/internal/graphown"
+
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/semsource"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/launch"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // RunLaunch is the operator launch entry point — the durable front door beside the webhook
@@ -50,6 +51,23 @@ func RunLaunch(ctx context.Context, opts RunOptions, params launch.Params) (stri
 
 	platform := platformMeta(cfg)
 
+	// The launch driver stamps exactly ONE owned fact (experiment.run.condition,
+	// owner experiment-intake), so it binds ONLY that owner — never BindAll.
+	// Registering an owner SUPERSEDES whoever holds it: a fresh incarnation replaces
+	// the epoch entry with no liveness check, and a MutationClient never refreshes
+	// its captured token. Binding all 17 here would leave a running `task serve`
+	// permanently fenced out of its own write path (warn + meter per predicate per
+	// write today; a hard reject of every owned write once enforcement flips), with
+	// nothing to notice it — the runtime binds once at boot and never re-registers.
+	//
+	// Superseding experiment-intake specifically is harmless: the runtime never
+	// writes experiment.run.condition (StampCondition's only caller is this path), so
+	// no runtime write ever presents the stale token.
+	graphClients, err := graphown.BindOwners(ctx, natsClient, logger, experiment.Source)
+	if err != nil {
+		return "", fmt.Errorf("bind projection owners: %w", err)
+	}
+
 	// The experiment condition is operator-declared in the config (G3/G5 — the same evidence
 	// label the mint path stamps). The semsource condition REQUIRES a readiness probe;
 	// experiment.Launch fails closed if it is declared without one.
@@ -64,7 +82,7 @@ func RunLaunch(ctx context.Context, opts RunOptions, params launch.Params) (stri
 		Issues:   github.NewClient(opts.GitHubToken),
 		Pub:      natsClient,
 		Resolver: admission.NewRunResolver(natsClient, platform.Org, platform.Platform),
-		Writer:   agentictools.NewNATSOwnedFactWriter(natsClient),
+		Writer:   graphClients.Writer(experiment.Source),
 		Probe:    probe,
 		Logger:   logger,
 	}

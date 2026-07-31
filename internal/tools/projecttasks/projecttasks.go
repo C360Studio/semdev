@@ -33,13 +33,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/openspec"
 	"github.com/c360studio/semdev/internal/tools/createchange"
 	"github.com/c360studio/semdev/internal/tools/validatechange"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 )
 
 // Source is stamped on every task.spec triple. It MUST equal the single writer
@@ -54,7 +55,7 @@ const Source = "task-projector"
 // change / contract violation) with NOTHING stamped (atomic). The projection station
 // (R6) is the sole caller, so task.spec keeps one writer (G5) and one enforcement
 // path. reader/writer/logger must be non-nil (the caller checks).
-func Project(ctx context.Context, reader changefacts.Reader, writer agentictools.OwnedFactWriter, logger *slog.Logger, runEntityID, slug string) (int, error) {
+func Project(ctx context.Context, reader changefacts.Reader, writer *graphown.Writer, logger *slog.Logger, runEntityID, slug string) (int, error) {
 	if slug == "" {
 		return 0, fmt.Errorf("project_tasks: slug is required")
 	}
@@ -137,7 +138,7 @@ func Project(ctx context.Context, reader changefacts.Reader, writer agentictools
 	}
 
 	out := taskSpecTriples(runEntityID, specs, time.Now().UTC())
-	if err := writer.ReplaceTriples(ctx, runEntityID, out, nil); err != nil {
+	if err := writer.Replace(ctx, runEntityID, out); err != nil {
 		return 0, fmt.Errorf("project_tasks: stamp %d task.spec facts on %s: %w", len(out), runEntityID, err)
 	}
 

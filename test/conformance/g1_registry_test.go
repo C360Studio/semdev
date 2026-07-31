@@ -4,11 +4,12 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/c360studio/semstreams/component"
+	"github.com/c360studio/semstreams/componentregistry"
+
 	"github.com/c360studio/semdev/internal/boot"
 	"github.com/c360studio/semdev/internal/registry"
 	"github.com/c360studio/semdev/internal/station/provision"
-	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/componentregistry"
 )
 
 // frameworkFactories returns the set of factory names registered by the
@@ -28,7 +29,7 @@ func frameworkFactories(t *testing.T) map[string]bool {
 func semdevFactories(t *testing.T) map[string]bool {
 	t.Helper()
 	reg := component.NewRegistry()
-	if err := boot.RegisterAll(reg, nil, nil, provision.SourceSpec{}); err != nil {
+	if err := boot.RegisterAll(reg, nil, nil, provision.SourceSpec{}, nil); err != nil {
 		t.Fatalf("boot.RegisterAll: %v", err)
 	}
 	return factoryNameSet(reg)

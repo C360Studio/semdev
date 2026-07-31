@@ -17,11 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c360studio/semstreams/message"
+
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/forge/github"
-	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // ForgeConfig is the delivery target (the delivery-station's `forge` config
@@ -64,7 +65,7 @@ type CheckoutRoots interface {
 // Delivery is the real forge delivery core the delivery station drives.
 type Delivery struct {
 	Reader changefacts.Reader
-	Writer agentictools.OwnedFactWriter
+	Writer *graphown.Writer
 	API    ForgeAPI
 	Roots  CheckoutRoots
 	Runner cliexec.Runner
@@ -164,7 +165,7 @@ func (d *Delivery) Deliver(ctx context.Context, runEntityID string) (string, err
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	if err := d.Writer.ReplaceTriples(ctx, runEntityID, []message.Triple{triple}, nil); err != nil {
+	if err := d.Writer.Replace(ctx, runEntityID, []message.Triple{triple}); err != nil {
 		return "", fmt.Errorf("open-pr: stamp %s on %s: %w", RefPredicate, runEntityID, err)
 	}
 	return pr.HTMLURL, nil

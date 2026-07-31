@@ -40,13 +40,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c360studio/semdev/internal/changefacts"
-	"github.com/c360studio/semdev/internal/devtask"
-	"github.com/c360studio/semdev/internal/measurement"
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/message"
-	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 	"github.com/c360studio/semstreams/types"
+
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/measurement"
 )
 
 // ToolName is the registered tool name and the reviewer's verdict handler.
@@ -126,20 +127,28 @@ const (
 // verdict, and stamps review.verdict.
 type Executor struct {
 	reader   changefacts.Reader
-	writer   agentictools.OwnedFactWriter
+	writer   *graphown.Writer
+	mirror   *graphown.Writer
 	platform types.PlatformMeta // builds the review loop's entity id for the chaining marker
 	logger   *slog.Logger
 }
 
-// New builds the submit_review executor. reader/writer may be nil for schema-only
-// registration (the tool censuses inspect ListTools without a live NATS client);
-// Execute fails loudly if either is nil. platform builds the review loop's entity id for
-// the dev.reviewed chaining marker.
-func New(reader changefacts.Reader, writer agentictools.OwnedFactWriter, platform types.PlatformMeta, logger *slog.Logger) *Executor {
+// New builds the submit_review executor. reader/writer/mirror may be nil for
+// schema-only registration (the tool censuses inspect ListTools without a live NATS
+// client); Execute fails loudly if they are nil. platform builds the review loop's
+// entity id for the dev.reviewed chaining marker.
+//
+// TWO writers, because submit_review stamps as two vocab Sources and ADR-056 binds a
+// client to exactly one owner: writer is reviewer-quinn (the verdict + findings, on
+// the RUN), mirror is route-mirror (the route inputs, on ITS review LOOP). They are
+// deliberately not interchangeable — the mirror's ReplaceOwned wipes route-mirror's
+// whole loop group, so sending a verdict through it, or a mirror through the
+// verdict writer, is a silent data loss the contract resolution then rejects.
+func New(reader changefacts.Reader, writer, mirror *graphown.Writer, platform types.PlatformMeta, logger *slog.Logger) *Executor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{reader: reader, writer: writer, platform: platform, logger: logger}
+	return &Executor{reader: reader, writer: writer, mirror: mirror, platform: platform, logger: logger}
 }
 
 type payload struct {
@@ -155,7 +164,7 @@ type payload struct {
 // findings, and stamps review.verdict. approved requires the measurement floor
 // (CanApprove) AND no open finding; anything else is changes_requested.
 func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
-	if e.reader == nil || e.writer == nil {
+	if e.reader == nil || e.writer == nil || e.mirror == nil {
 		return errResult(call, agentic.ToolErrorInternal, "submit_review: harness not fully wired (reader/writer)")
 	}
 	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
@@ -221,7 +230,7 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 
 	if err := e.stampVerdict(ctx, runEntityID, idx, verdict, findings); err != nil {
-		return errResult(call, writeErrKind(err), "submit_review: stamp %s on %s: %v", verdictPredicate(idx), runEntityID, err)
+		return errResult(call, graphown.WriteErrorKind(err), "submit_review: stamp %s on %s: %v", verdictPredicate(idx), runEntityID, err)
 	}
 
 	e.logger.Info("submit_review recorded verdict",
@@ -253,6 +262,17 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		if aerr != nil {
 			return errResult(call, changefacts.ReadErrorKind(aerr), "submit_review: read task.attempt for the route mirror on %s: %v", runEntityID, aerr)
 		}
+		// D7 / migrate-beta159 task 4.6 (the check_floors twin, grp3-5 review M-1): an
+		// EMPTY attempt set is a projection-contract violation — the dispatch rule
+		// appends one task.attempt.instance at spawn. The old remove list was
+		// [verdict, budget], so an empty read left a prior route.attempt.instance
+		// standing; ReplaceOwned wipes the WHOLE seven-predicate group, so it would be
+		// deleted and the review routes would read the budget as unexhausted. This site
+		// is the more reachable of the two: a mirror error returns WITHOUT StopLoop, so
+		// repeated mirror writes on one review loop are the designed path.
+		if len(attempts) == 0 {
+			return errResult(call, agentic.ToolErrorInternal, "submit_review: task.attempt.instance is EMPTY on %s — the dispatch rule appends one at spawn, so this is a projection-contract violation; mirroring now would group-wipe the prior attempt count and read as budget-unexhausted", runEntityID)
+		}
 		// D7: the per-task budget is authored + clamped [1,5] on every task, so an absent or
 		// unparseable value is a projection-contract violation, not a normal input. Fault
 		// loudly (errResult back to the loop — the tool's documented "never a silent green"
@@ -280,8 +300,8 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 		for _, obj := range attempts {
 			mirror = append(mirror, message.Triple{Subject: loopEntityID, Predicate: RouteAttemptPredicate, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0})
 		}
-		if merr := e.writer.ReplaceTriples(ctx, loopEntityID, mirror, []string{RouteVerdictPredicate, RouteBudgetPredicate}); merr != nil {
-			return errResult(call, writeErrKind(merr), "submit_review: stamp the route mirror on %s: %v", loopEntityID, merr)
+		if merr := e.mirror.Replace(ctx, loopEntityID, mirror); merr != nil {
+			return errResult(call, graphown.WriteErrorKind(merr), "submit_review: stamp the route mirror on %s: %v", loopEntityID, merr)
 		}
 	}
 
@@ -312,7 +332,7 @@ func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskInd
 		mk(verdictPredicate(taskIndex), verdict),
 		mk(findingsPredicate(taskIndex), strings.Join(findings, "\n")),
 	}
-	return e.writer.ReplaceTriples(ctx, runEntityID, triples, nil)
+	return e.writer.Replace(ctx, runEntityID, triples)
 }
 
 // readAttemptObjects reads the distinct objects of the run's task.attempt.instance counter

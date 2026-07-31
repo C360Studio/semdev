@@ -48,13 +48,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c360studio/semdev/internal/boot"
-	"github.com/c360studio/semdev/internal/changefacts"
-	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
 	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
+
+	"github.com/c360studio/semdev/internal/boot"
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/intake"
 )
 
 const (
@@ -127,7 +128,7 @@ func TestRealLLMJourneyIssueToPR(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Minute)
 	defer cancel()
 
-	startRealLLMRuntime(ctx, t)
+	rt := startRealLLMRuntime(ctx, t)
 	taskID := publishRealCoordinatorWake(ctx, t)
 	t.Logf("real-llm: wake published (task=%s, model endpoint=gemini/%s) — first paid turn is in flight", taskID, realLLMModelID)
 
@@ -197,7 +198,7 @@ func TestRealLLMJourneyIssueToPR(t *testing.T) {
 	t.Log("real-llm station: model-authored change VALIDATED by the CLI oracle → awaiting_approval")
 
 	// The human gate, stood in exactly as the mock journeys do.
-	approveChange(ctx, t, runEntityID)
+	approveChange(ctx, t, rt, runEntityID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
 
 	// Station: the projection freezes task.spec off the MODEL-AUTHORED tasks.
@@ -296,7 +297,7 @@ type entityStateMap = graph.EntityState
 // startRealLLMRuntime boots the REAL shared runtime against the real-model
 // config: fresh NATS, no mock anywhere in the path, the same personas +
 // sandbox source the mock journeys use.
-func startRealLLMRuntime(ctx context.Context, t *testing.T) {
+func startRealLLMRuntime(ctx context.Context, t *testing.T) *boot.Runtime {
 	t.Helper()
 
 	resetNATS(ctx, t)
@@ -319,6 +320,10 @@ func startRealLLMRuntime(ctx context.Context, t *testing.T) {
 	})
 
 	requireAgenticHealthy(ctx, t, rt)
+
+	// Returned so approveChange draws its writer from THIS runtime's bound owners
+	// rather than binding again — see boundWriter.
+	return rt
 }
 
 // realLLMConfigPath writes a copy of the bootstrap config with the model

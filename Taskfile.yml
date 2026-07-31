@@ -161,7 +161,7 @@ tasks:
     cmds:
       - grep -E "real-llm (station|milestone|TERMINAL)|EVIDENCE|LEDGER|--- (PASS|FAIL|SKIP)" /tmp/realllm-run.log | tail -5 || true
       - grep -iE "error|failed|panic" /tmp/realllm-run.log | tail -3 || true
-      - docker run --rm --network semdev_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"
+      - docker run --rm --network semdev_default natsio/nats-box:0.19.7 nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"
 
   serve:
     desc: >-
@@ -210,4 +210,4 @@ tasks:
       (the NATS image ships no nats CLI). Wallclock rule: any station with no new
       fact for >2× its expected step time is wedged — abort rather than wait.
     cmds:
-      - docker run --rm --network semdev_default natsio/nats-box:latest nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep -E "chain.execution" || echo "no run entity yet"
+      - docker run --rm --network semdev_default natsio/nats-box:0.19.7 nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep -E "chain.execution" || echo "no run entity yet"
