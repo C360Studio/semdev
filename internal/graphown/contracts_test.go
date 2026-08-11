@@ -377,7 +377,7 @@ func TestRouteMirrorSitesWriteDisjointEntityPopulations(t *testing.T) {
 	sawReviewer, sawFloorsDispatch := false, false
 
 	for _, r := range rules {
-		for _, action := range r.OnEnter {
+		for _, action := range r.actions() {
 			// (1) submit_review — the review mirror — only ever on a reviewer spawn.
 			if action.Type == "publish_agent" && slices.Contains(action.Tools, "submit_review") {
 				sawReviewer = true
@@ -403,6 +403,13 @@ func TestRouteMirrorSitesWriteDisjointEntityPopulations(t *testing.T) {
 	}
 }
 
+type ruleAction struct {
+	Type    string   `json:"type"`
+	Role    string   `json:"role"`
+	Tools   []string `json:"tools"`
+	Subject string   `json:"subject"`
+}
+
 type ruleDoc struct {
 	path       string
 	Conditions []struct {
@@ -410,12 +417,15 @@ type ruleDoc struct {
 		Operator string `json:"operator"`
 		Value    any    `json:"value"`
 	} `json:"conditions"`
-	OnEnter []struct {
-		Type    string   `json:"type"`
-		Role    string   `json:"role"`
-		Tools   []string `json:"tools"`
-		Subject string   `json:"subject"`
-	} `json:"on_enter"`
+	OnEnter []ruleAction `json:"on_enter"`
+	OnExit  []ruleAction `json:"on_exit"`
+}
+
+// actions returns BOTH action slots. Every census below must scan both: several
+// shipped rules already use on_exit for other actions, so a dispatch or spawn
+// moved there would otherwise silently escape the pin (review 2026-08-11, L3).
+func (r ruleDoc) actions() []ruleAction {
+	return slices.Concat(r.OnEnter, r.OnExit)
 }
 
 func hasCondition(r ruleDoc, field, operator, value string) bool {
@@ -506,7 +516,7 @@ func TestStationDispatchRulesConfineTheFiringEntityClass(t *testing.T) {
 	dispatchers := 0
 	for _, r := range rules {
 		dispatches := false
-		for _, a := range r.OnEnter {
+		for _, a := range r.actions() {
 			if a.Type == "publish" && strings.Contains(a.Subject, ".dispatch") {
 				dispatches = true
 			}
@@ -543,15 +553,17 @@ func TestStationDispatchRulesConfineTheFiringEntityClass(t *testing.T) {
 }
 
 // TestOwnerLeaseObserveOnlyOnLanding is migrate-beta159 task 3.3 / design D5 Phase A:
-// this change LANDS with enforcement OFF, and the flip is a deliberate, evidenced
-// group-6 step — never a speculative edit.
+// beta.159 lands and STAYS observe-only. The Phase-B flip is VOID, permanently —
+// semstreams' final refactor phase (the next tag) removes the ownership/lease
+// mechanism, so the posture question transfers to the next-tag migration change,
+// re-asked against ownership's replacement (design D5 as-built, 2026-08-11).
 //
-// Flipping it early is not a small mistake. Under enforcement every owned write from
-// a process whose token went stale is REJECTED, and the token goes stale from a cause
+// Flipping is not a small mistake. Under enforcement every owned write from a
+// process whose token went stale is REJECTED, and the token goes stale from a cause
 // this repo cannot fully prevent: a second registration of the same owner ids
-// (registry.go replaces the epoch entry with no liveness check). So the gate stays
-// shut until group 6 proves coverage POSITIVELY — the mismatch meter cannot prove it,
-// because an un-tokened write is neither metered nor rejected (D5).
+// (registry.go replaces the epoch entry with no liveness check). The mismatch meter
+// cannot justify a flip either — an un-tokened write is neither metered nor
+// rejected (D5); coverage is proven positively by the group-6 census instead.
 //
 // The pin also asserts the key is PRESENT: an absent key would default to false and
 // read as "observe-only" today, but silently inherit whatever the framework's default
@@ -581,7 +593,7 @@ func TestOwnerLeaseObserveOnlyOnLanding(t *testing.T) {
 		case gi.Config.EnforceOwnerLease == nil:
 			t.Errorf("%s graph-ingest omits enforce_owner_lease — it must be EXPLICITLY false while this change lands, not inherited from a framework default that can change", name)
 		case *gi.Config.EnforceOwnerLease:
-			t.Errorf("%s sets enforce_owner_lease=true — the flip is group 6 and is gated on POSITIVE coverage evidence (D5); flipping it here rejects every owned write from any process whose token went stale", name)
+			t.Errorf("%s sets enforce_owner_lease=true — beta.159 is permanently observe-only (D5 as-built: the flip was voided when the next tag's ownership removal was announced); enforcement rejects every owned write from any process whose token went stale", name)
 		}
 	}
 }
@@ -600,6 +612,11 @@ func TestOwnerLeaseObserveOnlyOnLanding(t *testing.T) {
 // graphown.Writer, which resolves a contract and carries the owner token. The
 // remaining sanctioned exceptions are named explicitly, so adding one is a
 // deliberate edit reviewed against ADR-056 rather than a quiet regression.
+//
+// Known boundary (review 2026-08-11, N4): the census greps STRING LITERALS, so an
+// owned write routed through an imported framework subject constant (e.g.
+// processor/rule's exported SubjectTripleAdd) would evade it. None exists today;
+// the compile break — OwnedFactWriter is deleted — remains the first leg.
 func TestNoCallSiteHandRollsAnOwnedWrite(t *testing.T) {
 	// subject → why a raw request to it is sanctioned.
 	sanctioned := map[string]string{
@@ -634,7 +651,9 @@ func TestNoCallSiteHandRollsAnOwnedWrite(t *testing.T) {
 			return rerr
 		}
 		for _, line := range strings.Split(string(raw), "\n") {
-			// Only STRING LITERAL uses — a prose mention in a comment is not a call.
+			// Only QUOTED subject shapes match. A quoted subject inside a comment
+			// also matches — a false RED in the safe direction; keep prose
+			// mentions unquoted.
 			if !strings.Contains(line, `"graph.mutation.`) {
 				continue
 			}
@@ -656,9 +675,11 @@ func TestNoCallSiteHandRollsAnOwnedWrite(t *testing.T) {
 	for _, o := range offenders {
 		t.Errorf("a graph.mutation subject is named as a string literal outside graphown — an owned write that bypasses the contract carries no owner token, and the lease meter CANNOT see it (D5):\n  %s", o)
 	}
-	// The exception list must not rot into a blanket waiver.
-	if len(sanctioned) > 2 {
-		t.Errorf("the sanctioned raw-subject list has grown to %d — each entry is an un-contracted write path; re-justify them against ADR-056", len(sanctioned))
+	// The exception list must not rot into a blanket waiver: exactly ONE entry is
+	// sanctioned today (the admission birth lane), so ANY growth is a deliberate,
+	// reviewed edit that trips this guard.
+	if len(sanctioned) > 1 {
+		t.Errorf("the sanctioned raw-subject list has grown to %d — each entry is an un-contracted write path; re-justify every entry against ADR-056 and raise this cap in the same reviewed edit", len(sanctioned))
 	}
 }
 

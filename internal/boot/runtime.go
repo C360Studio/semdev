@@ -537,6 +537,14 @@ type runtimeRegistries struct {
 	graphOwners *graphown.Clients
 }
 
+// productShellSkippedBuiltins names the framework builtins semdev deliberately does
+// not register — see the SkipBuiltins comment in buildRuntimeRegistries for why
+// write_todos cannot be wired from a product shell. The boot gate that makes the
+// skip load-bearing lives in RegisterBuiltins' live-NATS branch, unreachable from
+// `go test ./...`; TestWriteTodosStaysSkipped is the offline pin on both the entry
+// and its precondition (nothing under configs/ references the tool).
+var productShellSkippedBuiltins = []string{"write_todos"}
+
 // buildRuntimeRegistries wires every registry a component or tool can be
 // constructed against:
 //
@@ -580,6 +588,21 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	if err != nil {
 		return nil, fmt.Errorf("bind projection owners: %w", err)
 	}
+	// A failure past this point abandons the boot with no Runtime for Stop to
+	// release, and the NEXT boot in this process (a journey binary's subsequent
+	// test) would fail ErrOwnersAlreadyBoundInProcess — a loud error that masks
+	// the real cause. Release exactly what THIS bind claimed, never
+	// graphown.Owners(): if BindAll ever fails because an earlier runtime in the
+	// process is still live, a blanket release would free the LIVE holder's
+	// claims and reopen the two-live-holders hazard the guard exists to close.
+	// BindOwners releases on its own internal failures; this defer covers every
+	// error return after a successful bind, including ones added later.
+	registriesBuilt := false
+	defer func() {
+		if !registriesBuilt {
+			graphown.ReleaseOwners(graphClients.Bound()...)
+		}
+	}()
 
 	componentReg := component.NewRegistry()
 	// Boot census (D5 task 6.1a): every owner the vocab table declares must have a
@@ -626,7 +649,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		//
 		// If semdev ever WANTS agent-private todos, this becomes an upstream ask for an
 		// exported accessor to the builtin contracts — not a local re-declaration.
-		SkipBuiltins: []string{"write_todos"},
+		SkipBuiltins: productShellSkippedBuiltins,
 	}
 	if err := RegisterTools(ctx, toolReg, toolDeps, opts.GitHubToken, expCfg, checkouts, sandboxes, graphClients); err != nil {
 		return nil, fmt.Errorf("register tools: %w", err)
@@ -637,6 +660,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		return nil, fmt.Errorf("register lifecycle workflow: %w", err)
 	}
 
+	registriesBuilt = true
 	return &runtimeRegistries{
 		componentReg: componentReg,
 		payloadReg:   payloadReg,
@@ -688,6 +712,14 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 	if err != nil {
 		return nil, nil, err
 	}
+	// Same post-bind window as buildRuntimeRegistries' own guard, one layer up: a
+	// failure below abandons the bound owners with no Runtime for Stop to release.
+	servicesWired := false
+	defer func() {
+		if !servicesWired {
+			graphown.ReleaseOwners(regs.graphOwners.Bound()...)
+		}
+	}()
 
 	serviceReg := service.NewServiceRegistry()
 	if err := service.RegisterAll(serviceReg); err != nil {
@@ -721,6 +753,7 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 		return nil, nil, err
 	}
 
+	servicesWired = true
 	return svcMgr, regs, nil
 }
 
@@ -733,9 +766,12 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 // path below closes exactly the resources opened by the steps before it (the
 // NATS connection, then also the config manager once it exists), so a reader
 // can audit "what's alive at this point" by reading top-to-bottom without
-// tracing deferred closures. Nothing past the config manager holds a resource
-// that needs releasing before Start — the registries and constructed-but-not-
-// started services are in-memory only.
+// tracing deferred closures. The one resource that outlives this frame is the
+// in-process projection-owner claims: wireServices and buildRuntimeRegistries
+// release them on their own post-bind failures, the seedPersonas path below
+// releases them explicitly, and once a Runtime exists Stop owns the release —
+// without that, a failed boot in a journey binary would poison every later
+// boot with ErrOwnersAlreadyBoundInProcess.
 func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	logger := opts.Logger
 	if logger == nil {
@@ -797,6 +833,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	// than the framework defaults. A wiring fault (wrong path) fails boot here
 	// rather than silently degrading the coordinator's routing prompt.
 	if err := seedPersonas(ctx, natsClient, personasDir(opts), logger); err != nil {
+		graphown.ReleaseOwners(regs.graphOwners.Bound()...)
 		_ = configMgr.Stop(5 * time.Second)
 		_ = natsClient.Close(ctx)
 		return nil, err
@@ -847,13 +884,23 @@ func (r *Runtime) Start(ctx context.Context) error {
 func (r *Runtime) Stop(timeout time.Duration) error {
 	var errs []error
 
-	// Release this runtime's projection-owner claims FIRST and unconditionally, so a
-	// bounded/failed shutdown (the known semstreams #508 ComponentManager deadlock,
-	// which is why Stop is best-effort here) still frees them. The in-process bind
-	// guard exists to catch a SECOND live binding — two clients holding tokens for
-	// one owner, where the later silently invalidates the earlier. A runtime that is
-	// stopping is no longer a live holder, so a subsequent boot in the same process
-	// (a test binary running journeys in sequence) legitimately re-binds.
+	// Release this runtime's projection-owner claims unconditionally — DEFERRED,
+	// so it runs even on the wedge path (the known semstreams #508 ComponentManager
+	// deadlock, which is why Stop is best-effort here), and therefore LAST, after
+	// nats.Close. That ordering is load-bearing: once the shared NATS client is
+	// closed, an abandoned component cannot write, so there is no window in which a
+	// same-process re-bind coexists with a still-writing old holder. Do NOT
+	// "simplify" this into a direct call at the top of Stop — that would open
+	// exactly the two-live-holders window the in-process guard exists to close.
+	//
+	// The in-process bind guard catches a SECOND live binding — two clients holding
+	// tokens for one owner, where the later silently invalidates the earlier. A
+	// runtime that has finished stopping is no longer a live holder, so a
+	// subsequent boot in the same process (a test binary running journeys in
+	// sequence) legitimately re-binds. Note the heartbeater is NOT stopped here:
+	// its lifetime is the NewRuntime ctx, which every current caller cancels
+	// before or with Stop; a beat after nats.Close fails warn-only and presence
+	// ages out at ownership.PresenceTTL.
 	defer graphown.ReleaseOwners(r.graphOwners.Bound()...)
 
 	stopDone := make(chan error, 1)

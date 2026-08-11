@@ -244,18 +244,20 @@ paid-lane flip.
   into a blanket waiver. RED verified by planting a raw subject in measuretask;
   (c) the group-4 checklist is closed site by site (4.1/4.4/4.5/4.6/4.7 ticked; 4.2
   void; 4.3 deferred with cause).
-- [ ] 6.2 Read `owner_lease_mismatch_total` for what it IS — a STALENESS signal.
-  Non-zero means a second process minted a new incarnation
-  (`registry.go:379-381`), not that a site is unmigrated. Confirm single-writer-
-  process discipline before the flip; consider metering `Heartbeater.Run`'s
-  swallowed tick failures (`heartbeat.go:108-112` warns only), since a persistently
-  failing heartbeat ages out presence silently.
-- [ ] 6.3 ONLY on (6.1) coverage + (6.2) staleness clean: set
-  `enforce_owner_lease=true` on the hosted graph-ingest, re-run the ladder GREEN,
-  and record the ADR-056 rollout evidence in `docs/evidence-ledger.md` — stating
-  honestly WHICH writes are gated (the 16 owning owners) and which are NOT (the
-  birth-only admission record, permanently un-tokened by design, D5). Pin the
-  enforced config (`TestGraphIngestEnforcesOwnerLease`).
+- [ ] 6.2 (VOID — upstream removal, D5 as-built) The staleness read is moot:
+  semstreams' final refactor phase (the next tag) removes the ownership/lease
+  mechanism this task observes — the meter, the token mint, and the enforcement
+  branch all go away with it. Reading a days-from-deleted meter buys no durable
+  evidence. Whatever integrity mechanism replaces ownership gets its own
+  observation task in the next-tag migration change.
+- [ ] 6.3 (VOID — upstream removal, D5 as-built) The Phase-B flip would arm
+  `enforce_owner_lease` on a mechanism the next semstreams tag deletes, and its
+  rollout evidence would expire with the tag. The landing state of this change is
+  therefore Phase A PERMANENT: enforcement OFF (pinned by 3.3's
+  `TestOwnerLeaseObserveOnlyOnLanding`), coverage proven positively (6.1) — the
+  full extent of what beta.159 can honestly claim. Already recorded in the
+  evidence ledger's NOT-CLAIMED list (7.3b). The posture decision transfers to
+  the next-tag migration change, re-asked against ownership's replacement.
 
 ## 7. Verify + review + archive
 
@@ -285,12 +287,26 @@ paid-lane flip.
   Two earlier runs were RED and both were real beta.159 gaps this change then closed
   (stream bounds; the write_todos builtin) — the journeys, not the offline ladder,
   are what found them.
-- [ ] 7.2 Adversarial review — BOTH reviewers, zero blocking/high, all findings
-  applied. Focus: the contract-census (owner/mode drift), append-vs-replace
-  correctness (silent data-drop), the one-registration invariant, the owner-lease
-  gate + heartbeater lifecycle, G3 (no outcome params survived), G5 (one writer per
-  predicate, now doubly-pinned by vocab + contract), the flow-discipline (writes
-  still over NATS, no Go shortcut introduced).
+- [x] 7.2 Adversarial review — BOTH reviewers ran 2026-08-11 on `112a4f8`+`e5362df`
+  plus the 6.2/6.3 void amendments: go-reviewer APPROVE (0 blocking/high, 2 medium,
+  2 low, 4 note), semstreams-reviewer APPROVE (0 blocking/high, 1 medium, 4 low,
+  4 note). ALL findings folded in one pass: the failed-boot claim leak
+  (release-on-error at all three boot layers — a post-bind boot failure no longer
+  poisons later boots in the same binary with `ErrOwnersAlreadyBoundInProcess`),
+  the in-package claim-ledger pin (`TestInProcessClaimLedger` — the live-claim
+  rejection + atomicity + release/re-claim, previously unpinned because the
+  nil-client test never takes a claim), the write_todos offline pin
+  (`TestWriteTodosStaysSkipped`, red-verified — closes the ledger's "both pinned
+  offline" overclaim), the on_exit census extension (red-verified), the
+  Stop-ordering comment (the deferred release runs LAST, after nats.Close — that
+  ordering is load-bearing), the void-coherence touches (ledger as-built addendum,
+  observe-only pin comment + message), the sanctioned-list growth-guard tighten
+  (>1), and the census known-boundary note (imported subject constants evade the
+  literal grep; none exist). Focus areas verified clean by the reviewers: G3, G5
+  (write_todos skip rationale confirmed against the module cache), blast radius
+  (no new write site, no group widened), the one-registration invariant,
+  discard:"old" (framework house value; "new" refuses at ceiling, 503/10077),
+  ledger numeric honesty (57 pkgs exact; 19 contracts / 17 owners exact).
 - [x] 7.3a CLAUDE.md pin bumped to beta.159, with the three durable hazards the
   wave introduced (group-is-the-blast-radius; one EntityPattern per contract;
   ownership registration is destructive) plus the stream-bounds and write_todos

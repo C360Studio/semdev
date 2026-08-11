@@ -161,15 +161,15 @@ func TestWriteErrorKindSeparatesWiringBugsFromTransport(t *testing.T) {
 	}
 }
 
-// TestBindOwnersRejectsASecondBindInProcess pins the guard that exists because the
-// framework's own duplicate check cannot see across calls: ownership.NewRegistry
-// mints a fresh incarnation per instance and RegisterOwner replaces the epoch entry
-// with no liveness check, so a second bind of an owner someone already holds
-// permanently invalidates the first holder's token.
+// TestBindOwnersRejectsASecondBindInProcess pins that a FAILED bind leaves no claim
+// residue: both binds here fail at the nil-client check, and the second must not
+// report ErrOwnersAlreadyBoundInProcess — a transient boot failure must never poison
+// the owner for the rest of the process.
 //
-// It runs without NATS on purpose: the in-process claim is taken BEFORE any
-// connection, so the duplicate is caught even on a nil client — which is what makes
-// it a usable guard for the e2e stand-ins.
+// It cannot exercise the LIVE-claim rejection: BindOwners checks the client for nil
+// BEFORE taking the claim, so no claim is ever held here. That half — and the
+// release/re-claim semantics — is pinned in-package by TestInProcessClaimLedger,
+// which drives the claim ledger directly.
 func TestBindOwnersRejectsASecondBindInProcess(t *testing.T) {
 	t.Cleanup(graphown.ResetInProcessBindingsForTest)
 	graphown.ResetInProcessBindingsForTest()

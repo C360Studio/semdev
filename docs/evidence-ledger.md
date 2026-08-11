@@ -230,10 +230,19 @@ first, on real beta.159 requirements the compile and unit suites were blind to:
 ordinary streams must declare `max_bytes`+`discard` (rejected only when a changed
 config is re-validated — so most journeys booted fine while two could not), and
 `RegisterBuiltins` hard-fails on `write_todos` without a projection mutation client
-a product shell cannot supply. Both closed; both now pinned offline.
+a product shell cannot supply. Both closed. The stream-bounds half is pinned
+offline (`TestEveryStreamDeclaresItsBounds`); the write_todos half is pinned by
+`TestWriteTodosStaysSkipped` (the skip-list entry plus its referenced-nowhere
+precondition) — the boot gate itself sits in `RegisterBuiltins`' live-NATS branch
+and is exercised only in the docker lanes.
 
 **Not claimed:** enforcement is NOT flipped (`enforce_owner_lease` stays false,
-pinned) — that is the gated group-6 step. The admission create is NOT migrated
+pinned) — at entry time that was the gated group-6 step. *As-built addendum
+(2026-08-11):* the flip is now VOID, permanently for this change — semstreams'
+final refactor phase (the next tag) removes the ownership/lease mechanism (per
+operator report; design D5 as-built), so beta.159 lands and stays observe-only
+and the posture question transfers to the next-tag migration change, re-asked
+against ownership's replacement. The admission create is NOT migrated
 (design D3c: the projection client swallows the `EntityExists` signal the intake
 lane needs to skip a duplicate wake). No real-LLM run was made for this migration.
 

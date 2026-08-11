@@ -325,6 +325,19 @@ The two-phase landing stands; only its evidence changes:
   hosted graph-ingest component. Single-binary makes the "every serving instance
   enforces" precondition one flag on one component.
 
+**D5 as-built (2026-08-11): Phase B is VOID — overtaken upstream.** semstreams'
+final refactor phase (the next tag) removes the ownership/lease mechanism
+entirely — the registry, the token mint, and the enforcement branch go with it.
+Arming `enforce_owner_lease` would gate writes on a surface with days to live and
+its evidence would expire with the tag. This change therefore lands Phase A
+PERMANENT: contract-bound writes, enforcement OFF (pinned by task 3.3), coverage
+proven positively per the gate below — the full extent of what beta.159 can
+honestly claim. The posture question transfers to the next-tag migration change,
+to be re-asked against whatever integrity mechanism replaces ownership.
+Provenance: operator report, 2026-08-11 — no upstream ADR/tag is published yet,
+so this is unverifiable from the pinned module cache by construction; the
+next-tag migration change records the upstream artifact when it exists.
+
 **The Phase-B gate is a POSITIVE coverage check, not a zero-meter reading** (group
 6, rewritten). Coverage must be proven by construction, offline:
 
