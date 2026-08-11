@@ -281,6 +281,39 @@ real docker, zero paid tokens). Notes:
 A CLI stand-in write (the exact `run.change.decision` = `approve` fact) remains available for a
 host that runs NEITHER transport, but is no longer the only non-webhook option.
 
+**The NL-intent gate (nl-conversation-intent, landed).** The approval gate also reads
+NATURAL LANGUAGE: an authorized collaborator writing "looks good, ship it" on the
+thread classifies as an approval (one short model turn), posts a transparency note
+naming the inferred decision and its author, and lands the same
+`run.change.decision` fact through the same adapter. Operator facts:
+
+- **Once the run is at the gate, the exact commands always work** and always win on
+  cost: `/semdev approve` / `/semdev reject` are byte-identical fast-paths at ZERO
+  model turns. (Pre-gate commands are definitively ignored — the phase guard — and
+  pre-gate-open messages are watermark-discarded; see the next bullets.)
+- **A rejection cancels a GATED run only** (`awaiting_approval → cancelled`,
+  rule-owned, phase-guarded). **An NL approval is NOT reversible via NL**: once the
+  run resumes, a later "wait, no" cancels nothing — the PR merge is the downstream
+  human stop, by design.
+- **NL classification is spend-bounded at 3 paid turns per run's gate** (counted at
+  dispatch, faults included). On exhaustion semdev posts the exact-command escape
+  hatch once and refuses further NL messages at zero cost; the exact commands keep
+  working forever. A message written BEFORE the gate opened (a reused issue's old
+  "ship it", a restart re-read) is definitively discarded — the gate-open watermark.
+- **Marker-leak posture (known, accepted, PARTIALLY tripwired)**: a leaked
+  serialization marker CLOSES THE NL LANE SILENTLY for the run — new messages stamp
+  and die unclassified; the exact command always recovers. Detection depends on the
+  leak shape. The FAILED-ACTION shapes (a failed publish after the marker stamp; a
+  failed marker removal at release) bump `semstreams_rule_action_failures_total` —
+  alert on the fully-qualified name; the bare suffix matches nothing in PromQL. The
+  WEDGED-LOOP shape (a classifier that spawns successfully and never reaches a
+  terminal) fails NO action and has NO metric today — its only symptom is human-side
+  silence, which is exactly why the reconciliation exists. The marker-leak +
+  exhaustion-residue reconciliation is a NAMED pre-production follow-up tracked in
+  semdev#5 (the residue: after a spent budget plus an exact-command decision, the
+  last refused message's `conversation.pending.*` facts stay on the run — harmless
+  under the phase gates, forensically "in flight").
+
 **What the offline journey does and does NOT cover** (honesty, ledger it): the
 `TestBridgeProofSelfTargetForgeCloneToPR` mock journey proves the
 clone→develop→diff→deliver MECHANICS against a local bare remote with zero paid

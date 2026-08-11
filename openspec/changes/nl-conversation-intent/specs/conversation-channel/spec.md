@@ -8,11 +8,13 @@ arc SHALL NOT contain a bespoke chat surface. The change-approval human gate SHA
 operable from the thread by an **authorized actor** (a push-capable repository
 collaborator or an allowlisted actor, per the shared admission gate) expressing an
 intent — either the exact opt-in command (`<command> approve` / `<command> reject`) OR
-NATURAL LANGUAGE the system classifies. An APPROVE intent SHALL land as
-`run.change.approved` on the run through the approval adapter — the same fact, source,
-and placement the resume rule already consumes. A REJECT intent SHALL land as
-`run.change.rejected`, on which a rule fires the run's `awaiting_approval → cancelled`
-transition (the transition stays rule-owned). An intent from an actor who is not
+NATURAL LANGUAGE the system classifies. An APPROVE intent SHALL land as the
+single-valued gate decision (`run.change.decision` == `approve`) on the run through
+the approval adapter — the same fact, source, and placement the resume rule consumes.
+A REJECT intent SHALL land as `run.change.decision` == `reject`, on which a rule
+fires the run's `awaiting_approval → cancelled` transition (the transition stays
+rule-owned). The decision fact is single-valued and first-writer-wins (the
+run-lifecycle capability owns its full contract). An intent from an actor who is not
 authorized SHALL NOT be routed to the gate and SHALL leave the run gated; a message
 carrying no directive SHALL leave the run gated. (The human-reply lane — a reply
 re-entering as `human.opt.signal` to resume a parked run — is a reserved forward
@@ -29,22 +31,22 @@ natural-language classification.
 
 #### Scenario: An exact approval command releases the gate with no model turn
 - **WHEN** an authorized actor posts the whole-token approval command on the run's thread
-- **THEN** the approval adapter records `run.change.approved` deterministically, spending no model turn
+- **THEN** the approval adapter records `run.change.decision` == `approve` deterministically, spending no model turn
 - **AND** the existing resume rule advances the run with no journey stand-in write
 
 #### Scenario: A natural-language approval releases the gate
 - **WHEN** an authorized actor posts a non-command message the classifier reads as approval on a run awaiting approval
-- **THEN** the system posts a transparency note naming the inferred approval and its author, then records `run.change.approved` through the approval adapter
+- **THEN** the system posts a transparency note naming the inferred approval and its author, then records `run.change.decision` == `approve` through the approval adapter
 - **AND** the existing resume rule advances the run
 
 #### Scenario: A natural-language rejection cancels the run
 - **WHEN** an authorized actor posts a message the classifier reads as rejection on a run awaiting approval
-- **THEN** the system posts a transparency note naming the inferred rejection, records `run.change.rejected`, and a rule fires the `awaiting_approval → cancelled` transition
+- **THEN** the system posts a transparency note naming the inferred rejection, records `run.change.decision` == `reject`, and a rule fires the `awaiting_approval → cancelled` transition
 - **AND** no further classification fires for that run (it has left the gate)
 
 #### Scenario: An unauthorized signal is ignored
 - **WHEN** a signal arrives from an actor who is neither a push-capable collaborator nor allowlisted
-- **THEN** no `run.change.approved` or `run.change.rejected` lands, no classification is triggered, and the run stays gated
+- **THEN** no gate decision lands, no classification is triggered, and the run stays gated
 
 #### Scenario: A non-directive message leaves the run gated
 - **WHEN** an authorized actor posts a message the classifier reads as carrying no approve/reject directive (ordinary chatter, ambiguous positivity)
@@ -109,3 +111,75 @@ The discriminator is the ABSENCE of a recorded classification on the classifier 
 the loop's outcome. A tool returning an error does not fail its loop, so a classifier that
 refuses to classify still terminates successfully — an outcome-keyed rule never fires, which
 is how this lane shipped silent and was caught only by an end-to-end journey.
+
+### Requirement: A message can only decide the gate it was written for
+
+BOTH inbound decision paths — the exact command AND natural-language classification —
+SHALL honor a per-run gate-opening watermark: a message whose channel timestamp does
+not postdate the watermark SHALL be definitively discarded (acknowledged, counted,
+logged loudly), never classified and never applied. The watermark is the run's
+gate-opening time LESS a bounded cross-clock skew allowance (the code-host stamps
+poll-path timestamps on its own clock), applied uniformly to both transports; it
+SHALL be read from a fact the platform contract promises is populated (the run's
+last-transition audit fact). A gated run with NO establishable watermark, or a
+message with NO usable timestamp, SHALL fail CLOSED — the message is refused loudly,
+never honored.
+
+Thread-to-run resolution SHALL be deterministic to the ACTIVE gated run (a run
+awaiting approval preferred, newest gate-open next, a stable tiebreak last), never
+first-match-in-page-order — two runs sharing one thread is reachable, and without the
+watermark plus deterministic resolution, a historical "ship it" approves a proposal
+the human never saw.
+
+Named accepted consequence: PRE-APPROVAL — a decision typed before the proposal
+exists — does not release the gate.
+
+#### Scenario: A historical approval cannot decide a new proposal
+- **WHEN** a second run mints against an issue whose thread carries an approval (natural-language or exact command) written for a PRIOR proposal
+- **THEN** the old message is definitively discarded and the new proposal stays gated awaiting a fresh decision
+
+#### Scenario: A restart re-read decides nothing
+- **WHEN** the poll transport re-reads a thread from cursor zero after a restart
+- **THEN** messages that do not postdate the watermark decide nothing and spend no model turn
+
+#### Scenario: An unestablishable watermark fails closed
+- **WHEN** a run at the gate has no usable gate-opening timestamp, or an inbound message carries no usable timestamp
+- **THEN** the message is refused loudly and no gate decision lands
+
+#### Scenario: A fresh message still decides normally
+- **WHEN** an authorized message arrives after the run's gate opened
+- **THEN** it is classified or applied exactly as the gate contract specifies
+
+### Requirement: Natural-language classification is spend-bounded per run
+
+The system SHALL bound the paid classifier turns spent on ONE run's gate by a fixed
+per-run budget, counted at DISPATCH — so a faulted, refused, truncated, or
+cap-exhausted classification consumes budget exactly like a successful one — and the
+budget ledger SHALL survive classification cycles as the run's durable spend record.
+Serialization (one classifier in flight at a time) is not the bound; without the
+budget, N distinct authorized messages on one gated run are N paid model turns with
+no ceiling, reachable by ordinary conversation on a live thread.
+
+On exhaustion, a further authorized non-command message SHALL be refused WITHOUT a
+model turn, and the refusal SHALL be ANNOUNCED on the thread once per run, naming the
+exact commands — a budget-refused message and an ignored one are otherwise
+indistinguishable from the human's side. Once-per-run is the nominal contract: under
+the named best-effort action-failure shapes it degrades to BOUNDED repetition (the
+rule's own metadata states the bound), never to silence. The exact command path SHALL
+remain fully operable at zero model turns after exhaustion.
+
+#### Scenario: The budget caps the paid turns
+- **WHEN** more distinct authorized non-command messages arrive on one gated run than the budget allows
+- **THEN** classifier dispatches stop exactly at the budget and every later message spends no model turn
+
+#### Scenario: Exhaustion is announced once
+- **WHEN** the first over-budget authorized message is refused
+- **THEN** a note posts on the thread naming the exact commands, once for the run's lifetime in nominal operation
+
+#### Scenario: The exact command outlives the budget
+- **WHEN** the budget is exhausted and an authorized actor issues the exact approval command
+- **THEN** the gate decides normally, spending no model turn
+
+#### Scenario: A fault on a spent budget does not invite a hopeless retry
+- **WHEN** a classifier produces no reading and the run's budget is already spent
+- **THEN** the fallback note names the exact commands and does not invite re-wording, because a re-worded message can no longer be classified

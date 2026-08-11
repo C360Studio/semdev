@@ -224,8 +224,10 @@ them would sync a spec asserting behavior the code lacks (G10).
   silently and in the fail-OPEN direction. A 30s `gateWatermarkSkew` covers the poll path's
   cross-clock comparison (code-host `created_at` vs a semdev-stamped gate-open). Fails CLOSED
   on an unestablishable watermark or an untimestamped message. All pins mutation-verified. `ResolveRunByRef` additionally
-  returns `gateOpenedAt` (the `agent.run.phase` triple's `Timestamp` while the phase is
-  `awaiting_approval`) and resolves DETERMINISTICALLY to the active run (awaiting-approval
+  returns `gateOpenedAt` (parsed from the `agent.run.last-transition-at` audit fact while
+  the phase is `awaiting_approval` — the corrected source; an earlier draft of this tick
+  said the phase triple's Timestamp metadata, which is what 8.1a deliberately did NOT use)
+  and resolves DETERMINISTICALLY to the active run (awaiting-approval
   preferred, newest gate-open next, entity ID as a stable tiebreak) instead of first-match-in-
   page-order. BOTH inbound paths — the NL bridge AND the exact-command fast-path — require
   `msg.At > gateOpenedAt`; an at-or-before message is definitively dropped (acked, counted,
@@ -351,7 +353,33 @@ asserting behavior the code does not have (G10). 7.1's spec delta must describe
 `run.change.decision` (D13), the watermark (D12), and the spend bound (D14) — not the retired
 two-fact partition.
 
-- [ ] 7.1 The `conversation-channel` delta matches the code. Docs: the NL-intent gate in the
+- [x] 7.1 DONE 2026-08-11. The `conversation-channel` delta REWRITTEN to the as-built state
+  (it still described the retired two-fact partition): the MODIFIED gate requirement now
+  lands `run.change.decision` (single-valued, first-writer-wins, deferring the full contract
+  to run-lifecycle's delta), and TWO requirements were ADDED — "A message can only decide
+  the gate it was written for" (D12: both paths honor the gate-open watermark, fail-closed
+  on unestablishable/untimestamped, deterministic active-run resolution, pre-approval named
+  as the accepted consequence) and "Natural-language classification is spend-bounded per
+  run" (D14: dispatch-counted budget, exhaustion announced once with the exact-command
+  escape hatch, exact commands zero-cost forever, fault-on-spent-budget does not invite a
+  hopeless retry). run-lifecycle + dev-from-task deltas verified already in decision
+  language (8.5a). Docs: the runbook gained the NL-intent gate section (prose approve, the
+  irreversibility posture + PR-merge stop, the spend bound + watermark, the marker-leak
+  posture with `action_failures_total` and the reconciliation follow-up incl. the
+  exhaustion pending-residue). dev-from-task/01 gained the DORMANCY note (go-L3: inert on
+  gated paths since conversation/01 stamps the same anchor at gate entry; still load-bearing
+  on non-gate paths; do not deduplicate). conversation/04 gained the COMPOUND
+  RULE_STATE-LOSS residual note (LOW-b: replayed release + fresh spawn can re-arm the
+  marker mid-flight — narrower than closed HIGH-1, bounded, named for postmortems). The
+  upstream ask is FILED: **semstreams #935** (atomic multi-remove / abort-on-first-failure
+  on_enter, with the intermediate-revision exposure class as related context). LOW-a
+  (classify_intent deterministic faults retry to the loop cap — a framework
+  StopLoop-on-contract-violation would short-circuit the dead turns) is FILED as a
+  comment on #935 (7.3 L1 caught the original tick claiming it was in the body when it
+  was not). The marker-leak + exhaustion-residue reconciliation gained a DURABLE
+  tracking home: **semdev#5** (7.3 both-reviewer ask — the runbook now points there, not
+  at this archiving tasks file).
+  ORIGINAL TASK TEXT (kept for the record): The `conversation-channel` delta matches the code. Docs: the NL-intent gate in the
   runbook (approve in prose; the exact command still works; a rejection cancels a GATED run;
   NL-approve is not reversible via NL — the PR merge is the downstream stop). grp4-review
   doc items: note dev-from-task/01's dormancy on live paths (superseded by conversation/01's
@@ -373,14 +401,30 @@ two-fact partition.
   re-arm the marker to a NEW id while an old classifier is in flight — strictly narrower
   than the closed HIGH-1 window, bounded by the deterministic consumer + transparency +
   PR backstop; name it in 04's replay notes.
-- [ ] 7.2 Full offline ladder (`task check`) + full `task e2e -race` uncached (incl. the NL
-  journeys) + `openspec validate --strict`.
-- [ ] 7.3 Adversarial review — BOTH reviewers, zero blocking/high, all findings applied.
-  Focus: the false-approval posture (deterministic double-Authorize on the HARNESS-bound
-  author, grounding, conservative persona, transparency-before-effect, the PR-merge
-  backstop), G3 (routing not measurement, no outcome field), G5 (one Source for the gate
-  facts, the shared-writer census), G2 (phase-guarded rule-owned cancel; no Go transition),
-  the dedup (append-set + spawn marker, no storm), the conflict-terminal guard, and the
-  exact-command byte-identity.
+- [x] 7.2 DONE 2026-08-11: `task check` green (build + lint + unit, 57 pkgs + fixtures +
+  ruleload); full uncached `go test -race -tags=e2e -count=1 ./test/e2e/...` GREEN — 529s,
+  zero failures, ZERO SKIPS (the second consecutive full-suite green at HEAD, satisfying
+  the 7.3 reviewer's sequencing note that the journey-backed SHALLs must be proven at HEAD
+  after the beta.159 write-path change); `openspec validate --strict` green.
+- [x] 7.3 DONE 2026-08-11 — BOTH reviewers APPROVE, zero blocking/high, all findings
+  applied. go-reviewer 0B/0H/1M/6L/2N (truth-check of the docs/specs as operator-facing
+  prose); semstreams-reviewer 0B/0H/2M/1L/4N (every SHALL in the three deltas verified
+  against committed code with named pins — "no item on the checklist lacks a pin" — and
+  the full holistic focus list confirmed: false-approval posture, G3/G5/G2, dedup,
+  conflict-terminal guard, exact-command byte-identity [honestly noted: the exact path
+  deliberately gained the phase guard + watermark + refusal in group 8, all spec'd]).
+  FOLDED: the runbook's marker-leak bullet no longer claims metric coverage for the
+  wedged-loop shape (which fails no action and has NO metric — the fully-qualified
+  `semstreams_rule_action_failures_total` covers only the failed-action shapes) and points
+  the reconciliation at the durable semdev#5; rule 04's compound-replay parenthetical
+  CORRECTED (the fully-re-armed state — marker AND slot both moved — defeats the
+  graph-mediated read-once binding and RE-OPENS the HIGH-1 misattribution; it is not
+  "strictly narrower", and the note now states the true mechanism with its real bounds);
+  the spec watermark boundary now states the skew-adjusted threshold applied to both
+  transports; the exhaustion announcement is "nominally once, bounded repetition under
+  named action-failure shapes, never silence"; dev-from-task/01's stale `change_approved`
+  reference fixed; the 8.1 tick's contradictory watermark-source parenthetical fixed;
+  trailing newlines restored; the pre-gate scope added to the runbook's "always work"
+  bullet.
 - [ ] 7.4 sync-specs at archive folds the delta (conversation-channel modified; still 12
   caps — no new capability).
