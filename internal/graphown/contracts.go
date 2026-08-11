@@ -218,15 +218,16 @@ var unwiredPredicates = map[string]string{
 // a lane ADR-056 does not lease-gate. vocab records the stamping writer, so no
 // census here can see that; it is documented and decided in design.md D2b.
 var ruleWriterSources = map[string]bool{
-	"issue-ref-rule":          true,
-	"park-rule":               true,
-	"dev-rewake-rule":         true,
-	"dev-projection-rule":     true,
-	"dev-dispatch-rule":       true,
-	"dev-floors-rule":         true,
-	"dev-route-rule":          true,
-	"sandbox-provision-rule":  true,
-	"conversation-spawn-rule": true,
+	"issue-ref-rule":           true,
+	"park-rule":                true,
+	"dev-rewake-rule":          true,
+	"dev-projection-rule":      true,
+	"dev-dispatch-rule":        true,
+	"dev-floors-rule":          true,
+	"dev-route-rule":           true,
+	"sandbox-provision-rule":   true,
+	"conversation-spawn-rule":  true,
+	"conversation-budget-rule": true,
 }
 
 // createOwners write via CreateWithTriples (birth predicates), not ReplaceOwned.

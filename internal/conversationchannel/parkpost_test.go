@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/graph"
@@ -281,6 +282,105 @@ func TestFaultNotePostsAndNeverParks(t *testing.T) {
 	if !strings.Contains(ch.posts[0].body, "/semdev approve") {
 		t.Errorf("the fault note must point at the deterministic escape hatch, got %q", ch.posts[0].body)
 	}
+}
+
+// TestBudgetNoteSelectsEscapeHatchBody (group 8, D14): the user-note lane is
+// SHARED — the kind property selects the body. The budget-exhausted rule fires
+// on the RUN itself (unlike the loop-fired fault note), so this also pins
+// resolveRun's chain-entity fast path for this lane. The budget body must NOT
+// invite a re-word: re-wording cannot trigger another paid classification once
+// the ledger is full — only the exact commands can move the gate.
+func TestBudgetNoteSelectsEscapeHatchBody(t *testing.T) {
+	ctx := context.Background()
+	const runID = "c360.semdev.agent.chain.execution.run-1"
+	entities := map[string]*graph.EntityState{
+		runID: entityWith(runID, map[string]string{"run.issue.ref": "c360studio/semdev-fixture#7"}),
+	}
+
+	t.Run("budget kind posts the escape hatch", func(t *testing.T) {
+		ch := &fakeChannel{}
+		p := newTestNotePoster(ch, &fakeFetcher{entities: entities})
+		payload, err := json.Marshal(publishEnvelope{
+			EntityID:   runID,
+			Properties: map[string]any{conversationintent.BudgetNoteProperty: conversationintent.BudgetNoteValue},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := p.handleUserNote(ctx, payload); err != nil {
+			t.Fatalf("handleUserNote: %v", err)
+		}
+		if len(ch.posts) != 1 {
+			t.Fatalf("want exactly one budget note posted, got %d", len(ch.posts))
+		}
+		body := ch.posts[0].body
+		if !strings.Contains(body, "used up") || !strings.Contains(body, "/semdev approve") {
+			t.Errorf("the budget note must say the budget is spent AND name the exact commands, got %q", body)
+		}
+		if strings.Contains(body, "re-word") || strings.Contains(body, "try again") {
+			t.Errorf("the budget note must NOT invite a re-word — re-wording cannot trigger another paid classification once the ledger is full, got %q", body)
+		}
+	})
+
+	t.Run("bare envelope keeps the fault body", func(t *testing.T) {
+		ch := &fakeChannel{}
+		p := newTestNotePoster(ch, &fakeFetcher{entities: entities})
+		payload, err := json.Marshal(publishEnvelope{EntityID: runID})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := p.handleUserNote(ctx, payload); err != nil {
+			t.Fatalf("handleUserNote: %v", err)
+		}
+		if len(ch.posts) != 1 || !strings.Contains(ch.posts[0].body, "couldn't read that") {
+			t.Fatalf("a bare envelope must keep the fault body, got %v", ch.posts)
+		}
+	})
+
+	t.Run("a fault on a spent budget gets the escape hatch, not an invitation to retry", func(t *testing.T) {
+		// 8.6 round-2 MEDIUM-3: a classifier fault on the run's FINAL attempt
+		// publishes a bare (fault-kind) envelope, but "re-word what you meant
+		// and I'll try again" is a lie once the spend ledger is full — the
+		// re-word can never classify and would draw the near-contradictory
+		// budget note seconds later. The consumer holds the run entity, so a
+		// full ledger selects the budget body regardless of envelope kind.
+		spent := entityWith(runID, map[string]string{"run.issue.ref": "c360studio/semdev-fixture#7"})
+		for i := 0; i < conversationintent.ClassifierAttemptBudget; i++ {
+			spent.Triples = append(spent.Triples, message.Triple{
+				Subject: runID, Predicate: conversationintent.ClassifierAttemptedPredicate, Object: strconv.Itoa(100 + i),
+			})
+		}
+		ch := &fakeChannel{}
+		p := newTestNotePoster(ch, &fakeFetcher{entities: map[string]*graph.EntityState{runID: spent}})
+		payload, err := json.Marshal(publishEnvelope{EntityID: runID})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := p.handleUserNote(ctx, payload); err != nil {
+			t.Fatalf("handleUserNote: %v", err)
+		}
+		if len(ch.posts) != 1 || !strings.Contains(ch.posts[0].body, "used up") {
+			t.Fatalf("a fault-kind note on a spent budget must post the escape hatch, got %v", ch.posts)
+		}
+		if strings.Contains(ch.posts[0].body, "try again") {
+			t.Fatalf("the note invited a retry the full ledger will refuse: %q", ch.posts[0].body)
+		}
+	})
+
+	t.Run("non-string property must not kill the envelope", func(t *testing.T) {
+		// publishEnvelope decodes properties as map[string]any DELIBERATELY: a
+		// map[string]string would fail the whole unmarshal on any non-string
+		// property and the malformed-envelope skip would silently kill the note.
+		ch := &fakeChannel{}
+		p := newTestNotePoster(ch, &fakeFetcher{entities: entities})
+		payload := []byte(`{"entity_id":"` + runID + `","properties":{"note":42}}`)
+		if err := p.handleUserNote(ctx, payload); err != nil {
+			t.Fatalf("handleUserNote: %v", err)
+		}
+		if len(ch.posts) != 1 || !strings.Contains(ch.posts[0].body, "couldn't read that") {
+			t.Fatalf("a non-string kind must degrade to the fault body, not a skip, got %v", ch.posts)
+		}
+	})
 }
 
 // TestFaultNoteDefinitiveVsTransient: a shape semdev's own rule engine could not

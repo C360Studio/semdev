@@ -1,6 +1,6 @@
 {
   "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) — so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect. ⚠ TWO INVARIANTS, both load-bearing and both pinned by TestShippedConfigVersionsAreParseableSemver. (1) PLAIN SEMVER ONLY (MAJOR.MINOR.PATCH, digits): config.CompareVersions strconv.Atoi's each segment, so a suffixed value fails to parse, the manager treats the error as \"sync from KV\", and this file silently loses every boot. (2) THE MOCK CONFIG'S VERSION MUST STAY STRICTLY GREATER THAN THE LIVE CONFIG'S. Both files share ONE KV entry — the bucket name (\"semstreams_config\") and key (\"version\") are hardcoded globals, not platform-derived — and both declare the IDENTICAL platform identity (c360/semdev-bootstrap/development), so the framework's gh#459 cross-app detach guard cannot fire and VERSION ALONE decides which file wins. PushToKV writes model_registry, so if the live config could ever win, a subsequent mock-config boot would adopt gemini endpoints and the free ladder would spend real tokens behind a single WARN line. Keeping mock > live makes every stale-KV race resolve toward the FREE config; the live lane loads via its mandatory `task nats:reset`. A distinct platform.id for the live config is the framework's sanctioned isolation and is the stronger fix, but it changes entity-ID prefixes (the runbook's sidecar queries grep them), so it is a deliberate follow-up.",
-  "version": "0.29.1",
+  "version": "0.29.2",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -227,6 +227,7 @@
           "rules/conversation/03b-route-intent-reject.json",
           "rules/conversation/04-classifier-terminal-release.json",
           "rules/conversation/05-classifier-fault-note.json",
+          "rules/conversation/06-classifier-budget-exhausted.json",
           "rules/dev-from-task/01-anchor-run-for-dispatch.json",
           "rules/dev-from-task/02-rewake-coordinator-dev.json",
           "rules/dev-from-task/03-project-tasks.json",
@@ -311,7 +312,7 @@
               "subject": "user.note.>",
               "stream_name": "USER",
               "required": false,
-              "description": "The classifier fault-note publishes (conversation/05). Posted to the thread via the Channel port; stamps no fact. Its own subject rather than the park lane's, because run.awaiting.human is run-lifecycle/02's resume blocker and a classifier fault must not wedge a later approval. NOTE: the conversation rule pack is not yet wired into this live config (task 6.6), so this port and apply_dispatch are inert here until then."
+              "description": "The classifier fault-note publishes (conversation/05). Posted to the thread via the Channel port; stamps no fact. Its own subject rather than the park lane's, because run.awaiting.human is run-lifecycle/02's resume blocker and a classifier fault must not wedge a later approval. The conversation rule pack IS wired into this config (task 6.6a: rules_files + classify_intent in allowed_tools + the conversation model capability), so this port and apply_dispatch are live."
             },
             {
               "name": "apply_dispatch",

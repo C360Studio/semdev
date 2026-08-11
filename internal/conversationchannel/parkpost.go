@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/graph"
@@ -34,8 +35,22 @@ type parkPoster struct {
 
 // publishEnvelope is the rule engine's executePublish payload (the station
 // dispatch envelope shape — entity_id is the FIRING entity of the park rule).
+// Properties carries the rule action's substituted `properties` map — the
+// user-note lane's kind discriminator (group 8, D14): the budget-exhausted rule
+// publishes properties.note=budget-exhausted, the fault note publishes bare.
+// It decodes as map[string]any (the engine's wire type): a map[string]string
+// here would fail the WHOLE unmarshal on any future non-string property and the
+// "malformed envelope" skip would silently kill every note.
 type publishEnvelope struct {
-	EntityID string `json:"entity_id"`
+	EntityID   string         `json:"entity_id"`
+	Properties map[string]any `json:"properties"`
+}
+
+// property returns the named property's string value, or "" (absent or
+// non-string — both read as "not this kind", never an error).
+func (e publishEnvelope) property(key string) string {
+	s, _ := e.Properties[key].(string)
+	return s
 }
 
 // handleUserResponse posts the parked run's message to its thread. nil = definitive
@@ -120,6 +135,34 @@ const UserNoteSubject = "user.note.>"
 const faultNoteBody = "🤔 I couldn't read that as an approval or a rejection.\n\n" +
 	"Reply `/semdev approve` or `/semdev reject` to decide this change explicitly — or just re-word what you meant and I'll try again."
 
+// budgetNoteBody is the exhaustion escape hatch (group 8, design D14): the run's
+// classifier spend ledger is full, so re-wording will NOT trigger another paid
+// classification — unlike the fault note, this one must not invite a retry that
+// can never run. The exact commands cost zero model turns and work forever.
+const budgetNoteBody = "🧮 I've used up my classification attempts on this run, so I can't read any more messages here.\n\n" +
+	"Reply `/semdev approve` or `/semdev reject` to decide this change — the explicit commands always work."
+
+// noteBody selects the user-note body by the publish envelope's kind property
+// (D14) — the budget-exhausted rule stamps properties.note=budget-exhausted;
+// the fault note publishes bare — AND by the run's own spend ledger (8.6
+// round-2 MEDIUM-3): a classifier FAULT on the run's final attempt would
+// otherwise post "re-word what you meant and I'll try again" onto a run whose
+// budget is already spent, inviting a retry that can never classify and then
+// drawing the near-contradictory budget note seconds later. Rule 05 cannot see
+// the ledger (its conditions are loop-scoped), but this consumer already holds
+// the run entity — so a full ledger selects the escape-hatch body regardless of
+// kind. An UNKNOWN kind falls back to the fault body deliberately — a
+// wrong-but-actionable note (both name the exact commands) beats a skipped one.
+func noteBody(env publishEnvelope, run *graph.EntityState) string {
+	if env.property(conversationintent.BudgetNoteProperty) == conversationintent.BudgetNoteValue {
+		return budgetNoteBody
+	}
+	if entityTripleCount(run, conversationintent.ClassifierAttemptedPredicate) >= conversationintent.ClassifierAttemptBudget {
+		return budgetNoteBody
+	}
+	return faultNoteBody
+}
+
 // handleUserNote posts the classifier fault note to the run's thread
 // (conversation/05). It deliberately shares the park lane's resolve-and-post
 // machinery but NOT its fact: the note stamps nothing.
@@ -187,11 +230,12 @@ func (p *parkPoster) handleUserNote(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("fault-note: resolve thread for %s: %w", ref, err)
 	}
-	if err := p.channel.Post(ctx, thread, faultNoteBody); err != nil {
+	if err := p.channel.Post(ctx, thread, noteBody(env, run)); err != nil {
 		return fmt.Errorf("fault-note: post to %s: %w", ref, err)
 	}
-	p.logger.Info("fault-note: classifier fault surfaced to the human",
-		slog.String("ref", ref), slog.String("run", runEntityID))
+	p.logger.Info("fault-note: note surfaced to the human",
+		slog.String("ref", ref), slog.String("run", runEntityID),
+		slog.String("kind", env.property(conversationintent.BudgetNoteProperty)))
 	return nil
 }
 
@@ -212,6 +256,17 @@ func (p *parkPoster) resolveRun(ctx context.Context, entityID string) (string, e
 		return anchor, nil
 	}
 	return "", fmt.Errorf("firing entity %s carries no agent.run.entity-id anchor", entityID)
+}
+
+// entityTripleCount counts the exact predicate's triples on the entity.
+func entityTripleCount(e *graph.EntityState, predicate string) int {
+	n := 0
+	for _, tr := range e.Triples {
+		if tr.Predicate == predicate {
+			n++
+		}
+	}
+	return n
 }
 
 // entityTriple returns the first string object of the exact predicate.

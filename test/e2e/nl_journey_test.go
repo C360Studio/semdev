@@ -219,28 +219,22 @@ func TestConservativeNoneDoesNotApprove(t *testing.T) {
 	t.Logf("NL conservative case: %q classified `none` — run still gated, zero gate facts, nothing posted", nlChatterMessage)
 }
 
-// TestConflictingIntentsResolveToOneTerminal (task 6.4) — two authorized messages
-// with OPPOSITE intent, arriving in SEPARATE poll ticks so BOTH are classified.
+// TestLateIntentAfterGateClosesIsIgnored — the RENAMED former conflict journey
+// (group 8, D15): what it actually proves is that a message arriving AFTER the
+// gate closed is dropped by the bridge's phase gate, spending ZERO model turns
+// and never touching the decided gate. An approval is irreversible once landed
+// (architect H1); the later rejection must NOT cancel the approved, executing
+// run.
 //
-// The sequencing is the whole point (grp6-review H1). An earlier version posted
-// both back-to-back, which lands them in one Read: the second overwrites the
-// latest-wins pending slot, classify_intent refuses to misattribute, and NO gate
-// fact ever lands. That version's "never both" assertions were satisfied by
-// 0+0 and exercised none of the guards they named. Waiting for the first decision
-// to land before posting the second is what actually drives two classifications
-// through the lane and puts the second one against a CLOSED gate.
-//
-// What this pins: the run ends with EXACTLY ONE gate fact and one terminal. Three
-// guards make that true and all three are reached here — the routing rules
-// dispatch only while both gate facts are absent (H4a), the apply consumer
-// re-checks the gate is still open before stamping, and the NL bridge is
-// phase-gated so a message arriving after the run leaves awaiting_approval is not
-// classified at all. An approval is irreversible once landed (architect H1); the
-// later rejection must NOT cancel the approved, executing run.
-func TestConflictingIntentsResolveToOneTerminal(t *testing.T) {
+// The mock carries ONE fixture on purpose (the old version's reject fixture was
+// DEAD — the phase gate discarded the message before any classifier could
+// consume it, and nothing noticed). If a second classifier ever DOES spawn for
+// the late message, the attempted-ledger assertion goes red — the classification
+// ledgers are the deterministic pin here; a model-turn total after the release
+// would race the dev-rewake decide.
+func TestLateIntentAfterGateClosesIsIgnored(t *testing.T) {
 	mock := mockllm.New(nlFixtures(t,
 		classifyFixture(nlApproveMessage, conversationintent.Approve, `the author wrote "ship it"`),
-		classifyFixture(nlRejectMessage, conversationintent.Reject, `a later message said "abandon the change"`),
 	)...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
@@ -267,7 +261,112 @@ func TestConflictingIntentsResolveToOneTerminal(t *testing.T) {
 	if phase := runPhase(ctx, t, runEntityID); phase == "cancelled" {
 		t.Fatalf("a rejection arriving AFTER the approval landed cancelled the run — an approval is irreversible once landed (architect H1), and the reject rule is phase-guarded to awaiting_approval precisely so approved, executing work is never killed")
 	}
-	t.Logf("NL conflict case: approve applied, later reject refused — decision=%q (one fact), run not cancelled", runDecision(ctx, t, runEntityID))
+	// The late message spent NOTHING: one classification, one budget slot. The
+	// bridge's phase gate dropped it BEFORE the classifier lane — if a second
+	// classifier had spawned, attempted would read 2 (and the mock would have
+	// fallen through to its empty-args heuristic, a fault note).
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.IntentClassifiedPredicate, 1, 30*time.Second)
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.ClassifierAttemptedPredicate, 1, 30*time.Second)
+	// Teardown hygiene (grp6-review M7): the approved run is provisioning.
+	requireTaskSpecProjected(ctx, t, runEntityID)
+	requireSandboxReady(ctx, t, runEntityID)
+	t.Logf("NL late-intent case: approve applied, later reject dropped at the phase gate — decision=%q (one fact), one classification total", runDecision(ctx, t, runEntityID))
+}
+
+// TestConflictingIntentsResolveToOneTerminal (task 6.4, REWORKED — group 8,
+// D15): two authorized messages with OPPOSITE intent, BOTH classified against a
+// still-OPEN gate, resolving to EXACTLY ONE durable decision and its matching
+// terminal.
+//
+// The barrier is the whole point. The old version waited for the run to reach
+// executing before posting the second message, so the phase gate discarded it —
+// ONE classification, a dead second fixture, and no assertion noticing (6.4 was
+// ticked against a contract the test did not meet). The apply consumer POSTS its
+// transparency comment BEFORE it stamps (D6/M6), which is a precise,
+// deterministic place to hold the FIRST decision open: the forge double blocks
+// in create_comment, the second opposite message bridges + classifies against a
+// gate that is still undecided, and only then is the Post released.
+//
+// The winner is deliberately NOT asserted by value: whichever dispatch stamps
+// first wins (first-writer-wins, D13) and the loser is refused by the
+// gate-still-open guard — under every interleaving the run must end with ONE
+// decision and the terminal that matches it. What IS asserted exactly: both
+// message ids classified (both fixtures consumed, model turns counted), zero
+// decisions while the Post is held (post-before-stamp, D6/M6), one decision
+// after release, matching terminal, and still exactly one after a settle.
+//
+// The held window can exceed the posting client's fixed 10s HTTP timeout (a
+// poll tick alone is 5s), so the barrier explicitly SURVIVES a client abort:
+// an aborted held request re-arms the hold and applies nothing, making the
+// consumer's in-process retry block too, until release (8.6 round-2 HIGH —
+// a one-shot hold consumed at arrival let the retry stamp the decision while
+// this test still believed the gate was held, a coin-flip flake whose failure
+// message indicted a product violation that did not happen).
+func TestConflictingIntentsResolveToOneTerminal(t *testing.T) {
+	mock := mockllm.New(nlFixtures(t,
+		classifyFixture(nlApproveMessage, conversationintent.Approve, `the author wrote "ship it"`),
+		classifyFixture(nlRejectMessage, conversationintent.Reject, `a later message said "abandon the change"`),
+	)...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	double, runEntityID := startNLJourney(ctx, t, mock)
+
+	// Arm the barrier BEFORE any message: the next bot create_comment (the apply
+	// consumer's transparency post for the first classification) blocks until
+	// released, holding the first decision open.
+	release := double.HoldNextCreateComment()
+	defer release()
+
+	// Message one: an NL approval. Its classification lands and its route
+	// dispatches the apply consumer, which blocks in the held Post. Waiting for
+	// classified==1 AND marker==0 (the terminal release re-armed the lane) keeps
+	// message two out of the flight window (the HIGH-1 slot-moved fault).
+	double.AddComment(1, webhookJourneyActor, nlApproveMessage)
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.IntentClassifiedPredicate, 1, 90*time.Second)
+	requireTripleClears(ctx, t, runEntityID, conversationintent.ClassifierDispatchedPredicate, 90*time.Second)
+
+	// Message two: the OPPOSITE intent, against a still-UNDECIDED gate — the
+	// exact contract the old journey never met.
+	double.AddComment(1, webhookJourneyActor, nlRejectMessage)
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.IntentClassifiedPredicate, 2, 90*time.Second)
+	requireModelTurns(t, mock, 5, "2 coordinator decides + create_change + TWO classifiers — both fixtures consumed against an open gate (the dead-fixture shape D15 exists to kill)")
+
+	// Post-before-stamp (D6/M6): while the transparency Post is held, NO
+	// decision may land.
+	if n := decisionCount(ctx, t, runEntityID); n != 0 {
+		t.Fatalf("%d decision fact(s) landed while the transparency Post was held — the consumer stamped before it announced, which breaks the D8 guard-4 visibility contract", n)
+	}
+
+	release()
+
+	// One decision stands, and the run reaches ITS terminal.
+	requireRunTripleCount(ctx, t, runEntityID, admission.DecisionPredicate, 1, 90*time.Second)
+	decision := runDecision(ctx, t, runEntityID)
+	wantPhase := map[string]string{
+		admission.DecisionApprove: "executing",
+		admission.DecisionReject:  "cancelled",
+	}[decision]
+	if wantPhase == "" {
+		t.Fatalf("decision = %q, off the {approve,reject} enum — the D13 single-valued fact carries an illegal value", decision)
+	}
+	requireRunPhase(ctx, t, runEntityID, wantPhase)
+
+	// And STILL exactly one after a settle: the losing dispatch must have been
+	// refused by the gate-still-open guard, not delayed.
+	time.Sleep(15 * time.Second)
+	if n := decisionCount(ctx, t, runEntityID); n != 1 {
+		t.Fatalf("run carries %d decision facts after settle, want exactly 1 — the losing dispatch was not refused (first-writer-wins, D13)", n)
+	}
+	if got := runDecision(ctx, t, runEntityID); got != decision {
+		t.Fatalf("decision changed from %q to %q after the terminal — a decided gate must be immutable", decision, got)
+	}
+	// Teardown hygiene (grp6-review M7): an approve winner is provisioning.
+	if wantPhase == "executing" {
+		requireTaskSpecProjected(ctx, t, runEntityID)
+		requireSandboxReady(ctx, t, runEntityID)
+	}
+	t.Logf("NL conflict case: both intents classified against the open gate; decision=%q won, run reached %s, loser refused", decision, wantPhase)
 }
 
 // TestClassifierBindingFaultTellsTheHuman (task 6.4, the one-tick case) — the
@@ -526,4 +625,126 @@ func runDecision(ctx context.Context, t *testing.T, runEntityID string) string {
 // is single-valued, so anything but 0 or 1 is itself the defect.
 func decisionCount(ctx context.Context, t *testing.T, runEntityID string) int {
 	return runTripleCount(ctx, t, runEntityID, admission.DecisionPredicate)
+}
+
+// requireCommentPosted waits for ANY thread comment containing want — the
+// neutral form of requireTransparencyPosted, for notes the PARKPOST consumer
+// posts (budget/fault): that helper's failure text indicts the apply consumer
+// and claims "the gate moved", both wrong for this lane (8.6 round-2 go-LOW-2).
+func requireCommentPosted(t *testing.T, d *forgetest.Double, want, why string) {
+	t.Helper()
+	requireEventually(t, 30*time.Second, func() bool {
+		for _, c := range d.Comments() {
+			if strings.Contains(c.Body, want) {
+				return true
+			}
+		}
+		return false
+	}, "no thread comment containing "+want+" was posted — "+why)
+}
+
+// requireTripleClears waits for a predicate to LEAVE the run — the
+// marker-release shape requireRunTripleCount cannot wait for (it fails fast on
+// count > want, which is the right posture for monotonic ledgers but wrong for
+// a marker that goes 1 → 0 on the terminal release).
+func requireTripleClears(ctx context.Context, t *testing.T, runEntityID, predicate string, within time.Duration) {
+	t.Helper()
+	client := connectFrontDoor(ctx, t)
+	defer func() { _ = client.Close(context.Background()) }()
+	requireEventually(t, within, func() bool {
+		return countTriples(ctx, client, runEntityID, predicate) == 0
+	}, predicate+" never cleared off the run — the classifier terminal-release rule did not fire (or fired without its remove), so the lane never re-armed for the next message")
+}
+
+// budgetNoteMarker is a distinctive slice of the exhaustion escape hatch's body
+// (internal/conversationchannel/parkpost.go budgetNoteBody) — the same
+// phrase-not-whole-body posture as faultNoteMarker.
+const budgetNoteMarker = "used up my classification attempts"
+
+// TestClassifierBudgetCapsSpend (group 8, design D14): the spend ledger caps a
+// run's gate at N=3 paid classifier turns — the fire-once marker SERIALIZES
+// spawns, the ledger BOUNDS them. N+2 authorized messages produce EXACTLY N
+// classifier dispatches, the escape hatch posts exactly once, and the exact
+// command still releases the gate at zero model turns after the budget is
+// spent. Without the bound, every one of these messages would have been a paid
+// Gemini loop with no ceiling — reachable by ordinary conversation on a live
+// thread.
+func TestClassifierBudgetCapsSpend(t *testing.T) {
+	chatter := []string{
+		"hmm, let me think about whether this is the right approach.",
+		"still mulling this over, the scope feels large.",
+		"one more read through the diff before I decide.",
+	}
+	if len(chatter) != conversationintent.ClassifierAttemptBudget {
+		t.Fatalf("journey drift: %d chatter messages for a budget of %d — the spend loop below must post exactly N", len(chatter), conversationintent.ClassifierAttemptBudget)
+	}
+	mock := mockllm.New(nlFixtures(t,
+		classifyFixture(chatter[0], conversationintent.None, "thinking aloud, no directive"),
+		classifyFixture(chatter[1], conversationintent.None, "thinking aloud, no directive"),
+		classifyFixture(chatter[2], conversationintent.None, "thinking aloud, no directive"),
+	)...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	double, runEntityID := startNLJourney(ctx, t, mock)
+
+	// Station 2 — spend the whole budget: each DISTINCT authorized message
+	// classifies (conservative none, so the gate stays open) and consumes one
+	// slot. The three waits per message are the deterministic points the grp6
+	// lesson requires: attempted proves the spawn appended, classified proves
+	// the classification landed, marker-clear proves the terminal release
+	// re-armed the lane — so the next message can never race the flight window
+	// (the HIGH-1 slot-moved fault) and every turn is accounted.
+	for i, msg := range chatter {
+		double.AddComment(1, webhookJourneyActor, msg)
+		requireRunTripleCount(ctx, t, runEntityID, conversationintent.ClassifierAttemptedPredicate, i+1, 90*time.Second)
+		requireRunTripleCount(ctx, t, runEntityID, conversationintent.IntentClassifiedPredicate, i+1, 90*time.Second)
+		requireTripleClears(ctx, t, runEntityID, conversationintent.ClassifierDispatchedPredicate, 90*time.Second)
+	}
+	requireModelTurns(t, mock, 6, "2 coordinator decides + create_change + THREE classifiers — the budget's whole allowance, every turn accounted before the refusals start")
+
+	// Station 3 — message N+1: the spawn guard refuses (ledger full, nothing in
+	// flight) and the refusal is ANNOUNCED once via the escape hatch. Silence
+	// here would be the D9 dead-end: a budget-refused message and an ignored
+	// one look identical from the human's side.
+	double.AddComment(1, webhookJourneyActor, "ok here's yet another thought on this.")
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.BudgetNotedPredicate, 1, 90*time.Second)
+	requireCommentPosted(t, double, budgetNoteMarker,
+		"the budget-exhausted escape hatch never reached the thread — the parkpost consumer's note lane (rule 06 → user.note.> → handleUserNote) is broken, and a budget-refused message is indistinguishable from being ignored")
+	t.Logf("budget station 3: message %d refused by the spend bound; the escape hatch posted", len(chatter)+1)
+
+	// Message N+2: refused SILENTLY — the note marker already consumed the
+	// announcement and its content has not changed.
+	double.AddComment(1, webhookJourneyActor, "and a final musing before I decide.")
+
+	// Station 4 — the deterministic escape hatch works FOREVER, at zero model
+	// turns: the exact command releases the gate exactly as it would have on
+	// message one.
+	double.AddComment(1, webhookJourneyActor, "/semdev approve")
+	requireRunPhase(ctx, t, runEntityID, "executing")
+	requireDecision(ctx, t, runEntityID, admission.DecisionApprove,
+		"the exact command must release the gate after the budget is spent — the escape hatch's whole promise; check releaseGate's phase gate and the watermark before the spend rules")
+
+	// End-state counts are deterministic HERE (grp6 lesson): the spawn rule and
+	// the note rule both require phase=awaiting_approval AND decision-absent,
+	// so neither the spend ledger nor the note count can move once the run is
+	// executing. attempted==N is the non-racy paid-turn proof (a model-turn
+	// total here would race the dev-rewake decide).
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.ClassifierAttemptedPredicate, len(chatter), 30*time.Second)
+	requireRunTripleCount(ctx, t, runEntityID, conversationintent.BudgetNotedPredicate, 1, 30*time.Second)
+	notes := 0
+	for _, c := range double.Comments() {
+		if strings.Contains(c.Body, budgetNoteMarker) {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("the escape hatch must post EXACTLY once per run, got %d — a marker miss re-posts on every refused message (the grp6 replay class)", notes)
+	}
+	// Wait for the released run to reach its sandbox before teardown (the
+	// grp6-review M7 posture the happy journey set): tearing down mid-provision
+	// leaves in-flight docker work behind.
+	requireTaskSpecProjected(ctx, t, runEntityID)
+	requireSandboxReady(ctx, t, runEntityID)
+	t.Logf("budget station 4: exact command released the gate; spend capped at %d classifier turns, note posted once", len(chatter))
 }

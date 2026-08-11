@@ -67,6 +67,44 @@ const ClassifierSource = "conversation-classifier"
 // the marker, and the fallback-note lane surfaces the miss to the human.
 const ClassifierDispatchedPredicate = "conversation.classifier.dispatched"
 
+// ClassifierAttemptedPredicate is the run's APPEND-SET classifier spend ledger
+// (writer conversation-spawn-rule, a rule add_triple — group 8, design D14): the
+// spawn rule appends the dispatched message id in the same action set that arms
+// the fire-once marker, and guards on `length_lte ClassifierAttemptBudget-1`.
+// Counting on the SPAWN side makes the bound honest — a faulted, truncated,
+// refused, or cap-exhausted classification consumes budget exactly like a
+// successful one. The terminal-release rule clears the pending slot and the
+// marker but NEVER this ledger: it is the run's durable spend record. The marker
+// SERIALIZES spawns (one at a time); this ledger BOUNDS them.
+const ClassifierAttemptedPredicate = "conversation.classifier.attempted"
+
+// ClassifierAttemptBudget is N: the maximum paid classifier turns one run's gate
+// may spend (D14) — enough for a human to rephrase twice, small enough that a
+// runaway thread costs three short loops. The rule condition carries N-1
+// (length_lte is evaluated BEFORE the appending fire), so the conformance pin
+// derives the rule value from this constant.
+const ClassifierAttemptBudget = 3
+
+// BudgetNotedPredicate is the exhaustion note's once-per-run self-extinguishing
+// marker (writer conversation-budget-rule — group 8, design D14): stamped by the
+// budget-exhausted rule BEFORE it publishes the user.note escape hatch, so the
+// note posts exactly once per run and never re-posts on a RULE_STATE replay (the
+// grp6 lesson: a human-visible post with no marker re-posts on state loss). Its
+// object is the pending message id that tripped exhaustion — forensics, not
+// mechanism.
+const BudgetNotedPredicate = "conversation.budget.noted"
+
+// BudgetNoteProperty / BudgetNoteValue discriminate the exhaustion note from the
+// classifier fault note on the SHARED user.note.> lane: the budget rule's publish
+// carries properties.note = "budget-exhausted" (the rule engine's publish payload
+// carries substituted action properties), and the note consumer selects the body
+// by it. The fault note publishes bare and keeps the default body — no graph-state
+// inference, no subject split.
+const (
+	BudgetNoteProperty = "note"
+	BudgetNoteValue    = "budget-exhausted"
+)
+
 // ClassifierRecordedPredicate is stamped by classify_intent on ITS OWN LOOP
 // entity (not the run) when a classification actually lands; its object is the
 // classified message id. The fault-note rule (conversation/05) fires on the LOOP

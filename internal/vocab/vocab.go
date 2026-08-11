@@ -322,6 +322,21 @@ var Predicates = []Predicate{
 	// closed) — the writer is the rule subsystem label (rules carry the engine Source; the
 	// sanctioned-rule census keeps the realization honest, like route.attempt.routed).
 	{"conversation.classifier.dispatched", "conversation-spawn-rule", "conversation-channel", nlIntent},
+	// conversation.classifier.attempted is the run's APPEND-SET classifier spend
+	// ledger (group 8, design D14): the spawn rule appends the dispatched message id
+	// in the same on_enter that arms the marker, and guards on length_lte N-1 — the
+	// marker SERIALIZES spawns, this ledger BOUNDS them at N=3 paid turns per run's
+	// gate. Counting on the spawn side makes faulted/refused/truncated attempts
+	// consume budget like successful ones. The terminal-release rule clears pending
+	// + marker but NEVER this ledger (the durable spend record). Writer: the spawn
+	// rule (same Source as the marker — one rule, one action set).
+	{"conversation.classifier.attempted", "conversation-spawn-rule", "conversation-channel", nlIntent},
+	// conversation.budget.noted is the exhaustion note's once-per-run
+	// self-extinguishing marker (group 8, D14): 06-classifier-budget-exhausted
+	// stamps it BEFORE publishing the user.note escape hatch, so the note posts
+	// exactly once and never re-posts on RULE_STATE replay (the grp6 lesson). Its
+	// object is the pending message id that tripped exhaustion — forensics.
+	{"conversation.budget.noted", "conversation-budget-rule", "conversation-channel", nlIntent},
 	// conversation.classifier.recorded is stamped by classify_intent on ITS OWN LOOP
 	// entity (the submit_review route-mirror shape) when a classification actually
 	// lands, carrying the classified message id. It exists because the fault-note

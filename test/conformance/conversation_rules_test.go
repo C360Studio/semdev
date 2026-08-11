@@ -43,9 +43,18 @@ const (
 	approveRouteID = "conversation_route_intent_approve"
 	rejectRouteID  = "conversation_route_intent_reject"
 	releaseRuleID  = "conversation_classifier_terminal_release"
+	budgetRuleID   = "conversation_classifier_budget_exhausted"
 
 	applySubject    = "component.conversation-apply.dispatch"
 	runSubjectToken = "$entity.triple.agent.run.entity-id"
+)
+
+// The spend ledger + budget marker (group 8, design D14) — domain constants so
+// the rules, the consumer, and these pins share one source of truth.
+const (
+	attemptedLedger   = conversationintent.ClassifierAttemptedPredicate
+	budgetNotedMarker = conversationintent.BudgetNotedPredicate
+	attemptBudget     = conversationintent.ClassifierAttemptBudget
 )
 
 // classifierMarker is the spawn rule's fire-once marker — the domain package's
@@ -68,6 +77,7 @@ var conversationRuleFiles = []string{
 	"rules/conversation/03b-route-intent-reject.json",
 	"rules/conversation/04-classifier-terminal-release.json",
 	"rules/conversation/05-classifier-fault-note.json",
+	"rules/conversation/06-classifier-budget-exhausted.json",
 }
 
 // conversationPackRules returns the parsed rules under configs/rules/conversation/.
@@ -228,6 +238,55 @@ func TestClassifierSpawnRuleContract(t *testing.T) {
 	if !spawn.hasAbsenceGuard("run.change.decision") {
 		t.Error("spawn must require the gate UNDECIDED (run.change.decision length_eq 0) — a decided run's classification is a guaranteed-dead paid turn")
 	}
+	// Spend bound (group 8, design D14): the fire-once marker SERIALIZES spawns —
+	// one at a time — which is not BOUNDED. Without this guard, N distinct
+	// authorized messages on one gated run = N paid classifier loops with no
+	// ceiling. The guard carries N-1 because length_lte is evaluated BEFORE this
+	// fire appends its own id to the ledger.
+	if c, ok := spawn.condition(attemptedLedger); !ok || c.Operator != "length_lte" || !floatEq(c.Value, attemptBudget-1) {
+		t.Errorf("spawn must carry the spend bound (%s length_lte %d — N=%d paid turns per run's gate, D14; the marker serializes, it does not bound), got %+v",
+			attemptedLedger, attemptBudget-1, attemptBudget, c)
+	}
+	// The spend is counted on the SPAWN side — appended in the same action set
+	// that arms the marker — so a faulted, truncated, refused, or cap-exhausted
+	// classification consumes budget exactly like a successful one.
+	//
+	// ORDER IS TRIPLY LOAD-BEARING (8.6 round-2 semstreams BLOCKING-1): each
+	// action is its OWN KV revision, every revision is evaluated individually
+	// (no debounce), and the feedback skip suppresses only the WRITING rule. So
+	// the MARKER must precede the LEDGER APPEND: ledger-first exposes an
+	// intermediate revision on the run's FINAL allowed spawn — attempted full,
+	// marker not yet stamped, pending present, gate undecided — which is rule
+	// 06's ENTIRE condition set, and the exhaustion note fires DURING the last
+	// classification (then its once-marker is spent, so the genuinely refused
+	// next message gets silence). Marker-first keeps every intermediate revision
+	// marker-present, which blocks 06. And BOTH adds precede the publish: under
+	// best-effort action continuation, publish-last is the only thing standing
+	// between a failed add and a free (uncounted) paid turn.
+	markerActIdx, ledgerIdx, publishIdx := -1, -1, -1
+	for i, a := range spawn.OnEnter {
+		if a.Type == "add_triple" && a.Predicate == classifierMarker && markerActIdx == -1 {
+			markerActIdx = i
+		}
+		if a.Type == "add_triple" && a.Predicate == attemptedLedger {
+			ledgerIdx = i
+			if a.Subject != "$entity.id" || a.Object != "$entity.triple.conversation.pending.message-id" {
+				t.Errorf("spawn must append the DISPATCHED message id onto the run's %s ledger (subject=$entity.id object=$entity.triple.conversation.pending.message-id), got subject=%q object=%q",
+					attemptedLedger, a.Subject, a.Object)
+			}
+		}
+		if a.Type == "publish_agent" && publishIdx == -1 {
+			publishIdx = i
+		}
+	}
+	switch {
+	case ledgerIdx == -1:
+		t.Errorf("spawn must add_triple the dispatched message id onto %s — an unappended spawn is an unbounded paid turn (D14)", attemptedLedger)
+	case markerActIdx != -1 && markerActIdx > ledgerIdx:
+		t.Errorf("spawn must stamp the %s marker BEFORE appending to %s — ledger-first exposes the intermediate revision (ledger full, marker absent) that fires the budget-exhausted note DURING the run's final classification (8.6 BLOCKING-1)", classifierMarker, attemptedLedger)
+	case publishIdx != -1 && ledgerIdx > publishIdx:
+		t.Errorf("spawn must append to %s BEFORE the publish — best-effort action execution means a publish-then-append order can spawn without consuming budget", attemptedLedger)
+	}
 	// Firing-cap opt-out (grp4-review H1): the engine's default per-action cap
 	// (3 per rule+entity, RULE_STATE-persisted) would silently skip the marker
 	// stamp AND the spawn on the run's 4th authorized message — pending stamped,
@@ -371,13 +430,83 @@ func TestClassifierTerminalReleaseContract(t *testing.T) {
 	markerIdx := idx(classifierMarker)
 	idIdx := idx(conversationintent.PendingMessageIDPredicate)
 	if markerIdx != -1 && idIdx != -1 && markerIdx < idIdx {
-		t.Error("release must remove conversation.pending.message-id BEFORE the marker — marker-first exposes an intermediate revision (pending id present, marker absent) that re-spawns a classifier for the already-classified message")
+		t.Error("release must remove conversation.pending.message-id BEFORE the marker — marker-first exposes an intermediate revision (pending id present, marker absent) with TWO consequences: it is the spawn trigger (a duplicate paid turn for the already-classified message), and once the spend ledger is full it is ALSO the budget-exhausted rule's full condition set (the note would fire at the Nth RELEASE, one message early, spending its once-marker on a classified message — 8.6 round-2)")
 	}
 	for _, pred := range []string{conversationintent.PendingAuthorPredicate, conversationintent.PendingBodyPredicate} {
 		if p := idx(pred); p != -1 && idIdx != -1 && p > idIdx {
 			t.Errorf("release must remove %s BEFORE conversation.pending.message-id — id-first tears a concurrent bridge write into an id-present/author-absent slot that spawns a fault-only classifier", pred)
 		}
 	}
+	// The spend ledger SURVIVES the release (group 8, D14): clearing it would
+	// reset the budget every classification and the bound would bound nothing.
+	if release.removesPredicateOn(runSubjectToken, attemptedLedger) {
+		t.Errorf("release must NEVER remove %s — the ledger is the run's durable spend record; clearing it on release resets the budget to zero every turn (D14)", attemptedLedger)
+	}
+}
+
+// 06 budget-exhausted: the ledger is full, the gate is still undecided, a NEW
+// pending message sits unclassifiable (no classifier in flight — the marker is
+// absent, so this is a REFUSED message, not one being classified) → post the
+// deterministic exact-command escape hatch on the user.note.> lane, ONCE per run
+// (group 8, design D14). Exhaustion must be ANNOUNCED: from the human's side, a
+// budget-refused message and a semdev that ignored them look identical.
+func TestClassifierBudgetExhaustedContract(t *testing.T) {
+	rules := runLifecycleRules(t)
+	budget, ok := rules[budgetRuleID]
+	if !ok {
+		t.Fatalf("missing %s rule", budgetRuleID)
+	}
+	if c, ok := budget.condition("agent.run.phase"); !ok || c.Operator != "eq" || c.Value != "awaiting_approval" {
+		t.Errorf("budget note must be phase-gated to awaiting_approval (the budget scopes the approval gate), got %+v", c)
+	}
+	if c, ok := budget.condition(conversationintent.PendingMessageIDPredicate); !ok || c.Operator != "ne" || c.Value != "" {
+		t.Errorf("budget note must require a pending message (ne \"\") — exhaustion with nothing refused is not an event, got %+v", c)
+	}
+	if c, ok := budget.condition(attemptedLedger); !ok || c.Operator != "length_gte" || !floatEq(c.Value, attemptBudget) {
+		t.Errorf("budget note must require the ledger FULL (%s length_gte %d), got %+v", attemptedLedger, attemptBudget, c)
+	}
+	if !budget.hasAbsenceGuard(classifierMarker) {
+		t.Errorf("budget note must require NO classifier in flight (%s length_eq 0) — while attempt N is mid-flight the ledger already reads full, and the note would fire against a message that is being classified, not refused", classifierMarker)
+	}
+	if !budget.hasAbsenceGuard("run.change.decision") {
+		t.Error("budget note must require the gate UNDECIDED (run.change.decision length_eq 0) — a decided run needs no escape hatch")
+	}
+	if !budget.hasAbsenceGuard(budgetNotedMarker) || !budget.hasTriple(budgetNotedMarker) {
+		t.Errorf("budget note must be once-per-run: %s length_eq 0 guard + add_triple — a human-visible post with no self-extinguish marker re-posts on RULE_STATE loss (the grp6 replay lesson)", budgetNotedMarker)
+	}
+	// Marker BEFORE publish, same replay rationale as the spawn marker.
+	markerIdx, publishIdx := -1, -1
+	for i, a := range budget.OnEnter {
+		if a.Type == "add_triple" && a.Predicate == budgetNotedMarker && markerIdx == -1 {
+			markerIdx = i
+		}
+		if a.Type == "publish" && publishIdx == -1 {
+			publishIdx = i
+			if !strings.HasPrefix(a.Subject, "user.note.") {
+				t.Errorf("budget note must publish on the user.note.> lane (a note is a message, not a lifecycle event — the park lane would WEDGE the gated run), got subject %q", a.Subject)
+			}
+			if a.Properties[conversationintent.BudgetNoteProperty] != conversationintent.BudgetNoteValue {
+				t.Errorf("budget note publish must carry properties.%s=%q — the note consumer selects the escape-hatch body by it (the fault note publishes bare), got %v",
+					conversationintent.BudgetNoteProperty, conversationintent.BudgetNoteValue, a.Properties)
+			}
+		}
+	}
+	if markerIdx == -1 || publishIdx == -1 || markerIdx > publishIdx {
+		t.Errorf("budget note must stamp %s BEFORE its publish (marker=%d publish=%d) — publish-first re-posts on replay", budgetNotedMarker, markerIdx, publishIdx)
+	}
+	// The rule stamps NOTHING else and fires no transition (G2): the escape
+	// hatch leaves the gate exactly as open as it was.
+	for _, a := range budget.OnEnter {
+		if a.Type == "add_triple" && a.Predicate != budgetNotedMarker {
+			t.Errorf("budget note stamps unexpected predicate %q — the note changes nothing but its own once-marker", a.Predicate)
+		}
+	}
+}
+
+// floatEq compares a JSON-decoded condition value (float64) to an int.
+func floatEq(v any, want int) bool {
+	f, ok := v.(float64)
+	return ok && f == float64(want)
 }
 
 // The routing-rule arm of the conversation-intent drift census (grp1 task 1.3,

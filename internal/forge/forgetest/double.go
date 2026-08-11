@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Request is one recorded call.
@@ -50,11 +51,19 @@ type PR struct {
 // Comment is a recorded issue comment. ID + Author are carried so the poll
 // transport (pull-first-transport) can Read them back via ListComments — a park
 // post leaves Author empty (the bot posts), an AddComment sets the human author.
+//
+// CreatedAt is stamped at append time and is LOAD-BEARING since the D12a
+// gate-open watermark (nl-conversation-intent 8.1a): both inbound paths drop a
+// message at-or-before the moment the gate opened. The double originally served
+// a hardcoded constant here — protocol-faithful when created_at was decorative —
+// which made every journey comment read as historical and silently killed the
+// whole approval lane in every journey (the six-red-journeys class).
 type Comment struct {
 	ID          int64
 	IssueNumber int
 	Author      string
 	Body        string
+	CreatedAt   time.Time
 }
 
 // Double is the recording forge.
@@ -70,6 +79,36 @@ type Double struct {
 	// Permissions maps actor login → permission level for the permission
 	// endpoint ("" → 404/none). Set before use; read under the lock.
 	Permissions map[string]string
+
+	// commentHold, when non-nil, blocks the NEXT create_comment until closed —
+	// armed by HoldNextCreateComment, consumed one-shot. See that method's doc.
+	commentHold chan struct{}
+}
+
+// HoldNextCreateComment arms a barrier: the next create_comment request blocks
+// (after route() records it, before it is applied or replied to) until the
+// returned release func is called; every later create_comment passes normally.
+// The apply consumer POSTS its transparency comment BEFORE it stamps the gate
+// decision (nl-conversation-intent D6/M6), so this hold keeps the first
+// decision OPEN at a precise, deterministic point while a second opposite
+// message classifies — the D15 conflict-journey barrier. release is idempotent.
+//
+// The hold SURVIVES a client abort (8.6 round-2, both reviewers' HIGH): the
+// posting client carries a fixed 10s HTTP timeout, and the apply consumer
+// retries a failed Post in-process — so a naive one-shot hold, consumed at
+// arrival, would let the RETRY sail through and stamp the decision while the
+// journey still believes the gate is held (a coin-flip flake whose failure
+// message indicts a product violation that did not happen). Instead an aborted
+// held request RE-ARMS the hold and appends nothing: the barrier persists
+// across timeout/retry cycles until release() closes the channel, after which
+// the next attempt passes and applies exactly once.
+func (d *Double) HoldNextCreateComment() (release func()) {
+	ch := make(chan struct{})
+	d.mu.Lock()
+	d.commentHold = ch
+	d.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
 }
 
 // AddComment seeds a comment ON an issue thread — a human's comment the poll
@@ -80,7 +119,7 @@ func (d *Double) AddComment(issueNumber int, author, body string) int64 {
 	defer d.mu.Unlock()
 	d.nextComment++
 	id := d.nextComment
-	d.comments = append(d.comments, Comment{ID: id, IssueNumber: issueNumber, Author: author, Body: body})
+	d.comments = append(d.comments, Comment{ID: id, IssueNumber: issueNumber, Author: author, Body: body, CreatedAt: time.Now().UTC()})
 	return id
 }
 
@@ -201,6 +240,27 @@ func (d *Double) handleCreatePR(w http.ResponseWriter, r *http.Request, body map
 }
 
 func (d *Double) handleCreateComment(w http.ResponseWriter, r *http.Request, body map[string]any) {
+	// The hold is taken OUTSIDE the lock: blocking under d.mu would deadlock
+	// every other endpoint (the poller's list_comments above all). A client
+	// abort (the poster's 10s HTTP timeout) re-arms the hold and applies
+	// nothing, so the consumer's retry blocks too — the barrier holds until
+	// release() closes the channel (see HoldNextCreateComment).
+	d.mu.Lock()
+	hold := d.commentHold
+	d.commentHold = nil
+	d.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+			d.mu.Lock()
+			if d.commentHold == nil {
+				d.commentHold = hold
+			}
+			d.mu.Unlock()
+			return
+		}
+	}
 	m := commentsRe.FindStringSubmatch(r.URL.Path)
 	var number int
 	_, _ = fmt.Sscanf(m[3], "%d", &number)
@@ -208,7 +268,7 @@ func (d *Double) handleCreateComment(w http.ResponseWriter, r *http.Request, bod
 	defer d.mu.Unlock()
 	d.nextComment++
 	id := d.nextComment
-	d.comments = append(d.comments, Comment{ID: id, IssueNumber: number, Body: str(body["body"])})
+	d.comments = append(d.comments, Comment{ID: id, IssueNumber: number, Body: str(body["body"]), CreatedAt: time.Now().UTC()})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
@@ -240,7 +300,7 @@ func (d *Double) handleListComments(w http.ResponseWriter, r *http.Request) {
 		out = append(out, item{
 			ID:        c.ID,
 			Body:      c.Body,
-			CreatedAt: "2026-07-20T12:00:00Z",
+			CreatedAt: c.CreatedAt.Format(time.RFC3339Nano),
 			HTMLURL:   fmt.Sprintf("%s/issues/%d#comment-%d", d.server.URL, number, c.ID),
 			User:      userT{Login: c.Author},
 		})

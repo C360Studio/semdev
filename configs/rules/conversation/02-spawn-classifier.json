@@ -37,6 +37,12 @@
       "operator": "length_eq",
       "value": 0,
       "required": true
+    },
+    {
+      "field": "conversation.classifier.attempted",
+      "operator": "length_lte",
+      "value": 2,
+      "required": true
     }
   ],
   "logic": "and",
@@ -46,6 +52,13 @@
       "max_iterations": 0,
       "subject": "$entity.id",
       "predicate": "conversation.classifier.dispatched",
+      "object": "$entity.triple.conversation.pending.message-id"
+    },
+    {
+      "type": "add_triple",
+      "max_iterations": 0,
+      "subject": "$entity.id",
+      "predicate": "conversation.classifier.attempted",
       "object": "$entity.triple.conversation.pending.message-id"
     },
     {
@@ -74,6 +87,6 @@
     "restart_safe": "marker stamped before the (non-idempotent) publish. HONEST LIMITS (grp4-review M3/M4): the engine executes actions best-effort (a failed action logs actionFailuresTotal and CONTINUES) — a failed marker-add followed by a successful publish leaves an unmarked in-flight classifier, and a replay then double-spawns, degrading to the bounded consequence grp2's ledger comment names (a dropped ledger id → one re-classification, never a false approval). And a failed publish AFTER the marker stamp, or a classifier loop that wedges without ever stamping agent.loop.outcome, leaves the marker unreleased FOREVER: publish_agent is NOT a station dispatch (nothing stamps station.dispatch.failed; run-lifecycle/05/06 never fire), so the NL lane closes SILENTLY for that run — new messages stamp pending and die at this guard; the exact command is the recovery. Fail direction is safe (the gate stays closed). A marker-leak reconciliation is a named pre-production follow-up (tasks 7.1).",
     "firing_cap": "max_iterations: 0 on BOTH actions (grp4-review H1) — the engine's default per-action cap (3, per rule+entity, RULE_STATE-persisted) would silently kill the NL lane on the run's 4th authorized message. The marker + ledger + release bound the spend instead. Pinned by TestClassifierSpawnRuleContract.",
     "run_binding": "run_scope=inherit reads the run's bare agent.loop.run (01-anchor-gated-run). The ne \"\" condition serializes anchor-before-spawn across KV revisions — a pending stamp that races the anchor waits for the anchor's revision.",
-    "cost": "one model turn per DISTINCT authorized non-command message on a still-open gate (D9): bridge ledger dedup upstream, this marker + the gate-facts guards in flight, terminal-release downstream."
+    "cost": "one model turn per DISTINCT authorized non-command message on a still-open gate (D9): bridge ledger dedup upstream, this marker + the gate-facts guards in flight, terminal-release downstream — and BOUNDED per run by the spend ledger (group 8, D14): the conversation.classifier.attempted length_lte 2 guard caps the gate at N=3 paid turns (the guard carries N-1 because length_lte evaluates BEFORE this fire appends). ACTION ORDER IS TRIPLY LOAD-BEARING (8.6 round-2 BLOCKING-1): marker FIRST, ledger append SECOND, publish LAST. Each action is its own KV revision and every revision is evaluated by every OTHER rule (the feedback skip is per-rule), so a ledger-first order exposes an intermediate revision on the run's FINAL allowed spawn — ledger full, marker absent — that is exactly 06-classifier-budget-exhausted's condition set: the exhaustion note would fire DURING the last classification and its once-marker would be spent before any message was actually refused. Marker-first keeps every intermediate revision marker-present, which blocks 06. Publish-last is the only real spend protection under best-effort action continuation: a failed ledger append with a surviving publish is an uncounted paid turn in ANY add order, but a failed add halts short of the publish only if the publish comes last. Counting on the spawn side still makes faulted/refused/truncated classifications consume budget exactly like successful ones. The terminal-release rule clears pending + marker but NEVER this ledger — it is the run's durable spend record. Exhaustion is announced by 06-classifier-budget-exhausted (the exact-command escape hatch); the exact command costs zero model turns and keeps the run fully operable after the budget is spent."
   }
 }

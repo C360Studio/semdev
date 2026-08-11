@@ -145,9 +145,12 @@ func (c *GitHubChannel) Read(ctx context.Context, thread ThreadRef, cursor Curso
 	return msgs, Cursor(strconv.FormatInt(maxID, 10)), nil
 }
 
-// parseCommentTime parses a github.Comment.CreatedAt (RFC3339) best-effort; a
-// zero time on an unparseable/absent value is acceptable (At is not load-bearing —
-// the dedup key is Message.ID, the comment id).
+// parseCommentTime parses a github.Comment.CreatedAt (RFC3339) best-effort,
+// returning the zero time on an unparseable/absent value. At IS load-bearing
+// since the D12a gate-open watermark (nl-conversation-intent 8.1a): both
+// inbound paths REFUSE an untimestamped message (fail closed), so a zero time
+// here means that comment can never decide a gate — the right direction for a
+// value the code-host failed to supply. The dedup key remains Message.ID.
 func parseCommentTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}

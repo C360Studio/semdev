@@ -1,0 +1,74 @@
+{
+  "id": "conversation_classifier_budget_exhausted",
+  "type": "expression",
+  "name": "Classifier budget spent + a new pending message → post the exact-command escape hatch, once",
+  "description": "The spend-bound announcement (nl-conversation-intent group 8, design D14). The spawn rule's conversation.classifier.attempted ledger caps a run's gate at N=3 paid classifier turns; once it is full, a NEW authorized message stamps the pending slot and dies at the spawn guard — correctly, but SILENTLY, and from the human's side a budget-refused message and a semdev that ignored them look identical. This rule announces the refusal exactly once, pointing at the deterministic escape hatch: the exact /semdev approve | /semdev reject commands cost zero model turns and keep the run fully operable forever.\n\nWHY THE MARKER-ABSENT GUARD IS LOAD-BEARING: while attempt N is mid-flight the ledger already reads full (the spawn appends BEFORE it publishes), so without conversation.classifier.dispatched length_eq 0 this rule would fire DURING the final classification — announcing exhaustion against a message that is being classified, not refused. Marker absent + pending present + ledger full is precisely the refused-message state: the spawn guard blocked, nothing in flight, a human waiting. ⚠ THAT EQUIVALENCE RESTS ON TWO ACTION ORDERINGS IN OTHER RULES, both conformance-pinned (each rule action is its own KV revision, evaluated by every other rule): the SPAWN stamps its marker BEFORE its ledger append (marker-first — ledger-first would hand this rule a marker-absent/ledger-full intermediate revision on the final spawn, 8.6 BLOCKING-1), and the RELEASE removes pending BEFORE the marker (id-before-marker — marker-first there would hand this rule a pending-present/marker-absent revision at the Nth release). Re-order either and this rule fires one message early with its once-marker spent.\n\nONCE PER RUN, REPLAY-SAFE: conversation.budget.noted is this rule's self-extinguishing marker (the grp6 replay lesson: a human-visible post with no marker re-posts for every still-matching entity on RULE_STATE loss). It is stamped BEFORE the publish and never removed — the note fires once in a run's lifetime, which is correct because its content never changes and the escape hatch it names never stops working. Its object is the pending message id that tripped exhaustion (forensics, not mechanism).\n\nWHY NOT THE PARK LANE: the park rules stamp run.awaiting.human, which run-lifecycle/02 reads as a RESUME BLOCKER — parking a budget refusal would WEDGE the run against the very /semdev approve this note tells the human to type. The note publishes user.note.<instance> (the existing USER stream, the fault-note lane): a note is a message to a human, not a lifecycle event (G9). The publish carries properties.note=budget-exhausted so the note consumer selects the escape-hatch body — the fault note publishes bare and keeps the default body; no graph-state inference, no subject split.\n\nG2: no lifecycle transition, no gate fact — the gate stays exactly as open as it was; the decision still arrives only via the exact command through the deterministic adapter.",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "conversation.pending.message-id",
+      "operator": "ne",
+      "value": "",
+      "required": true
+    },
+    {
+      "field": "conversation.classifier.attempted",
+      "operator": "length_gte",
+      "value": 3,
+      "required": true
+    },
+    {
+      "field": "conversation.classifier.dispatched",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    },
+    {
+      "field": "conversation.budget.noted",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "conversation.budget.noted",
+      "object": "$entity.triple.conversation.pending.message-id"
+    },
+    {
+      "type": "publish",
+      "subject": "user.note.$entity.instance",
+      "properties": {
+        "note": "budget-exhausted"
+      }
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "conversation",
+    "capability": "conversation-channel",
+    "station": "classifier budget exhaustion note — the exact-command escape hatch, once per run (group 8, design D14)",
+    "trigger_rationale": "fires on the RUN (phase, pending slot, spend ledger, and both markers all live there). Marker-absent + pending-present + ledger-full is the refused-message state: the spawn guard blocked, nothing in flight, a human waiting on a message that will never classify.",
+    "once_invariant": "conversation.budget.noted (stamped BEFORE the publish, never removed) makes the note once-per-run and replay-safe. The engine's default per-action firing cap (3) is never approached — the marker guard consumes the rule's only edge.",
+    "fail_direction": "best-effort actions: a failed marker-add followed by a successful publish leaves the rule re-fireable, bounded by the engine's default per-action cap at THREE posts per run (not one — the cap, not the marker, is the backstop in that failure shape); a failed publish after the marker-add loses the note for the run — the gate stays open and the exact command still works, so the loss is a missing courtesy, never a wedge. actionFailuresTotal is the operator tripwire.",
+    "consumer_contract": "properties.note=budget-exhausted selects the escape-hatch body in the user-note consumer (parkpost.go handleUserNote); the fault note publishes bare → default body. The consumer re-checks the gate and suppresses the note once a decision landed (the announce-contradiction guard)."
+  }
+}

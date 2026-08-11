@@ -171,15 +171,21 @@ the G5 shared-writer census + the G1 why-not-decide note (MEDIUM-7).
   comment posts, `run.change.rejected` lands, the run reaches `cancelled`.
 - [x] 6.3 RED: `TestConservativeNoneDoesNotApprove` — an ambiguous authorized message
   ("thanks!", 👍) classifies `none`; the run stays gated, no gate fact.
-- [ ] 6.4 RED: `TestConflictingIntentsResolveToOneTerminal` — two authorized NL messages, one
+- [x] 6.4 RED: `TestConflictingIntentsResolveToOneTerminal` — two authorized NL messages, one
   approve + one reject, both classified; the run reaches EXACTLY ONE of resumed-or-cancelled
   and carries EXACTLY ONE gate fact, never both (the H4 gate-still-open guard end-to-end).
-  **UNTICKED (external review #10, CONFIRMED — ours).** The shipped test waits for
-  `executing` before posting the second message, so the phase gate DISCARDS it: only ONE
-  classification happens, the second mock fixture is never consumed, and the journey has no
-  `requireModelTurns` assertion to expose the dead fixture. It was ticked against a contract
-  it does not meet. Reworked in 8.4 per design D15 (a Post-barrier so both classifications
-  reach an OPEN gate); the current test is kept and renamed for the behavior it really pins.
+  **RE-TICKED 2026-08-11 with the contract genuinely met (8.4 / design D15).** The earlier
+  tick was against a test whose second message the phase gate discarded (one classification,
+  a dead second fixture, no `requireModelTurns` — external review #10, confirmed ours). The
+  rework: the forge double's one-shot `HoldNextCreateComment` barrier blocks the apply
+  consumer's transparency Post (post-before-stamp, D6/M6 — the deterministic hold point), so
+  BOTH opposite intents classify against a still-open gate; `requireModelTurns(5)` proves
+  both fixtures consumed; zero decisions while held (post-before-stamp end-to-end); the
+  winner is asserted by SHAPE not value (one decision, its matching terminal, still exactly
+  one after settle — every interleaving of first-writer-wins is legal). The old test is
+  KEPT, renamed `TestLateIntentAfterGateClosesIsIgnored`, its dead fixture REMOVED, and its
+  real contract pinned by ledger counts (classified==1, attempted==1 — a model-turn total
+  there would race the dev-rewake decide). GREEN on real docker with -race.
 - [x] 6.5 The existing exact-command approval journeys (webhook + poll) pass byte-for-byte —
   no journey rewired; the NL journeys are ADDED.
 - [x] 6.6a WIRE the NL lane into `configs/semdev-live-gemini.json` — DONE: the five (six
@@ -245,29 +251,41 @@ them would sync a spec asserting behavior the code lacks (G10).
   guard); `TestEveryRuleFileIsBootstrapped` + the rule-condition censuses catch a
   half-migrated predicate.
 
-- [ ] 8.3 RED-first: the **classifier spend bound** (D14). The spawn rule `add_triple`s the
-  dispatched message id onto the append-set `conversation.classifier.attempted` (writer
-  `conversation-spawn-rule`, vocab-registered) in the same action set that arms the marker, and
-  gains `conversation.classifier.attempted length_lte 2` (`OpLengthLte`, beta.153/#568) for
-  N=3. Counting on the SPAWN side makes faulted, truncated, refused, and cap-exhausted
-  attempts consume budget exactly like successful ones. The terminal-release rule clears
-  pending + the marker but NEVER the ledger. A new rule announces exhaustion on the
-  `user.note.>` lane (the exact-command escape hatch) carrying its OWN self-extinguishing
-  marker — the grp6 replay lesson: a human-visible post with no marker re-posts on RULE_STATE
-  loss. Pins: N+2 authorized messages produce EXACTLY N classifier dispatches
-  (`mock.RequestCount()` asserted at a DETERMINISTIC point, not an end-of-journey total); the
-  escape-hatch note posts exactly once; an exact command still releases the gate after the
-  budget is spent.
+- [x] 8.3 RED-first: the **classifier spend bound** (D14) — DONE 2026-08-11. As designed:
+  the spawn rule appends the dispatched id onto `conversation.classifier.attempted`
+  (writer `conversation-spawn-rule`, vocab-registered) in the same action set as the
+  marker — append BEFORE publish, so a best-effort action failure errs spend-safe — and
+  gains `length_lte 2` (N=3; the guard carries N-1 because length_lte evaluates before the
+  appending fire). `06-classifier-budget-exhausted` announces exhaustion once per run on
+  `user.note.>` behind its own `conversation.budget.noted` marker (stamped before the
+  publish), with the LOAD-BEARING `conversation.classifier.dispatched length_eq 0` guard:
+  the ledger already reads full while attempt N is mid-flight, so without it the note fires
+  against a message being classified, not refused. The publish carries
+  `properties.note=budget-exhausted`; the note consumer selects the escape-hatch body by it
+  (the fault note publishes bare; the envelope decodes properties as map[string]any so a
+  non-string property degrades instead of killing every note — unit-pinned). Conformance
+  pins RED-verified first (spawn budget guard + append order; release never clears the
+  ledger; the full budget-rule contract). Journey `TestClassifierBudgetCapsSpend` GREEN on
+  docker -race: N+2 messages → EXACTLY N=3 dispatches (`requireModelTurns(6)` at the
+  deterministic pre-refusal point; end-state ledger counts after the release, which cannot
+  move once executing), the note posts exactly once, and `/semdev approve` still releases
+  the gate after exhaustion. Both shipped configs wired (+ version bumps 0.31.0/0.29.2,
+  mock still greater).
 
-- [ ] 8.4 RED-first: the **reworked conflict journey** (D15) — re-ticks 6.4. The forge double
-  BLOCKS in `Post` for the first apply dispatch (the consumer Posts before it stamps, D6/M6),
-  the second opposite message is posted + bridged + classified against a still-UNDECIDED gate,
-  then the Post is released. Assert: BOTH ids in the `conversation.intent.classified` ledger
-  (both fixtures consumed, proven by `mock.RequestCount()`), EXACTLY ONE `run.change.decision`
-  whose value matches the terminal the run reaches, and the losing dispatch refused by the
-  gate-still-open guard. Keep the existing test, renamed
-  `TestLateIntentAfterGateClosesIsIgnored` — the real behavior it pins. NO disjunctive
-  assertions (the grp6 lesson: "some reply" is not a guard).
+- [x] 8.4 RED-first: the **reworked conflict journey** (D15) — DONE 2026-08-11, re-ticks 6.4
+  (see 6.4's tick for the delivered mechanism: the `HoldNextCreateComment` one-shot barrier,
+  both-classified against the open gate, one decision by shape, the renamed late-intent pin
+  with its dead fixture removed). GREEN on docker -race. ALSO LANDED HERE — **the six red
+  journeys' ONE root cause**: the forge double served a HARDCODED `created_at`
+  ("2026-07-20T12:00:00Z", protocol-faithful when the field was decorative), so the 8.1a
+  watermark — working exactly as designed — dropped every journey comment as historical and
+  the whole approval lane died in every journey that drives it. The double now stamps
+  `CreatedAt` at append time (both AddComment and the bot's create_comment) and serves it
+  RFC3339. All six previously-red journeys verified GREEN with -race, including
+  `TestBridgeProofApprovalByPollNoWebhook` — the ARCHIVED pull-first-transport capability is
+  no longer red. New helper `requireTripleClears` for marker-release waits
+  (`requireRunTripleCount` fails fast on over-count — right for monotonic ledgers, wrong for
+  a 1→0 marker).
 
 - [x] 8.5a The `run.change.decision` migration touches THREE canonical capability specs,
   not one. Deltas for `run-lifecycle` (the gate requirement: single-valued, first-writer-
@@ -277,14 +295,39 @@ them would sync a spec asserting behavior the code lacks (G10).
   exists to prevent, aimed at a different capability. 7.4's "still 12 caps" holds: three
   capabilities MODIFIED, none added.
 
-- [ ] 8.5 Cheap truth fixes folded in: `configs/semdev-live-gemini.json:304` still says the
-  conversation pack "is not yet wired into this live config (task 6.6)" — contradicted by the
-  same file since 6.6a landed; `internal/conversationchannel/apply.go:66` says "eight park
-  rules" when there are NINE.
+- [x] 8.5 Cheap truth fixes folded in — DONE 2026-08-11: the live config's fault-note port
+  description now says the conversation pack IS wired (6.6a); `apply.go` says nine park
+  rules (verified: nine rule files stamp `run.awaiting.human`); rule 05's description now
+  cites `TestClassifierBindingFaultTellsTheHuman` for the one-tick observation (the old
+  citation pointed at the journey 8.4 renamed).
 
-- [ ] 8.6 Adversarial review — BOTH reviewers, zero blocking/high, all findings applied.
-  ROUND 1 (on the 8.2 diff) is DONE and folded; a further round is still required once
-  8.1a/8.3/8.4 land. What round 1 found, so it is not re-derived: **BLOCKING** — migrating
+- [x] 8.6 Adversarial review — BOTH reviewers, zero blocking/high, all findings applied.
+  **ROUND 2 DONE 2026-08-11** (on the full 8.3/8.4/8.5 + journey-fix working tree):
+  go-reviewer 0B/1H/3L/3N, semstreams-reviewer 1B/1H/1M/2L/2N — every finding folded, then
+  BOTH finding authors re-verified their own fixes and returned **APPROVE (0 blocking/high)**.
+  Round 2's catches, so they are not re-derived: **BLOCKING (semstreams)** — the 8.3 spawn
+  order (ledger-append before marker) exposed an intermediate revision on the run's FINAL
+  allowed spawn (ledger full, marker absent — each action is its own KV revision, every
+  revision evaluated per-rule) that satisfied rule 06's entire condition set: the exhaustion
+  note fired DURING the last classification, once-marker spent, and the journey was
+  structurally blind to it. Fixed marker→ledger→publish, red-first pin
+  (marker-before-ledger with the intermediate-revision rationale), both rule descriptions
+  truth-swept (the "errs spend-safe" ordering claim was FALSE — publish-last is the only
+  spend protection; a failed append with a surviving publish is an uncounted turn in ANY add
+  order). **HIGH (both reviewers independently)** — the D15 one-shot hold, consumed at
+  arrival, did not survive the posting client's fixed 10s HTTP timeout: the apply consumer's
+  retry sailed through and stamped while the journey believed the gate held (a coin-flip
+  flake indicting a product violation that did not happen). Fixed: an aborted held request
+  RE-ARMS the hold and applies nothing, so retries block until release; verified persistent
+  through retry exhaustion into NATS redelivery. **MEDIUM (semstreams)** — the fault note's
+  "try again" invitation was budget-blind; noteBody now selects the escape hatch whenever
+  the run's attempted ledger is full, any kind, unit-pinned. Two documented-benign
+  residuals: a release/abort coincidence can duplicate the transparency COMMENT
+  (at-least-once, nothing counts comments, the decision stamps once), and the
+  retry-before-FIN window degrades to a visible flake, never a silent green. Evidence:
+  offline suites + conformance green under -race; the five affected journeys green on
+  docker -race (174s); the FULL suite green pre-fold (521s, zero skips).
+  ROUND 1 (on the 8.2 diff) was folded earlier. What round 1 found, so it is not re-derived: **BLOCKING** — migrating
   `run-lifecycle/01`'s guard to `decision length_eq 0` was NOT meaning-preserving (the old
   guard was blind to rejection), so a pre-gate `/semdev reject` through the UNGUARDED
   `releaseGate` made the gate unreachable and the run unrecoverable — one wedge closed, a
@@ -315,7 +358,11 @@ two-fact partition.
   gate-time anchor — go-L3); name the marker-leak posture in the runbook (a wedged/never-
   terminal classifier closes the NL lane silently for that run; exact command recovers;
   `actionFailuresTotal` is the tripwire — go-M4) with the marker-leak reconciliation as a
-  named pre-production follow-up; FILE the upstream semstreams ask for an atomic
+  named pre-production follow-up — the reconciliation should ALSO sweep the exhaustion
+  residue (8.6 round-2 NOTE: after a spent budget + an exact-command decision, the last
+  refused message's `conversation.pending.*` trio stays on the run forever — no classifier
+  terminal will fire the release again; harmless under the phase gates, but it reads as
+  "in flight" forensically); FILE the upstream semstreams ask for an atomic
   multi-remove (or abort-on-first-failure `on_enter`) — best-effort action continuation is
   what leaves the stale-marker brick reachable (semstreams MEDIUM-1; house-wide value: every
   marker-before-publish rule shares the inversion). Two named LOWs from the grp4 re-review:

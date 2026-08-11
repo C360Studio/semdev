@@ -65,7 +65,7 @@ import (
 // mid-execution and CATASTROPHIC here, because this run is sitting AT the
 // change-approval gate and BOTH release rules require run.awaiting.human ABSENT
 // (run-lifecycle/02:17 resume, /07:12 cancel) — and NOTHING in the repo ever
-// removes that fact (eight park rules add it, zero remove it; a resume-from-park
+// removes that fact (nine park rules add it, zero remove it; a resume-from-park
 // rule is still unbuilt). Parking here would therefore wedge the run PERMANENTLY:
 // it could never be approved or cancelled, and even the human's deterministic
 // escape hatch would die, because /semdev approve would stamp a fact no rule
