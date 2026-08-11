@@ -32,27 +32,34 @@ pattern.
 - **WHEN** a predicate is a declared append-set ledger
 - **THEN** its contract group mode is `append-evidence` and the census fails on any other mode
 
-### Requirement: Owned writes are owner-lease enforced with recorded rollout evidence
+### Requirement: Owned-write coverage is proven positively; the lease stays observe-only
 
-graph-ingest SHALL enforce the owner lease (`enforce_owner_lease=true`) for the
-subjects that serve owned mutations, so a write routed to a non-enforcing instance
-cannot bypass the owner-token fence. Because semdev hosts exactly one in-process
-graph-ingest component reached only over NATS, this is one configuration on one
-component.
+graph-ingest SHALL run the owner lease observe-only for the life of the beta.159
+pin: `enforce_owner_lease` explicitly false in every shipped config, never
+absent — an absent key silently inherits whatever the framework default becomes.
+The originally planned enforcement flip is VOID as-built (design D5, 2026-08-11):
+semstreams' announced final refactor phase removes the ownership/lease mechanism,
+so the posture question transfers to the next-tag migration change, re-asked
+against ownership's replacement.
 
-Before any paid or live run against the enforcing configuration, the ADR-056
-rollout evidence SHALL be recorded: enforcement enabled on the serving component,
-the owner heartbeat live before any owner writes, and owner-lease mismatch metrics
-zero across a bounded observation window. Missing evidence is a fail-closed
-blocker, not a warning.
+Because the lease meter cannot see an un-tokened write (it counts stale tokens,
+not missing ones), owned-write coverage SHALL be proven positively and offline
+instead: every declared owner binds at boot BEFORE any component or tool that
+writes is registered, and no Go call site names a graph-mutation subject outside
+the owning seam, with sanctioned exceptions named individually and capped.
 
-#### Scenario: Enforcement is on before the owner writes
-- **WHEN** the runtime binds an owning projection client
-- **THEN** the owner heartbeat is live and graph-ingest enforcement is enabled first
+#### Scenario: The observe-only posture is explicit and pinned
+- **WHEN** a shipped config declares the graph-ingest component
+- **THEN** `enforce_owner_lease` is present and false
+- **AND** an absent key or a true value fails the offline conformance pin
 
-#### Scenario: Rollout evidence gates the paid lane
-- **WHEN** a paid or live run is attempted without the recorded owner-lease evidence
-- **THEN** it is refused as a fail-closed blocker
+#### Scenario: An unbound owner fails at boot, not at first write
+- **WHEN** the runtime boots and a declared owner has no bound mutation client
+- **THEN** boot fails naming the owner, before anything that writes is registered
+
+#### Scenario: A hand-rolled mutation subject fails the census
+- **WHEN** a Go call site outside the owning seam names a `graph.mutation.*` subject beyond the named sanctioned exceptions
+- **THEN** the offline census fails, naming the file and line
 
 ## MODIFIED Requirements
 

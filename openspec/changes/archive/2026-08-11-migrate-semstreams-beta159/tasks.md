@@ -90,12 +90,15 @@ cannot run during the migration it guards is not a guard.
     `TestEveryOwnerDerivesWithoutSelfOverlap` runs the real `projection.Derive` per
     owner, which is exactly what `BindMutationClient` runs. `BindAll` structurally
     binds once per owner by iterating the de-duplicated `Owners()` set.
-  - **Rejection (NOT covered):** a second same-owner bind returning
-    `ErrOwnerAlreadyBound` needs a LIVE registry (`EnsureBuckets`), so it belongs
-    with the docker journeys in group 7. **Scope that assertion to
-    `graphown.OwningOwners()`** — a birth-only owner returns before `RegisterOwner`,
-    so its second bind succeeds silently and an all-17 assertion would be wrong by
-    one (task 2.9 pins why).
+  - **Rejection (as-built, 2026-08-11):** the in-process half is now pinned by
+    `TestInProcessClaimLedger` (the 7.2 review fold) — live-claim rejection,
+    failed-claim atomicity, release/re-claim, offline. The framework half (a
+    second same-owner bind returning `ErrOwnerAlreadyBound` against a LIVE
+    registry) is VOID for the same reason as 6.2/6.3: the next semstreams tag
+    removes the ownership mechanism, so a live-registry probe of it would be
+    days-from-deleted work. If it had been written: scope to
+    `graphown.OwningOwners()` — a birth-only owner returns before `RegisterOwner`
+    and an all-17 assertion would be wrong by one (task 2.9 pins why).
 - [x] 3.2 Implemented as `graphown.BindAll` (`internal/graphown/binding.go`),
   called from BOTH entry points — `boot/runtime.go` (before `RegisterAll`, so no
   component or tool that writes facts is registered against an unbound owner) and
@@ -316,7 +319,18 @@ paid-lane flip.
   their A/B attribution, what the journeys caught that offline could not, and an
   explicit NOT-CLAIMED list (enforcement not flipped; create not migrated; no
   real-LLM run).
-- [ ] 7.3c sync-specs at archive folds the delta (harness-measurement modified; no
-  new capability).
-- [ ] 7.4 Hand off: unpark nl-conversation-intent group 8 onto the new substrate;
-  note the `surface-delivery-evidence-recap` branch merges back after.
+- [x] 7.3c sync-specs done at archive (2026-08-11): the harness-measurement delta
+  folded into `openspec/specs/` (one requirement modified in place, two added; no
+  new capability; still 12 caps). The delta's enforcement requirement was first
+  amended to the as-built observe-only posture — syncing the original wording
+  would have canonized a spec asserting the voided flip (G10). Repo-wide
+  `openspec validate --all --strict`: 17 passed, 0 failed.
+- [x] 7.4 Hand off recorded (2026-08-11): nl-conversation-intent group 8 unparks
+  onto the new substrate NEXT — it owns the six red journeys (one of which has
+  left the ARCHIVED pull-first-transport capability red) and the four confirmed
+  external-review blockers. The `surface-delivery-evidence-recap` branch merges
+  back after. The next-tag semstreams migration (the announced final refactor
+  phase, which REMOVES the ownership/lease mechanism) is its own change, taken
+  from this fully-green synced baseline: it inherits the enforcement-posture
+  question (D5 as-built), the Resign/clean-shutdown question (review N1), and
+  re-checks that the lesson substrate semdev may later adopt survives the wave.

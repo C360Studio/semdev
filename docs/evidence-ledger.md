@@ -242,7 +242,11 @@ pinned) — at entry time that was the gated group-6 step. *As-built addendum
 final refactor phase (the next tag) removes the ownership/lease mechanism (per
 operator report; design D5 as-built), so beta.159 lands and stays observe-only
 and the posture question transfers to the next-tag migration change, re-asked
-against ownership's replacement. The admission create is NOT migrated
+against ownership's replacement. The review fold (`723b4e7` — both reviewers
+APPROVE, zero blocking/high, all findings applied) re-ran the full ladder:
+offline green (57 packages), docker `go test -race -tags=e2e` green in 268s
+with the six pre-existing red journeys skipped by name. The admission create is
+NOT migrated
 (design D3c: the projection client swallows the `EntityExists` signal the intake
 lane needs to skip a duplicate wake). No real-LLM run was made for this migration.
 
