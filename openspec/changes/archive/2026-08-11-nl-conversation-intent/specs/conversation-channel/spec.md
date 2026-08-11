@@ -52,6 +52,59 @@ natural-language classification.
 - **WHEN** an authorized actor posts a message the classifier reads as carrying no approve/reject directive (ordinary chatter, ambiguous positivity)
 - **THEN** no gate fact lands and the run stays awaiting approval
 
+### Requirement: The approval gate is operable with no inbound webhook
+
+The change-approval gate SHALL be releasable from the conversation thread on a
+deployment that receives NO inbound webhook. The system SHALL poll each run awaiting
+approval on a configured interval, reading its thread through the port's `Read` verb,
+and SHALL release the gate for an authorized approval signal exactly as the webhook
+path does — landing `run.change.decision` == `approve` on the run through the
+approval adapter (the same fact, source, and placement the resume rule consumes). The
+webhook transport remains an OPTIONAL latency accelerator, never a requirement.
+
+A deployment SHALL run EITHER the webhook-fed comment consumer OR the poller for the
+inbound comment lane, never both, so a comment is never processed twice. The read
+cursor SHALL be in-memory poll state, NOT a domain-graph fact; correctness SHALL rest
+on the approval's idempotency (re-reading an already-applied approval is a no-op), so
+a restart that rebuilds the cursor by re-reading is safe. The poller SHALL fire no
+lifecycle transition (it observes the run's phase and feeds an approval message; the
+resume rule owns the transition) and SHALL introduce no new fact writer.
+
+Poll-path authorization SHALL use the message author as the principal: a polled
+message carries one identity (its author), and the same admission gate (allowlisted or
+push-capable collaborator) governs it. An approval signal from an unauthorized author
+SHALL NOT release the gate.
+
+The poll transport reads a comment's CURRENT body, so it MAY honor an approval that
+was edited into a comment (attributed by the host to that comment's author, which the
+admission gate governs); the webhook transport acts only on comment creation. This
+edit divergence is accepted and documented, not a byte-identical guarantee across
+transports.
+
+The deployment SHALL make the active inbound mode observable: enabling the poller
+without an inbound webhook, or configuring neither, SHALL be surfaced at boot (a loud
+mode log, and an assembly-time coherence check) rather than presenting as a healthy
+component that silently never releases the gate.
+
+#### Scenario: A polled approval releases the gate with no webhook
+- **WHEN** a run is awaiting approval on a deployment with no webhook receiver and polling enabled
+- **AND** an authorized author posts the approval signal on the run's thread
+- **THEN** the poller reads it on the next interval and the approval adapter records `run.change.decision` == `approve` on the run
+- **AND** the resume rule advances the run with no webhook and no stand-in write
+
+#### Scenario: An unauthorized polled approval is ignored
+- **WHEN** a polled approval signal's author is neither a push-capable collaborator nor allowlisted
+- **THEN** no gate decision lands and the run stays gated
+
+#### Scenario: Re-reading an already-approved thread is a no-op
+- **WHEN** the poller re-reads a thread whose approval already landed (e.g. after a restart rebuilt the cursor from the top)
+- **THEN** no second decision write occurs and the run is unaffected
+
+#### Scenario: Poll and webhook do not both drive the comment lane
+- **WHEN** a deployment enables the poller
+- **THEN** the webhook-fed comment consumer does not also run
+- **AND** a single approval comment is processed exactly once
+
 ## ADDED Requirements
 
 ### Requirement: Natural-language intent is a routing classification, not a measurement

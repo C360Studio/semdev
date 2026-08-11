@@ -426,5 +426,17 @@ two-fact partition.
   reference fixed; the 8.1 tick's contradictory watermark-source parenthetical fixed;
   trailing newlines restored; the pre-gate scope added to the runbook's "always work"
   bullet.
-- [ ] 7.4 sync-specs at archive folds the delta (conversation-channel modified; still 12
-  caps — no new capability).
+- [x] 7.4 DONE 2026-08-11: specs synced + archived. THREE capabilities modified
+  (conversation-channel: the gate requirement modified + three requirements added
+  [classification, watermark, spend bound] + the POLLER requirement modified;
+  run-lifecycle: the gate contract single-valued; dev-from-task: the projection
+  trigger), still 12 caps — no new capability. The sync surfaced a G10 straggler the
+  delta review missed: the archived pull-first-transport's poller requirement in the
+  SAME conversation-channel spec still asserted the retired `run.change.approved` at
+  four sites, contradicting the freshly-modified gate requirement — folded as a
+  MODIFIED requirement into this change's delta (predicate-only rewording, no
+  behavioral change) and mirrored to main; zero retired-predicate references now
+  survive in any canonical spec. Repo-wide `openspec validate --all --strict`: 16
+  passed, 0 failed. DELIBERATELY OPEN AT ARCHIVE: 6.6b (the paid real-LLM
+  classification probe) stays operator-gated and unclaimed — no delta SHALL depends
+  on it; it is the NL lane's first-paid-run precondition, not a spec claim.

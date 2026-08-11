@@ -9,16 +9,19 @@ in-loop by the harness, gated by deterministic floors, and routed entirely by
 rules over harness-stamped facts — escalating toward the human on budget
 exhaustion rather than looping unbounded.
 ## Requirements
-### Requirement: Tasks are projected as immutable facts
+### Requirement: Projected task facts are immutable
 
-WHEN a run's change is approved, the system SHALL project the change's tasks into
-immutable task facts (`task.spec`). The dev loop SHALL converge on these facts
-and SHALL NOT be able to redefine them. Task status SHALL be derived from
-execution markers, not written as a separate authoritative status field — no
-second planning state machine is introduced.
+Approval SHALL project the approved change's tasks onto the run as immutable task
+facts (`task.spec`). The dev loop SHALL converge on these facts and SHALL NOT be
+able to redefine them. Task status SHALL be derived from execution markers, not
+written as a separate authoritative status field — no second planning state machine
+is introduced.
+
+The approval trigger SHALL be the single-valued gate decision
+(`run.change.decision` == `approve`), not a standalone boolean approval fact.
 
 #### Scenario: Approval projects immutable task facts
-- **WHEN** `run.change.approved` is present for a run
+- **WHEN** `run.change.decision` == `approve` is present for a run
 - **THEN** the change's tasks are projected as `task.spec` facts
 - **AND** an attempt to mutate a projected `task.spec` is rejected
 
