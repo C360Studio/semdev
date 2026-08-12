@@ -192,7 +192,17 @@ func (c *Config) Validate() error {
 	if c.Ports == nil || len(c.Ports.Inputs) == 0 {
 		return errs.WrapInvalid(errs.ErrInvalidConfig, "station", "Validate", "ports configuration with at least one input port is required")
 	}
-	return nil
+	// At least one input must be a core-NATS dispatch lane — subscribeInputs
+	// SKIPS non-NATS kinds, so a config whose only inputs are another kind
+	// would pass the count check above and start a station that silently never
+	// fires (unreachable through the strict config decode today, closed here
+	// structurally).
+	for _, port := range c.Ports.Inputs {
+		if np, ok := port.Config.(component.NATSPort); ok && np.Subject != "" {
+			return nil
+		}
+	}
+	return errs.WrapInvalid(errs.ErrInvalidConfig, "station", "Validate", "no input port is a subject-bearing core-NATS dispatch lane — the station would start and never fire")
 }
 
 // Schema is the generated config schema shared by every station registration.
@@ -578,7 +588,7 @@ func (c *Component) InputPorts() []component.Port {
 	for _, d := range c.config.Ports.Inputs {
 		p, err := d.Resolve(component.DirectionInput)
 		if err != nil {
-			continue // Start's subscribe loop surfaces the same fault loudly
+			continue // Start's subscribe loop re-resolves inputs loudly
 		}
 		ports = append(ports, p)
 	}
@@ -593,6 +603,9 @@ func (c *Component) OutputPorts() []component.Port {
 	for _, d := range c.config.Ports.Outputs {
 		p, err := d.Resolve(component.DirectionOutput)
 		if err != nil {
+			// The requester output is a compile-time constant
+			// (graphown.RequesterPortDefinition) proven by the real-NATS boot;
+			// a drop here can only follow a framework port-rule change.
 			continue
 		}
 		ports = append(ports, p)

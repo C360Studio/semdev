@@ -223,6 +223,15 @@ type Runtime struct {
 // contract resolution (D3b) governs their write exactly as it does production's.
 func (r *Runtime) GraphWriters() *graphown.Clients { return r.graphWriters }
 
+// closeBootNATS closes the boot-owned NATS connection on a FRESH bounded
+// context, so a SIGINT-canceled boot ctx does not skip the final drain (the
+// launch path's idiom, adopted on every NewRuntime error tail).
+func closeBootNATS(nc *natsclient.Client) {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = nc.Close(closeCtx)
+}
+
 // resolveNATSURLs implements the documented precedence: an explicit
 // RunOptions override beats the environment variable, which beats the config
 // file's nats.urls, which beats the hardcoded localhost default.
@@ -751,24 +760,24 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	}
 
 	if err := config.NewStreamsManager(natsClient, logger).EnsureStreams(ctx, cfg); err != nil {
-		_ = natsClient.Close(ctx)
+		closeBootNATS(natsClient)
 		return nil, fmt.Errorf("ensure JetStream streams: %w", err)
 	}
 
 	configMgr, err := config.NewConfigManager(cfg, natsClient, logger)
 	if err != nil {
-		_ = natsClient.Close(ctx)
+		closeBootNATS(natsClient)
 		return nil, fmt.Errorf("create config manager: %w", err)
 	}
 	if err := configMgr.Start(ctx); err != nil {
-		_ = natsClient.Close(ctx)
+		closeBootNATS(natsClient)
 		return nil, fmt.Errorf("start config manager: %w", err)
 	}
 
 	svcMgr, regs, err := wireServices(ctx, cfg, expCfg, natsClient, configMgr, opts, logger)
 	if err != nil {
 		_ = configMgr.Stop(5 * time.Second)
-		_ = natsClient.Close(ctx)
+		closeBootNATS(natsClient)
 		return nil, err
 	}
 
@@ -778,7 +787,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	// rather than silently degrading the coordinator's routing prompt.
 	if err := seedPersonas(ctx, natsClient, personasDir(opts), logger); err != nil {
 		_ = configMgr.Stop(5 * time.Second)
-		_ = natsClient.Close(ctx)
+		closeBootNATS(natsClient)
 		return nil, err
 	}
 

@@ -162,14 +162,14 @@ func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.
 	}
 
 	// The append-set dedup ledger (D5): read the ids already classified, then
-	// re-stamp the full set plus this one. OwnedFactWriter.ReplaceTriples is
-	// replace-by-predicate, so an append is expressed as read-all-then-write-all
+	// re-stamp the full set plus this one. Writer.Replace reconciles the whole
+	// owned group, so an append is expressed as read-all-then-write-all
 	// (the submit_review route-mirror pattern) — the whole set in one atomic
 	// mutation. A redelivery re-stamping the same id is idempotent (deduped).
 	//
 	// LOAD-BEARING single-writer-per-run invariant: this read→replace is NOT
-	// serialized by the framework (OwnedFactWriter assumes one concurrent writer
-	// of a prefix). It is safe here because — unlike submit_review's mirror, which
+	// serialized by the framework (the reconcile assumes one concurrent writer
+	// of the group). It is safe here because — unlike submit_review's mirror, which
 	// targets the per-loop entity and so cannot race itself — this ledger lives on
 	// the RUN, shared by every classifier loop of that run, and the group-4 spawn
 	// rule serializes classifier spawns per run via the fire-once

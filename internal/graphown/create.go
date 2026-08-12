@@ -45,10 +45,17 @@ func (c *Creator) Owner() string {
 }
 
 // Create births entityID with triples under the owner's birth contract — strict
-// create-or-conflict. A CONFLICT surfaces to the caller AS-IS: on a
-// content-derived entity ID it is the idempotent-duplicate signal (the event
-// was processed before), and swallowing it here would erase exactly the signal
-// the intake lane keys its skip-the-wake decision on.
+// create-or-conflict. Only a sanctioned create owner may birth: the framework
+// client validates predicates against the contract's WHOLE allowed set (groups
+// included), so without this gate a reconcile-owner's Creator could strict-
+// create a bogus entity carrying its group predicates — an entity the rules
+// would then act on. The gate lives HERE, at the write, so misuse fails AT THE
+// SITE with the owner named (D3b), exactly as Writer.Replace does.
+//
+// A CONFLICT surfaces to the caller AS-IS: on a content-derived entity ID it
+// is the idempotent-duplicate signal (the event was processed before), and
+// swallowing it here would erase exactly the signal the intake lane keys its
+// skip-the-wake decision on.
 //
 // The transport kinds retry bounded like Replace: unavailable never landed, and
 // a commit-unknown retry that DID land converges to the conflict signal, which
@@ -60,6 +67,9 @@ func (c *Creator) Owner() string {
 func (c *Creator) Create(ctx context.Context, entityID string, msgType message.Type, triples []message.Triple) error {
 	if c == nil || c.creator == nil {
 		return fmt.Errorf("graphown: no bound mutation client for owner %q — a birth write was attempted on a schema-only registration", c.Owner())
+	}
+	if !createOwners[c.owner] {
+		return fmt.Errorf("graphown: owner %q is not a sanctioned create owner — only birth contracts may strict-create an entity (design D3/OQ2)", c.owner)
 	}
 	contract, err := ContractFor(c.owner, entityID)
 	if err != nil {
@@ -82,7 +92,9 @@ func (c *Creator) Create(ctx context.Context, entityID string, msgType message.T
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("create %q on %s: %w", contract, entityID, ctx.Err())
+			// Keep the classified error visible: on the shutdown-during-retry
+			// path it is the one diagnostic fact (unavailable vs commit-unknown).
+			return fmt.Errorf("create %q on %s: %w (last attempt: %v)", contract, entityID, ctx.Err(), lastErr)
 		case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
 		}
 	}

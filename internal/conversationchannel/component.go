@@ -544,8 +544,10 @@ func (c *Component) OutputPorts() []component.Port {
 
 // resolvePorts resolves declared definitions for discovery. A definition that
 // fails strict resolution is dropped here because Discoverable has no error
-// channel — Start's consumer setup (inputs) and flow validation (outputs)
-// surface the same fault loudly.
+// channel. Inputs are re-resolved LOUDLY by Start's consumer setup; the output
+// requester's guard is narrower — it is a compile-time constant
+// (graphown.RequesterPortDefinition) proven by the real-NATS boot, so a drop
+// here can only follow a framework port-rule change.
 func resolvePorts(defs []component.PortDefinition, dir component.Direction) []component.Port {
 	ports := make([]component.Port, 0, len(defs))
 	for _, d := range defs {

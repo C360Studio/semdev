@@ -142,20 +142,16 @@ func RegisterTools(ctx context.Context, reg *agentictools.ExecutorRegistry, deps
 		return fmt.Errorf("register builtin tools: %w", err)
 	}
 
-	// A tool that OWNS a mutable fact package holds an OwnedFactWriter (replace-by-
-	// predicate) built from the NATS client. When there is no client (the
-	// schema-scanning censuses), the writer is nil and the tool registers
-	// schema-only; its Execute fails loudly if ever called without one, so a fact
-	// is never silently dropped. RegisterExecutor derives the tool name from the
-	// executor's own ListTools, so the registered name cannot drift from its
-	// advertised schema.
-	// ADR-056 binds a client to exactly ONE owner, so the old single shared
-	// changeWriter becomes one bound writer PER OWNER, resolved from the
-	// composition root's registry. A nil *Clients (the schema-scanning censuses,
-	// which pass no NATS client) yields nil writers, so each tool registers
-	// schema-only and fails loudly if a write is ever attempted — the same posture
-	// the nil OwnedFactWriter gave. submit_review writes as TWO owners
-	// (reviewer-quinn on the run, route-mirror on its loop), so it takes two.
+	// A tool that OWNS a mutable fact package holds a *graphown.Writer resolved
+	// from the composition root's Clients — one shared contract-validating
+	// mutation client underneath (ADR-091), one writer surface PER vocab Source
+	// so the contract resolution stays per-write (D3b). A nil *Clients (the
+	// schema-scanning censuses, which pass no NATS client) yields nil writers,
+	// so each tool registers schema-only and fails loudly if a write is ever
+	// attempted. RegisterExecutor derives the tool name from the executor's own
+	// ListTools, so the registered name cannot drift from its advertised schema.
+	// submit_review writes as TWO Sources (reviewer-quinn on the run,
+	// route-mirror on its loop), so it takes two writers.
 	if err := reg.RegisterExecutor(createchange.New(clients.Writer(createchange.Source), deps.Platform, deps.Logger)); err != nil {
 		return fmt.Errorf("register %s: %w", createchange.ToolName, err)
 	}

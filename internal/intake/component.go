@@ -106,12 +106,18 @@ type ComponentConfig struct {
 
 // Validate requires the jetstream input port — a consumer-less intake would
 // start healthy and silently never admit anything (the flow break the
-// constitution bars).
+// constitution bars). Start SKIPS non-JetStream inputs, so the check demands a
+// subject-bearing JetStream lane specifically, not just any input.
 func (c *ComponentConfig) Validate() error {
 	if c.Ports == nil || len(c.Ports.Inputs) == 0 {
 		return errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "Validate", "ports configuration with the github events input is required")
 	}
-	return nil
+	for _, port := range c.Ports.Inputs {
+		if _, _, ok := jetstreamLane(port); ok {
+			return nil
+		}
+	}
+	return errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "Validate", "no input port is a subject-bearing JetStream lane — the consumer would start and never admit anything")
 }
 
 // Schema is the generated config schema for registration.
@@ -222,12 +228,11 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies, client
 	}
 
 	// The admission birth surface: strict create under the admission-check
-	// contract. A nil clients (the census path) yields a nil creator, which
-	// fails loudly at the first write — never a silently dropped record.
-	var creator EntityCreator
-	if c := clients.Creator(RecordSource); c != nil {
-		creator = c
-	}
+	// contract. The DIRECT assignment is deliberate: on the census path this is
+	// an interface wrapping a typed-nil *Creator, whose nil-receiver guard
+	// fails the first write with a named error — assigning conditionally would
+	// leave a nil INTERFACE, and the write would panic instead of erroring.
+	var creator EntityCreator = clients.Creator(RecordSource)
 	c := &Component{
 		config:   cfg,
 		nats:     deps.NATSClient,
@@ -442,7 +447,7 @@ func (c *Component) handleIssueEvent(ctx context.Context, payload []byte) error 
 	deliveryID := eventDeliveryID(payload)
 	recordID := AdmissionRecordEntityID(c.platform.Org, c.platform.Platform, in.IssueRef, deliveryID)
 	if err := RecordAdmission(ctx, c.creator, recordID, decision.Actor, in.IssueRef); err != nil {
-		if err == ErrAlreadyRecorded {
+		if errors.Is(err, ErrAlreadyRecorded) {
 			run, rerr := c.resolver.ResolveRunByRef(ctx, in.IssueRef)
 			if rerr != nil {
 				atomic.AddInt64(&c.errors, 1)
@@ -675,8 +680,10 @@ func (c *Component) OutputPorts() []component.Port {
 
 // resolvePorts resolves declared definitions for discovery. A definition that
 // fails strict resolution is dropped here because Discoverable has no error
-// channel — Start's consumer setup (inputs) and flow validation (outputs)
-// surface the same fault loudly.
+// channel. Inputs are re-resolved LOUDLY by Start's consumer setup; the output
+// requester's guard is narrower — it is a compile-time constant
+// (graphown.RequesterPortDefinition) proven by the real-NATS boot, so a drop
+// here can only follow a framework port-rule change.
 func resolvePorts(defs []component.PortDefinition, dir component.Direction) []component.Port {
 	ports := make([]component.Port, 0, len(defs))
 	for _, d := range defs {

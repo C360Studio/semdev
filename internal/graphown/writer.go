@@ -134,7 +134,9 @@ func (w *Writer) Replace(ctx context.Context, entityID string, desired []message
 		if delay := writeRetryBackoff(lastErr, attempt); delay > 0 {
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("reconcile %q on %s: %w", contract, entityID, ctx.Err())
+				// Keep the classified error visible: on the shutdown-during-retry
+				// path it is the one diagnostic fact (unavailable vs commit-unknown).
+				return fmt.Errorf("reconcile %q on %s: %w (last attempt: %v)", contract, entityID, ctx.Err(), lastErr)
 			case <-time.After(delay):
 			}
 		}
