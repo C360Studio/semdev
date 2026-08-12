@@ -105,7 +105,7 @@
 
 - [x] 7.1 Offline ladder green: `task check` (build + vet + unit + offline
       pins) across all packages
-- [ ] 7.2 Full `task e2e -race` on fresh docker NATS (`task nats:reset`
+- [x] 7.2 Full `task e2e -race` on fresh docker NATS (`task nats:reset`
       satisfies the fresh-storage adoption premise): all bridge-proof
       journeys green, zero skips — named gates:
       `TestBridgeProofWebhookIssueToApprovedRun`,
@@ -114,16 +114,16 @@
       `TestBridgeProofApprovalByPollNoWebhook`,
       `TestBridgeProofNLApprovalReleasesGate`, the retry/rejection/exhaustion
       journeys
-- [ ] 7.3 Run the e2e gate 3× green consecutively (Reconcile's doubled wire
+- [x] 7.3 Run the e2e gate 3× green consecutively (Reconcile's doubled wire
       ops shift timing; three runs is the flake bar prior bumps used)
-- [ ] 7.4 Adversarial review: `semstreams-reviewer` + `go-reviewer` on the
+- [x] 7.4 Adversarial review: `semstreams-reviewer` + `go-reviewer` on the
       full migration diff (standing directive); fold ALL findings before the
       group commits are final
-- [ ] 7.5 Evidence-ledger entry: the bump, the upstream artifact (tag
+- [x] 7.5 Evidence-ledger entry: the bump, the upstream artifact (tag
       `v1.0.0-beta.160` = candidate-proof SHA `8403a221`), the journey
       evidence, and the resolution of beta.159's parked posture/Resign
       questions (moot — mechanism removed)
-- [ ] 7.6 Docs: real-LLM runbook gains the fresh-NATS-storage adoption note;
+- [x] 7.6 Docs: real-LLM runbook gains the fresh-NATS-storage adoption note;
       CLAUDE.md pin moves to beta.160 with the wave summary
-- [ ] 7.7 `openspec validate --all --strict` green; sync the
+- [x] 7.7 `openspec validate --all --strict` green; sync the
       harness-measurement delta; archive the change

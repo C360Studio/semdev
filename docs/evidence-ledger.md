@@ -196,6 +196,66 @@ disposable target (`C360Studio/semdev-test`).
 
 ## Framework migrations
 
+### 2026-08-12 — semstreams beta.159 → beta.160 (ADR-091 ownership removal — the final pre-v1 breaking wave)   [kind: migration]
+
+**Status: OFFLINE + DOCKER GREEN, both reviewers APPROVE 0B/0H. No paid
+tokens.** The upstream artifact exists and is recorded: tag `v1.0.0-beta.160`
+= its own `candidate-proof` release, SHA `8403a221` — the stable migration
+target the cutover guides gate on. The two questions beta.159 parked for this
+wave resolve as MOOT: the ownership/lease mechanism is deleted upstream, so
+there is no enforcement posture to re-ask and no Resign/clean-shutdown
+question — semdev's claim ledger, heartbeats, and failed-boot release logic
+were deleted WITH it (no shims, no deprecated code retained). The
+ADR-080 lesson substrate survives the wave (`emit_lesson` still registered
+and classified); lessons adoption stays deferred per the 2026-08-11 decision.
+
+Commits `4e789d7` (bump, intentionally red) → `e6a5323` (the seam/boot/port
+migration) → `2de42d3` (real-NATS flow-validation demands) → `bc1e450`
+(ADR-089 effect metadata, 14 definitions + census) → `fc3b97d` (the envelope
+fix) → `c85fb20` + `70385ea` (both review folds, ALL findings applied).
+
+| Evidence | Result |
+|---|---|
+| `go build ./...`, `go vet ./...`, `go vet -tags=e2e ./test/...`, gofmt | clean |
+| `task check` (offline ladder, all packages) | 0 failures |
+| `task test:integration` (real-NATS boot smoke, fresh storage) | green |
+| `go test -race -tags=e2e -count=1` (real docker, fresh NATS per run) | **4 consecutive green runs**: 486s, 496s, 468s, and 459s on the FINAL folded tree — 19 PASS / 0 FAIL each, the only 2 skips the env-gated paid + semsource lanes |
+| Adversarial review (go-reviewer + semstreams-reviewer, full diff vs the module cache) | **both APPROVE, zero blocking/high**; every finding folded (`c85fb20`, `70385ea`) |
+| `openspec validate --all --strict` | valid |
+
+**What the journeys caught that the offline ladder could not — and it was ONE
+cause.** The first docker run failed ALL 18 journeys identically: beta.160
+changed the `graph.ingest.query.entity` RESPONSE SHAPE (the subject survived;
+the body became the `{entity, kvRevision}` envelope), and semdev's two
+hand-rolled readers unmarshalled the envelope into a bare `EntityState` —
+which decodes silently to EMPTY. The validation station read every authored
+change as "no change document" and parked every run; the park-post resolver
+read every live run as missing. Both readers now hold the framework's
+`graph.ExactEntityReader` (it decodes its own envelope), and the literal wire
+bytes are pinned OFFLINE (`TestReadFactsDecodesTheAuthorityEnvelope`,
+`TestFetcherDecodesTheAuthorityEnvelope`) so the silent-empty-decode class
+never needs docker to catch again. The migration recon had cleared these
+reads because the SUBJECT survived — response shapes are now part of the
+next migration's checklist.
+
+**Behavioral deltas accepted and pinned:** the seam owns bounded retry (the
+beta.160 client is single-request): revision conflicts retry ×3 (interleaving
+noise under G5), transport kinds ×4 (the deleted framework retry's ride-out
+profile — the station dispatch-failed stamp cannot escalate a lost write);
+exhaustion surfaces the classified error unchanged. The admission birth moved
+to the strict-Create lane — conflict IS the idempotent-duplicate signal, and
+the recorded-but-runless redelivery still republishes the wake (pinned). A
+missing entity is now a classified not-found on the authority read; the seam
+maps it to an empty read for the emptiness-gated callers (pinned). Rule
+`add_triple` is now must-exist + tuple-set-valued and `remove_triple` is a
+revision-fenced reconcile — the parks append pin re-based to assert exactly
+the semantics the park rules rest on.
+
+**Not claimed:** no real-LLM run was made for this migration; the paid lane
+and the semsource condition lane stayed env-gated skips throughout. Fresh
+NATS storage was provisioned per run (`task nats:reset`) per the stable-tag
+adoption premise; the runbook carries the persistent-deployment note.
+
 ### 2026-07-31 — semstreams beta.154 → beta.159 (ADR-056 projection mutation client)   [kind: migration]
 
 **Status: OFFLINE + DOCKER GREEN. No paid tokens.** The Go fact-write path moved

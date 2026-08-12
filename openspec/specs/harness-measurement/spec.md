@@ -8,9 +8,7 @@ harness writer, tool schemas accept no outcome parameters, and `measure_task`
 is the developer's in-loop feedback channel. Per-task adversarial semantic
 review is gated on these harness-stamped results, with rejection routing work
 back into development within the attempt budget.
-
 ## Requirements
-
 ### Requirement: Measurement facts are stamped by the executing harness
 
 The harness that executed a task's `test_command` SHALL stamp the measurement
@@ -114,63 +112,101 @@ outcome is*.
 - **THEN** the attempt routes as failed
 - **AND** no route treats the model's own claim as a measurement
 
-### Requirement: Go fact-writes go through a contract-bound projection owner
+### Requirement: Go fact-writes go through a contract-validated projection client
 
-Every Go component that writes owned facts SHALL do so through a `pkg/projection`
-mutation client bound to a declared `projection.Contract`, never through an ad-hoc
-graph mutation. The write still travels over NATS to graph-ingest; what the
-contract adds is a declared owner identity, a per-predicate write mode, and an
-owner-token fence — so an owned write cannot originate from an unbound writer.
+Every Go component that writes graph facts SHALL do so through a
+`pkg/projection` mutation client validating against a declared local
+`projection.Contract`, never through an ad-hoc graph mutation. The write
+still travels over NATS to graph-ingest; what the contract adds is local
+intent validation — entity-pattern match, declared predicate groups, and a
+write verb per group — so a misdirected write fails loudly at the writer
+instead of landing silently.
 
-Each contract's predicate set SHALL be derived from the checked-in single-writer
-vocabulary table, so the projection owners and the G5 writer census cannot drift:
-a predicate owned by a Source in the table is owned by that Source's projection
-contract, and no other.
+Each contract's predicate set SHALL be derived from the checked-in
+single-writer vocabulary table, so the projection contracts and the G5 writer
+census cannot drift: a predicate owned by a Source in the table appears in
+that Source's contract, and no other.
 
-The write mode SHALL match the fact's semantics: a replace-by-predicate fact is a
-`replace-owned` group, an append-only ledger is an `append-evidence` group, and a
-primary-subject creation fact is a birth predicate. A mode mismatch is silent at
-compile time — an append ledger bound as replace-owned drops prior entries — so a
-conformance census SHALL assert every contract's mode against the fact's declared
-pattern.
+The write verb SHALL match the fact's semantics: a replace-by-predicate fact
+is a reconcile group, an append-only ledger is an append group, and a
+primary-subject creation fact is a birth predicate issued as a strict create.
+A verb mismatch is silent at compile time, so a conformance census SHALL
+assert every contract's verb against the fact's declared pattern.
 
-#### Scenario: An owned write is refused from an unbound writer
-- **WHEN** a Go path attempts an owned write without a bound projection contract
-- **THEN** the write does not compile or is rejected, never silently applied
+The client's classified outcomes SHALL be honored, never reinterpreted:
+`entity_not_found`, `revision_mismatch`, and `commit_unknown` are distinct
+results, and ambiguity is never treated as success. A revision conflict on a
+single-writer group MAY be retried a bounded number of times within the
+writing seam; exhaustion SHALL surface the classified error to the caller
+unchanged.
+
+#### Scenario: A misclassed predicate fails at the writer, not silently
+
+- **WHEN** a Go write presents a predicate on an entity class outside its
+  contract's declared pattern
+- **THEN** the write is rejected with a named error before any wire request,
+  never silently applied
 
 #### Scenario: Contracts match the single-writer census
+
 - **WHEN** the contract-census conformance test runs
-- **THEN** every projection contract's owner and predicates match the vocab writer table exactly
+- **THEN** every projection contract's predicates match the vocab writer
+  table exactly
 
-#### Scenario: An append ledger is bound append-evidence, not replace-owned
-- **WHEN** a predicate is a declared append-set ledger
-- **THEN** its contract group mode is `append-evidence` and the census fails on any other mode
+#### Scenario: A creation fact is a strict create and a duplicate is idempotent
 
-### Requirement: Owned-write coverage is proven positively; the lease stays observe-only
+- **WHEN** a birth write finds its content-derived entity already exists
+- **THEN** the writer treats the conflict as the already-admitted duplicate
+  path — no error escalation, and no repeated downstream wake
 
-graph-ingest SHALL run the owner lease observe-only for the life of the beta.159
-pin: `enforce_owner_lease` explicitly false in every shipped config, never
-absent — an absent key silently inherits whatever the framework default becomes.
-The originally planned enforcement flip is VOID as-built (design D5, 2026-08-11):
-semstreams' announced final refactor phase removes the ownership/lease mechanism,
-so the posture question transfers to the next-tag migration change, re-asked
-against ownership's replacement.
+#### Scenario: Revision-conflict retry is bounded and loud on exhaustion
 
-Because the lease meter cannot see an un-tokened write (it counts stale tokens,
-not missing ones), owned-write coverage SHALL be proven positively and offline
-instead: every declared owner binds at boot BEFORE any component or tool that
-writes is registered, and no Go call site names a graph-mutation subject outside
-the owning seam, with sanctioned exceptions named individually and capped.
+- **WHEN** a reconcile write loses the revision fence more times than the
+  bounded retry allows
+- **THEN** the classified revision-conflict error reaches the caller
+  unchanged, where existing retry/park routing owns it
 
-#### Scenario: The observe-only posture is explicit and pinned
-- **WHEN** a shipped config declares the graph-ingest component
-- **THEN** `enforce_owner_lease` is present and false
-- **AND** an absent key or a true value fails the offline conformance pin
+### Requirement: Write coverage is proven positively at boot
 
-#### Scenario: An unbound owner fails at boot, not at first write
-- **WHEN** the runtime boots and a declared owner has no bound mutation client
-- **THEN** boot fails naming the owner, before anything that writes is registered
+Write coverage SHALL be proven positively and offline: the projection client
+carries every declared contract before any component or tool that writes is
+registered, and boot fails naming the gap otherwise. No Go call site SHALL
+name a `graph.mutation.*` subject outside the owning seam — with zero
+sanctioned exceptions — and an offline census SHALL enforce both properties.
+
+#### Scenario: A missing contract fails at boot, not at first write
+
+- **WHEN** the runtime boots and a declared writer has no contract in the
+  constructed client
+- **THEN** boot fails naming the writer, before anything that writes is
+  registered
 
 #### Scenario: A hand-rolled mutation subject fails the census
-- **WHEN** a Go call site outside the owning seam names a `graph.mutation.*` subject beyond the named sanctioned exceptions
-- **THEN** the offline census fails, naming the file and line
+
+- **WHEN** a Go call site outside the owning seam names a `graph.mutation.*`
+  subject
+- **THEN** the offline census fails naming the file and subject
+
+### Requirement: Every registered tool declares a worst-effect classification
+
+Every tool semdev registers into the executor registry SHALL declare a
+worst-effect classification (`read_only`, `mutating`, or `external_effect`)
+per the framework's effect contract: the value is a worst-effect claim, an
+outbound read is `read_only`, and `external_effect` dominates `mutating`. A
+source-level census SHALL fail on any semdev-registered tool whose effect is
+absent or unrecognized, so a new tool cannot ship unclassified.
+
+Effect metadata is descriptive: it SHALL NOT alter any configured gate
+(`approval_required`, `allowed_tools`, per-loop advertised-tool admission)
+in either direction.
+
+#### Scenario: An unclassified tool fails the census
+
+- **WHEN** a tool is registered without a valid effect classification
+- **THEN** the offline census fails naming the tool
+
+#### Scenario: Discovery serves the declared effect
+
+- **WHEN** the tool catalog is served over the discovery port
+- **THEN** each semdev tool carries its declared effect value
+

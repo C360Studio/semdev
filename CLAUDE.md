@@ -39,26 +39,38 @@ shape. **Read these three documents before changing anything:**
   keep the two roles distinct (our changes live in `openspec/`; product
   changes live in the target repo's workspace).
 - Conventional commits: `<type>(scope): subject`.
-- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.159` (started at beta.134; beta.147
+- Go 1.26+ (go.mod declares 1.26.3); semstreams pinned at `v1.0.0-beta.160` (started at beta.134; beta.147
   is the canonical-predicate + entity-ID breaking wave; beta.149 landed the #551
   per-loop executor tool-enforcement fix; beta.150 enforces the canonical predicate/entity
-  contract FAIL-CLOSED at the graph-write boundary — semdev's vocab already conforms; beta.153 landed
-  all three filed asks — #568 `OpLengthGte`/`OpLengthLte`, #569 `LoopTerminalReason` stamped from
-  `event.Reason`, #566 the `rule.Processor` health/flow-getter data-race fix; beta.154 is additive —
-  the ADR-080 lesson substrate (`emit_lesson` builtin + `agent.lesson.*` vocab + brief-assembly
-  injection of ACTIVE lessons, semdev mints none so briefs are unchanged) and the graph-ingest #583
-  entity-cache read-after-write race fix; **beta.159 is the ADR-056 BREAKING wave** —
-  `agentictools.OwnedFactWriter` DELETED for `pkg/projection`'s contract-bound mutation
-  client, migrated in `migrate-semstreams-beta159`. Three durable hazards it introduced:
-  (1) `ReplaceOwned` removes THE WHOLE SELECTED GROUP then adds `Desired`, so the group
-  is each write's blast radius and `ownedFactsMatch` returns `CommitVerified` on a
-  wrongful deletion; (2) a `Contract` carries ONE `EntityPattern` and rejects entities
-  outside it, so contracts are per-(owner, entity class) — `internal/graphown` derives 19
-  from the vocab table; (3) ownership registration is DESTRUCTIVE — `RegisterOwner`
-  replaces the epoch entry with no liveness check while a client caches its token once,
-  so **a process binds ONLY the owners it writes** (`graphown.BindOwners`). Also: ordinary
-  streams must declare `max_bytes`+`discard`, and `RegisterBuiltins` hard-fails on
-  `write_todos` without a mutation client a product shell cannot supply — semdev skips it);
+  contract FAIL-CLOSED at the graph-write boundary; beta.153 landed the three filed asks
+  (#568/#569/#566); beta.154 is additive — the ADR-080 lesson substrate (semdev mints no
+  lessons; adoption deferred by user decision 2026-08-11) + the #583 cache-race fix;
+  beta.159 was the ADR-056 wave (contract-bound mutation client, `internal/graphown` derives
+  the contracts from the vocab table); **beta.160 is the FINAL pre-v1 BREAKING wave
+  (ADR-091 + Foundation B + the graph-query closure), migrated in
+  `migrate-semstreams-beta160`** — tag = its own candidate-proof release (`8403a221`).
+  OWNERSHIP IS DELETED: contracts validate local intent only (nothing registers, leases,
+  or fences — the bind-only-what-you-write discipline is retired); one shared
+  `projection.NewMutationClient` carries all 19 contracts; `graphown.Writer.Replace` rides
+  `Reconcile` (SAME group-blast-radius semantics — the group is still each write's blast
+  radius) with seam-owned bounded retry (revision-conflict ×3, transport ×4), and the
+  admission birth is a strict Create whose CONFLICT is the idempotent-duplicate signal.
+  Durable beta.160 hazards: (1) `graph.ingest.query.entity` replies the
+  `{entity, kvRevision}` ENVELOPE — a bare-EntityState decode reads as silently EMPTY
+  (this parked all 18 journeys once; readers must use `graph.ExactEntityReader`, pinned
+  offline; CHECK RESPONSE SHAPES, not just subjects, on every migration); (2) a missing
+  entity is a classified not-found on authority reads (the seam maps it to empty for
+  emptiness-gated callers); (3) rule `add_triple` is must-exist + tuple-set-valued and
+  `remove_triple` is a revision-fenced reconcile; (4) ports use the strict typed
+  `config.kind` envelope (Go `Portable` + JSON), every mutating component declares the
+  `semstreams.graph.mutation` v1 requester (built ONLY via
+  `graphown.RequesterPortDefinition` — the census caps hand-rolled subjects at ZERO), and
+  `ConfigureFromServices` composes AND seals the service set (no post-configure
+  construction); (5) agentic-loop needs the `objectstore` storage component
+  (AGENT_CONTENT) for trajectory evidence, tool discovery lives at `discovery.tool.list`
+  (TOOL stream narrowed to `tool.execute.>`+`tool.result.>`), and adoption of a stable
+  tag starts on FRESH NATS storage. semdev's 14 registered tools carry ADR-089
+  worst-effect metadata, census-enforced);
   NATS via docker compose (never embedded).
 - Mock ladder green before any real-LLM token. Real-LLM runs get watch
   sidecars and evidence-ledger entries.
