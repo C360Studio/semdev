@@ -103,7 +103,7 @@
 
 ## 7. Evidence ladder and closeout
 
-- [ ] 7.1 Offline ladder green: `task check` (build + vet + unit + offline
+- [x] 7.1 Offline ladder green: `task check` (build + vet + unit + offline
       pins) across all packages
 - [ ] 7.2 Full `task e2e -race` on fresh docker NATS (`task nats:reset`
       satisfies the fresh-storage adoption premise): all bridge-proof

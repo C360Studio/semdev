@@ -2,7 +2,6 @@ package admission
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,48 +11,58 @@ import (
 	"github.com/c360studio/semstreams/pkg/errs"
 )
 
-// EntityFetcher resolves one graph entity by ID — implemented over
-// graph.ingest.query.entity; faked in unit pins. The park-post lane reads a run
-// entity through it; the shared admission core is its home (a reusable graph-read
-// adapter beside the RunResolver).
+// EntityFetcher resolves one graph entity by ID — implemented over the
+// framework's exact-entity authority read; faked in unit pins. The park-post
+// lane reads a run entity through it; the shared admission core is its home (a
+// reusable graph-read adapter beside the RunResolver).
 type EntityFetcher interface {
 	Entity(ctx context.Context, entityID string) (*graph.EntityState, error)
 }
 
+// fetchTimeout bounds one entity read round-trip.
+const fetchTimeout = 5 * time.Second
+
 // NewNATSEntityFetcher builds the graph-backed single-entity fetcher over a live
 // NATS client.
 func NewNATSEntityFetcher(client *natsclient.Client) EntityFetcher {
-	return &natsEntityFetcher{client: client}
+	if client == nil {
+		return &natsEntityFetcher{}
+	}
+	return &natsEntityFetcher{reader: graph.NewExactEntityReader(client, fetchTimeout)}
 }
 
-// natsEntityFetcher reads one entity via graph.ingest.query.entity.
+// NewExactEntityFetcher builds the fetcher over an already-constructed
+// exact-entity reader — the seam the offline envelope pins drive.
+func NewExactEntityFetcher(reader graph.ExactEntityReader) EntityFetcher {
+	return &natsEntityFetcher{reader: reader}
+}
+
+// natsEntityFetcher reads one entity through graph.ExactEntityReader. The wire
+// (the beta.160 {entity, kvRevision} envelope) lives entirely in the framework
+// reader — semdev's previous hand-rolled decode read that envelope as an EMPTY
+// EntityState, which this lane's ID=="" branch then collapsed to "not found":
+// every park-post resolve failed on a live entity.
 type natsEntityFetcher struct {
-	client *natsclient.Client
+	reader graph.ExactEntityReader
 }
 
 func (n *natsEntityFetcher) Entity(ctx context.Context, entityID string) (*graph.EntityState, error) {
-	req, err := json.Marshal(map[string]string{"id": entityID})
-	if err != nil {
-		return nil, err
+	if n.reader == nil {
+		return nil, fmt.Errorf("entity query %s: no graph reader bound", entityID)
 	}
-	respData, err := n.client.RequestClassified(ctx, "graph.ingest.query.entity", req, 5*time.Second)
+	exact, err := n.reader.ReadExactEntity(ctx, entityID)
 	if err != nil {
-		// A MISSING entity is a classified entity_not_found ERROR on this lane
-		// (the framework's own readers collapse it to nil — review finding: the
-		// old ID=="" branch was unreachable and absence redelivered to
-		// exhaustion instead of the documented definitive ack).
+		// A MISSING entity is a classified entity_not_found ERROR on this lane;
+		// this fetcher's contract collapses it to nil (the caller treats absence
+		// as a definitive ack, never a redelivery-to-exhaustion).
 		var ce *errs.ClassifiedError
 		if errors.As(err, &ce) && ce.Code == graph.ErrorCodeEntityNotFound {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("entity query %s: %w", entityID, err)
 	}
-	var e graph.EntityState
-	if err := json.Unmarshal(respData, &e); err != nil {
-		return nil, fmt.Errorf("decode entity %s: %w", entityID, err)
-	}
-	if e.ID == "" {
+	if exact == nil || exact.Entity == nil {
 		return nil, nil
 	}
-	return &e, nil
+	return exact.Entity, nil
 }

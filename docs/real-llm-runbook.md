@@ -20,7 +20,14 @@ evidence the ledger cannot accept (G7).
    weakening the gate. NOTE: bare `go test` invocations do NOT load `.env` —
    launch through `task realllm:launch`, or export the key yourself.
 3. **Docker up**, NATS compose reachable (the journey resets it itself).
-4. **Abort criteria written down** (§3) before launch, not improvised after.
+4. **Fresh NATS storage on any semstreams-tag adoption.** The beta.160
+   stable-tag contract (post-G tag-safety closeout) makes freshly provisioned
+   NATS storage the adoption premise: dev/e2e satisfy it via `task nats:reset`
+   (which every journey and launch lane already runs), but a PERSISTENT
+   deployment adopting a new semstreams tag must start on new storage —
+   discovering retained deployed state stops that adoption and requires an
+   owner-reviewed migration, never a copied wildcard deletion.
+5. **Abort criteria written down** (§3) before launch, not improvised after.
 
 ## 1. The model config (Gemini — the framework's first-class route)
 
