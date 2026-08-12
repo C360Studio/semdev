@@ -25,7 +25,8 @@ func TestPollConfigXORsTheWebhookConsumer(t *testing.T) {
 	subjectsOf := func(c *Component) []struct{ name, subject string } {
 		var out []struct{ name, subject string }
 		for _, p := range c.activeConsumerPorts() {
-			out = append(out, struct{ name, subject string }{p.Name, p.Subject})
+			subject, _, _ := jetstreamLane(p)
+			out = append(out, struct{ name, subject string }{p.Name, subject})
 		}
 		return out
 	}

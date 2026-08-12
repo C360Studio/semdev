@@ -1,6 +1,9 @@
 package conformance
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // The agentic-execution plane is the four framework processors that actually run
 // agent loops: agentic-tools (executes tool calls), agentic-model (calls the
@@ -25,10 +28,14 @@ var wantAgenticComponents = map[string]string{
 // loop/model/tools/dispatch ports reference these by stream_name; a missing
 // stream declaration means a consumer binds to a stream that must auto-provision
 // (or fails), so semdev declares them explicitly and pins their presence.
-var wantAgenticStreams = map[string]string{
-	"AGENT": "agent.>",
-	"TOOL":  "tool.>",
-	"USER":  "user.>",
+// TOOL is deliberately the NARROWED pair (beta.160 discovery cutover): the
+// tool.list request moved to a nats-request port at discovery.tool.list, and a
+// stream capturing `tool.>` would swallow those requests. The census asserts the
+// narrowing so a broadening regression cannot silently re-capture discovery.
+var wantAgenticStreams = map[string][]string{
+	"AGENT": {"agent.>"},
+	"TOOL":  {"tool.execute.>", "tool.result.>"},
+	"USER":  {"user.>"},
 }
 
 // TestBootstrapDeclaresAgenticExecutionPlane — the bootstrap config declares all
@@ -58,14 +65,14 @@ func TestBootstrapDeclaresAgenticExecutionPlane(t *testing.T) {
 		}
 	}
 
-	for name, wantSubject := range wantAgenticStreams {
+	for name, wantSubjects := range wantAgenticStreams {
 		s, ok := cfg.Streams[name]
 		if !ok {
 			t.Errorf("stream %q not declared; the plane's ports bind to it by stream_name", name)
 			continue
 		}
-		if len(s.Subjects) == 0 || s.Subjects[0] != wantSubject {
-			t.Errorf("stream %q subjects = %v, want first subject %q", name, s.Subjects, wantSubject)
+		if !slices.Equal(s.Subjects, wantSubjects) {
+			t.Errorf("stream %q subjects = %v, want %v", name, s.Subjects, wantSubjects)
 		}
 	}
 }

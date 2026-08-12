@@ -114,7 +114,7 @@ type fakeWriter struct {
 	err   error
 }
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	if w.err != nil {
 		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
 	}

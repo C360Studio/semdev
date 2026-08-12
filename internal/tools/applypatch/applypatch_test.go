@@ -40,7 +40,7 @@ type fakeWriter struct {
 	gotGroup    string
 }
 
-func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (f *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	f.gotEntity = m.EntityID
 	f.gotTriples = m.Desired
 	f.gotContract = m.Contract

@@ -1,6 +1,6 @@
 {
-  "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) — so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect. ⚠ TWO INVARIANTS, both load-bearing and both pinned by TestShippedConfigVersionsAreParseableSemver. (1) PLAIN SEMVER ONLY (MAJOR.MINOR.PATCH, digits): config.CompareVersions strconv.Atoi's each segment, so a suffixed value fails to parse, the manager treats the error as \"sync from KV\", and this file silently loses every boot. (2) THE MOCK CONFIG'S VERSION MUST STAY STRICTLY GREATER THAN THE LIVE CONFIG'S. Both files share ONE KV entry — the bucket name (\"semstreams_config\") and key (\"version\") are hardcoded globals, not platform-derived — and both declare the IDENTICAL platform identity (c360/semdev-bootstrap/development), so the framework's gh#459 cross-app detach guard cannot fire and VERSION ALONE decides which file wins. PushToKV writes model_registry, so if the live config could ever win, a subsequent mock-config boot would adopt gemini endpoints and the free ladder would spend real tokens behind a single WARN line. Keeping mock > live makes every stale-KV race resolve toward the FREE config; the live lane loads via its mandatory `task nats:reset`. A distinct platform.id for the live config is the framework's sanctioned isolation and is the stronger fix, but it changes entity-ID prefixes (the runbook's sidecar queries grep them), so it is a deliberate follow-up.",
-  "version": "0.29.2",
+  "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect. \u26a0 TWO INVARIANTS, both load-bearing and both pinned by TestShippedConfigVersionsAreParseableSemver. (1) PLAIN SEMVER ONLY (MAJOR.MINOR.PATCH, digits): config.CompareVersions strconv.Atoi's each segment, so a suffixed value fails to parse, the manager treats the error as \"sync from KV\", and this file silently loses every boot. (2) THE MOCK CONFIG'S VERSION MUST STAY STRICTLY GREATER THAN THE LIVE CONFIG'S. Both files share ONE KV entry \u2014 the bucket name (\"semstreams_config\") and key (\"version\") are hardcoded globals, not platform-derived \u2014 and both declare the IDENTICAL platform identity (c360/semdev-bootstrap/development), so the framework's gh#459 cross-app detach guard cannot fire and VERSION ALONE decides which file wins. PushToKV writes model_registry, so if the live config could ever win, a subsequent mock-config boot would adopt gemini endpoints and the free ladder would spend real tokens behind a single WARN line. Keeping mock > live makes every stale-KV race resolve toward the FREE config; the live lane loads via its mandatory `task nats:reset`. A distinct platform.id for the live config is the framework's sanctioned isolation and is the stronger fix, but it changes entity-ID prefixes (the runbook's sidecar queries grep them), so it is a deliberate follow-up.",
+  "version": "0.32.0",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -11,7 +11,7 @@
   },
   "tier": "agentic",
   "experiment": {
-    "_comment": "The semsource A/B condition (integrate-semsource-ab-harness) — a semdev-OWNED section the framework loader ignores. condition: \"\" (unconfigured, the baseline DEFAULT — zero new facts, zero semsource code paths), \"baseline\" (stamps experiment.run.condition=baseline as an evidence label), or \"semsource\" (requires semsource_endpoint; boot swaps the -semsource variant dispatch pack in, constructs the live proxy client, and launch gates on semsource's PER-SIGNAL readiness — index.ready AND embedding.ready). The condition is an evidence label only: no rule reads experiment.* (conformance-linted).",
+    "_comment": "The semsource A/B condition (integrate-semsource-ab-harness) \u2014 a semdev-OWNED section the framework loader ignores. condition: \"\" (unconfigured, the baseline DEFAULT \u2014 zero new facts, zero semsource code paths), \"baseline\" (stamps experiment.run.condition=baseline as an evidence label), or \"semsource\" (requires semsource_endpoint; boot swaps the -semsource variant dispatch pack in, constructs the live proxy client, and launch gates on semsource's PER-SIGNAL readiness \u2014 index.ready AND embedding.ready). The condition is an evidence label only: no rule reads experiment.* (conformance-linted).",
     "condition": "",
     "semsource_endpoint": ""
   },
@@ -42,7 +42,8 @@
     },
     "TOOL": {
       "subjects": [
-        "tool.>"
+        "tool.execute.>",
+        "tool.result.>"
       ],
       "storage": "file",
       "max_age": "24h",
@@ -126,20 +127,17 @@
   },
   "services": {
     "service-manager": {
-      "name": "service-manager",
       "enabled": true,
       "config": {
-        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven — if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
+        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven \u2014 if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
         "http_port": 18080
       }
     },
     "component-manager": {
-      "name": "component-manager",
       "enabled": true,
       "config": {}
     },
     "metrics": {
-      "name": "metrics",
       "enabled": true,
       "config": {
         "port": 9091,
@@ -157,17 +155,26 @@
           "inputs": [
             {
               "name": "graph_mutations",
-              "subject": "graph.mutation.>",
-              "type": "nats",
-              "description": "Triple add/remove mutations from semdev's agentic tools and rules"
+              "description": "The canonical typed mutation provider (ADR-091): semdev's tools, stations, and rules mutate through this port.",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              },
+              "required": true
             }
           ],
           "outputs": [
             {
               "name": "entity_states",
-              "subject": "ENTITY_STATES",
-              "type": "kv-write",
-              "description": "Entity state KV bucket"
+              "description": "Entity state KV bucket",
+              "config": {
+                "kind": "kv-write",
+                "bucket": "ENTITY_STATES"
+              }
             }
           ]
         },
@@ -184,8 +191,10 @@
           "inputs": [
             {
               "name": "query_requests",
-              "subject": "graph.query.>",
-              "type": "nats-request"
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.query.>"
+              }
             }
           ],
           "outputs": []
@@ -257,19 +266,37 @@
       "name": "issue-intake",
       "enabled": true,
       "config": {
-        "_comment": "The forge-io front door (forge-io-real-lanes): durable consumer on the GITHUB stream (semdev-declared; the framework retired its webhook input in beta.147). DEFAULT POSTURE IS FAIL-CLOSED: receiver disabled (http_port 0 — journeys publish flattened events straight onto the stream), repo unbound, allowlist empty, no token env populated => allowlist-only admission with an empty allowlist rejects every actor. A live deployment sets http_port + webhook_secret_env + repo + allowlist (or GITHUB_TOKEN via the dotenv lane for collaborator checks).",
+        "_comment": "The forge-io front door (forge-io-real-lanes): durable consumer on the GITHUB stream (semdev-declared; the framework retired its webhook input in beta.147). DEFAULT POSTURE IS FAIL-CLOSED: receiver disabled (http_port 0 \u2014 journeys publish flattened events straight onto the stream), repo unbound, allowlist empty, no token env populated => allowlist-only admission with an empty allowlist rejects every actor. A live deployment sets http_port + webhook_secret_env + repo + allowlist (or GITHUB_TOKEN via the dotenv lane for collaborator checks).",
         "ports": {
           "inputs": [
             {
               "name": "github_events",
-              "type": "jetstream",
-              "subject": "github.event.issue",
-              "stream_name": "GITHUB",
               "required": true,
-              "description": "Flattened issue events (the receiver or an e2e journey publishes them)."
+              "description": "Flattened issue events (the receiver or an e2e journey publishes them).",
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "GITHUB",
+                "subjects": [
+                  "github.event.issue"
+                ]
+              }
             }
           ],
-          "outputs": []
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The admission-record birth write (strict create through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
+            }
+          ]
         },
         "http_port": 0,
         "repo": "C360Studio/semdev-test",
@@ -287,43 +314,70 @@
       "name": "conversation-channel",
       "enabled": true,
       "config": {
-        "_comment": "The human conversation lane (conversation-channel-seam): the /semdev approve comment consumer (github.event.comment off the same webhook-fed GITHUB stream) + the park-post consumer (user.response.>). With GITHUB_TOKEN set (dotenv lane) the approval runs collaborator checks + posts park messages to the thread; without it, allowlist-only approval + graph-only parks. PAIRED-INVARIANT (review M1): allowlist + repo + opt_in_command MUST match issue-intake's — if they drift and this component omits an actor issue-intake admits (allowlist-only mode), the run parks FOREVER because /semdev approve is rejected here. Keep both components' knobs identical.",
+        "_comment": "The human conversation lane (conversation-channel-seam): the /semdev approve comment consumer (github.event.comment off the same webhook-fed GITHUB stream) + the park-post consumer (user.response.>). With GITHUB_TOKEN set (dotenv lane) the approval runs collaborator checks + posts park messages to the thread; without it, allowlist-only approval + graph-only parks. PAIRED-INVARIANT (review M1): allowlist + repo + opt_in_command MUST match issue-intake's \u2014 if they drift and this component omits an actor issue-intake admits (allowlist-only mode), the run parks FOREVER because /semdev approve is rejected here. Keep both components' knobs identical.",
         "ports": {
           "inputs": [
             {
               "name": "comment_events",
-              "type": "jetstream",
-              "subject": "github.event.comment",
-              "stream_name": "GITHUB",
               "required": true,
-              "description": "Flattened comment events (issue-intake's receiver or an e2e journey publishes them)."
+              "description": "Flattened comment events (issue-intake's receiver or an e2e journey publishes them).",
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "GITHUB",
+                "subjects": [
+                  "github.event.comment"
+                ]
+              }
             },
             {
               "name": "user_responses",
-              "type": "jetstream",
-              "subject": "user.response.>",
-              "stream_name": "USER",
-              "required": false,
-              "description": "Park-lane publishes posted to the thread via the Channel port (conversation-channel-seam)."
+              "description": "Park-lane publishes posted to the thread via the Channel port (conversation-channel-seam).",
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "USER",
+                "subjects": [
+                  "user.response.>"
+                ]
+              }
             },
             {
               "name": "user_notes",
-              "type": "jetstream",
-              "subject": "user.note.>",
-              "stream_name": "USER",
-              "required": false,
-              "description": "The classifier fault-note publishes (conversation/05). Posted to the thread via the Channel port; stamps no fact. Its own subject rather than the park lane's, because run.awaiting.human is run-lifecycle/02's resume blocker and a classifier fault must not wedge a later approval. The conversation rule pack IS wired into this config (task 6.6a: rules_files + classify_intent in allowed_tools + the conversation model capability), so this port and apply_dispatch are live."
+              "description": "The classifier fault-note publishes (conversation/05). Posted to the thread via the Channel port; stamps no fact. Its own subject rather than the park lane's, because run.awaiting.human is run-lifecycle/02's resume blocker and a classifier fault must not wedge a later approval. The conversation rule pack IS wired into this config (task 6.6a: rules_files + classify_intent in allowed_tools + the conversation model capability), so this port and apply_dispatch are live.",
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "USER",
+                "subjects": [
+                  "user.note.>"
+                ]
+              }
             },
             {
               "name": "apply_dispatch",
-              "type": "jetstream",
-              "subject": "component.conversation-apply.dispatch",
-              "stream_name": "CONVERSATION",
-              "required": false,
-              "description": "The NL intent routing rules' dispatch (conversation/03a+03b). The deterministic apply consumer re-checks the gate is open, re-authorizes the harness-bound cited author, posts the transparency comment, and only then stamps the gate fact under the one approval-adapter writer. max_ack_pending 1 serializes this consumer GLOBALLY (one durable consumer, one exact subject) — not per-run, and NOT a substitute for the D7 rule partition; one slow forge call head-of-line blocks other awaiting-approval runs. The redelivery budget is a crash-loop backstop, not the retry budget: the consumer retries in-process and, on exhaustion, NOTIFIES the human and leaves the gate OPEN. It never parks — a park at this gate is unrecoverable. See apply.go FAILURE POSTURE."
+              "description": "The NL intent routing rules' dispatch (conversation/03a+03b). The deterministic apply consumer re-checks the gate is open, re-authorizes the harness-bound cited author, posts the transparency comment, and only then stamps the gate fact under the one approval-adapter writer. max_ack_pending 1 serializes this consumer GLOBALLY (one durable consumer, one exact subject) \u2014 not per-run, and NOT a substitute for the D7 rule partition; one slow forge call head-of-line blocks other awaiting-approval runs. The redelivery budget is a crash-loop backstop, not the retry budget: the consumer retries in-process and, on exhaustion, NOTIFIES the human and leaves the gate OPEN. It never parks \u2014 a park at this gate is unrecoverable. See apply.go FAILURE POSTURE.",
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "CONVERSATION",
+                "subjects": [
+                  "component.conversation-apply.dispatch"
+                ]
+              }
             }
           ],
-          "outputs": []
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The approval adapter's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
+            }
+          ]
         },
         "repo": "C360Studio/semdev-test",
         "allowlist": [
@@ -367,26 +421,47 @@
           "inputs": [
             {
               "name": "tool.execute",
-              "type": "jetstream",
-              "subject": "tool.execute.>",
-              "stream_name": "TOOL",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "TOOL",
+                "subjects": [
+                  "tool.execute.>"
+                ]
+              }
+            },
+            {
+              "name": "entity_states",
+              "config": {
+                "kind": "kv-read",
+                "bucket": "ENTITY_STATES"
+              }
             }
           ],
           "outputs": [
             {
               "name": "tool.result",
-              "type": "jetstream",
-              "subject": "tool.result.*",
-              "stream_name": "TOOL",
-              "required": true
-            }
-          ],
-          "kv_read": [
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "TOOL",
+                "subjects": [
+                  "tool.result.*"
+                ]
+              }
+            },
             {
-              "name": "entity_states",
-              "type": "kv-read",
-              "bucket": "ENTITY_STATES"
+              "name": "graph_mutations",
+              "required": true,
+              "description": "Tool fact stamps travel the canonical mutation port (semdev's tools write via the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }
@@ -407,19 +482,27 @@
           "inputs": [
             {
               "name": "agent.request",
-              "type": "jetstream",
-              "subject": "agent.request.>",
-              "stream_name": "AGENT",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.request.>"
+                ]
+              }
             }
           ],
           "outputs": [
             {
               "name": "agent.response",
-              "type": "jetstream",
-              "subject": "agent.response.*",
-              "stream_name": "AGENT",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.response.*"
+                ]
+              }
             }
           ]
         }
@@ -438,74 +521,125 @@
           "inputs": [
             {
               "name": "agent.task",
-              "type": "jetstream",
-              "subject": "agent.task.*",
-              "stream_name": "AGENT",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.task.*"
+                ]
+              }
             },
             {
               "name": "agent.response",
-              "type": "jetstream",
-              "subject": "agent.response.>",
-              "stream_name": "AGENT",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.response.>"
+                ]
+              }
             },
             {
               "name": "tool.result",
-              "type": "jetstream",
-              "subject": "tool.result.>",
-              "stream_name": "TOOL",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "TOOL",
+                "subjects": [
+                  "tool.result.>"
+                ]
+              }
             },
             {
               "name": "agent.approval_response",
-              "type": "jetstream",
-              "subject": "agent.approval_response.*",
-              "stream_name": "AGENT"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.approval_response.*"
+                ]
+              }
             }
           ],
           "outputs": [
             {
               "name": "agent.request",
-              "type": "jetstream",
-              "subject": "agent.request.*",
-              "stream_name": "AGENT"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.request.*"
+                ]
+              }
             },
             {
               "name": "tool.execute",
-              "type": "jetstream",
-              "subject": "tool.execute.*",
-              "stream_name": "TOOL"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "TOOL",
+                "subjects": [
+                  "tool.execute.*"
+                ]
+              }
             },
             {
               "name": "agent.complete",
-              "type": "jetstream",
-              "subject": "agent.complete.*",
-              "stream_name": "AGENT"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.complete.*"
+                ]
+              }
             },
             {
               "name": "agent.failed",
-              "type": "jetstream",
-              "subject": "agent.failed.*",
-              "stream_name": "AGENT"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.failed.*"
+                ]
+              }
             },
             {
               "name": "agent.approval_pending",
-              "type": "jetstream",
-              "subject": "agent.approval_pending.*",
-              "stream_name": "AGENT"
-            }
-          ],
-          "kv_write": [
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.approval_pending.*"
+                ]
+              }
+            },
             {
               "name": "loops",
-              "type": "kv-write",
-              "bucket": "AGENT_LOOPS"
+              "config": {
+                "kind": "kv-write",
+                "bucket": "AGENT_LOOPS"
+              }
             },
             {
               "name": "trajectories",
-              "type": "kv-write",
-              "bucket": "AGENT_TRAJECTORIES"
+              "config": {
+                "kind": "kv-write",
+                "bucket": "AGENT_TRAJECTORIES"
+              }
+            },
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "Loop-owned graph writes through the canonical mutation port.",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }
@@ -529,36 +663,54 @@
           "inputs": [
             {
               "name": "user.message",
-              "type": "jetstream",
-              "subject": "user.message.>",
-              "stream_name": "USER",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "USER",
+                "subjects": [
+                  "user.message.>"
+                ]
+              }
             },
             {
               "name": "agent.complete",
-              "type": "jetstream",
-              "subject": "agent.complete.*",
-              "stream_name": "AGENT",
-              "required": true
+              "required": true,
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.complete.*"
+                ]
+              }
             }
           ],
           "outputs": [
             {
               "name": "agent.task",
-              "type": "jetstream",
-              "subject": "agent.task.*",
-              "stream_name": "AGENT"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.task.*"
+                ]
+              }
             },
             {
               "name": "user.response",
-              "type": "nats",
-              "subject": "user.response.*"
+              "config": {
+                "kind": "nats",
+                "subject": "user.response.*"
+              }
             },
             {
               "name": "agent.approval_response",
-              "type": "jetstream",
-              "subject": "agent.approval_response.*",
-              "stream_name": "AGENT"
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "AGENT",
+                "subjects": [
+                  "agent.approval_response.*"
+                ]
+              }
             }
           ]
         },
@@ -586,10 +738,27 @@
           "inputs": [
             {
               "name": "dispatch",
-              "type": "nats",
-              "subject": "component.delivery-station.>",
               "required": true,
-              "description": "The delivery route's publish target (dev-from-task/08a). The run entity travels as the payload entity_id; the station stamps pr.ref on it."
+              "description": "The delivery route's publish target (dev-from-task/08a). The run entity travels as the payload entity_id; the station stamps pr.ref on it.",
+              "config": {
+                "kind": "nats",
+                "subject": "component.delivery-station.>"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The station's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         },
@@ -613,10 +782,27 @@
           "inputs": [
             {
               "name": "dispatch",
-              "type": "nats",
-              "subject": "component.projection-station.>",
               "required": true,
-              "description": "The projection rule's publish target (dev-from-task/03). The run is the payload entity_id; the slug travels as a property. The station freezes task.spec."
+              "description": "The projection rule's publish target (dev-from-task/03). The run is the payload entity_id; the slug travels as a property. The station freezes task.spec.",
+              "config": {
+                "kind": "nats",
+                "subject": "component.projection-station.>"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The station's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }
@@ -631,10 +817,27 @@
           "inputs": [
             {
               "name": "dispatch",
-              "type": "nats",
-              "subject": "component.validation-station.>",
               "required": true,
-              "description": "The validate rule's publish target (coordinator/03). Fires on the authoring loop, so run_entity_id + slug travel as properties. The station runs the OpenSpec oracle and stamps openspec.validated."
+              "description": "The validate rule's publish target (coordinator/03). Fires on the authoring loop, so run_entity_id + slug travel as properties. The station runs the OpenSpec oracle and stamps openspec.validated.",
+              "config": {
+                "kind": "nats",
+                "subject": "component.validation-station.>"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The station's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }
@@ -649,10 +852,27 @@
           "inputs": [
             {
               "name": "dispatch",
-              "type": "nats",
-              "subject": "component.floors-station.>",
               "required": true,
-              "description": "The floors-trigger rule's publish target (dev-from-task/05). Fires on the developer loop L_n, so run_entity_id + task_index travel as properties. The station stamps floor.finding on the run and the route.* mirror on L_n (the dispatch entity_id)."
+              "description": "The floors-trigger rule's publish target (dev-from-task/05). Fires on the developer loop L_n, so run_entity_id + task_index travel as properties. The station stamps floor.finding on the run and the route.* mirror on L_n (the dispatch entity_id).",
+              "config": {
+                "kind": "nats",
+                "subject": "component.floors-station.>"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The station's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }
@@ -667,10 +887,27 @@
           "inputs": [
             {
               "name": "dispatch",
-              "type": "nats",
-              "subject": "component.verify-station.>",
               "required": true,
-              "description": "The review-approved route's publish target (dev-from-task/07a). Fires on Quinn's review loop Q_n, so run_entity_id travels as a property. The station cold-proves the committed artifact and stamps verify.result on the run."
+              "description": "The review-approved route's publish target (dev-from-task/07a). Fires on Quinn's review loop Q_n, so run_entity_id travels as a property. The station cold-proves the committed artifact and stamps verify.result on the run.",
+              "config": {
+                "kind": "nats",
+                "subject": "component.verify-station.>"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The station's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }
@@ -685,10 +922,27 @@
           "inputs": [
             {
               "name": "dispatch",
-              "type": "nats",
-              "subject": "component.provision-station.>",
               "required": true,
-              "description": "The provision rule's publish target (sandbox/01). Fires on the RUN (after approval + projection), so the run is the payload entity_id and there is no property. The station materializes the checkout, cold-proves the declared image, stands up the warm container, and stamps sandbox.ready/blocked on the run."
+              "description": "The provision rule's publish target (sandbox/01). Fires on the RUN (after approval + projection), so the run is the payload entity_id and there is no property. The station materializes the checkout, cold-proves the declared image, stands up the warm container, and stamps sandbox.ready/blocked on the run.",
+              "config": {
+                "kind": "nats",
+                "subject": "component.provision-station.>"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "The station's fact stamps (reconcile through the projection client).",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
             }
           ]
         }

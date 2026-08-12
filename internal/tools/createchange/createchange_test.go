@@ -34,7 +34,7 @@ type replaceCall struct {
 	group    string
 }
 
-func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (f *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	f.replaces = append(f.replaces, replaceCall{add: m.Desired, contract: m.Contract, group: m.Group})
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }

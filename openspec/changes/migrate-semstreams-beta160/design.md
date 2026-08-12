@@ -189,6 +189,45 @@ client), and the contract↔vocab-table conformance census. Survives unchanged:
   run already; the real-LLM runbook gains the fresh-storage note so a live
   deployment cannot adopt over retained state by accident.
 
+## As-built findings (task 1.3 — what the recon did not predict)
+
+1. **`MutationClientConfig` lost its `Retry` field.** The beta.159 seam rode
+   out graph-ingest blips via `natsclient.DefaultRetryConfig()`; the beta.160
+   client performs ONE classified request per operation. D2's bounded retry
+   therefore covers the transport kinds too — `unavailable` (never landed) and
+   `commit-unknown` (may have landed; a reconcile is an idempotent full-group
+   set, and a create that landed converges to the conflict signal the caller
+   already handles). Pinned by `TestReplaceRetriesTransportKinds`.
+2. **The authority read classifies a MISSING entity as not-found** where the
+   old surface returned an empty entity. `ReadOwnedPredicates` maps
+   `MutationNotFound` to an empty read (the emptiness-gating callers treat
+   "not born yet" as "nothing owned"); every other failure stays loud. Pinned
+   by `TestReadOwnedPredicatesMapsNotFoundToEmpty`.
+3. **The framework exports no Go constants for the mutation port contract** —
+   its own configs use string literals. semdev names them ONCE in
+   `graphown.RequesterPortDefinition` (+ `MutationSubjectFamily`), which keeps
+   the no-hand-rolled-subject census exact: the literal appears only inside
+   graphown. The canonical requester port carries `required: true` (matching
+   the framework's shipped configs).
+4. **The rule engine's lanes changed shape underneath `add_triple`/
+   `remove_triple`**: add is now must-exist and SET-VALUED over exact tuples
+   (a same-predicate different-object add still appends — the parks pin
+   updated to assert exactly that); remove is now an internal read +
+   revision-fenced reconcile. Watch item for the docker journeys: a rule
+   remove losing a revision race is a best-effort action failure (log +
+   counter), where the old lane could not lose one.
+5. **The birth lane gains a first-class seam sibling**: `graphown.Creator`
+   (strict Create with the same unavoidable `ContractFor` resolution),
+   replacing intake's raw `create_with_triples` adapter. `MutationConflict` is
+   surfaced as-is — `graphown.IsConflict` is the callers' duplicate signal —
+   and the existing no-double-wake/recovery-republish pins now run through it
+   (red-verified: neutering `IsConflict` fails
+   `TestRecordedButRunlessRedeliveryRepublishesTheWake` loudly).
+6. **The shipped-config version pair is load-bearing**: the mock bootstrap must
+   version-beat the live config (they share one KV entry). The cutover bumps
+   them to 0.32.1 / 0.32.0, preserving the strict ordering the conformance pin
+   asserts.
+
 ## Migration Plan
 
 Single-PR migration on the working branch (matching every prior semstreams

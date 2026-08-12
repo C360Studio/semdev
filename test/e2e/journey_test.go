@@ -1351,24 +1351,15 @@ func approveChange(ctx context.Context, t *testing.T, rt *boot.Runtime, runEntit
 	}
 }
 
-// boundWriter returns owner's write surface FROM THE RUNNING RUNTIME's bound
-// clients. It must not bind its own: a second registration mints a fresh
-// incarnation and replaces the epoch entry with no liveness check, while a
-// MutationClient never refreshes its captured token — so a stand-in that bound
-// again would leave the runtime writing under a stale lease for the ENTIRE rest of
-// the journey (a warn + meter tick per predicate per write today, a hard reject of
-// every owned write once enforcement flips). The arc would then be proven in a
-// state production must never be in, and task 7.1's "zero owner-lease mismatch"
-// could never hold.
-//
-// Reusing the runtime's clients is also what production does — the real approval
-// adapter draws from the same composition root — so the stand-in is MORE faithful,
-// not less.
+// boundWriter returns owner's write surface FROM THE RUNNING RUNTIME's clients,
+// so the stand-in's write resolves through the SAME contract table production
+// uses (D3b) — exactly what the real approval adapter does, so the stand-in is
+// MORE faithful, not less.
 func boundWriter(t *testing.T, rt *boot.Runtime, owner string) *graphown.Writer {
 	t.Helper()
-	w := rt.GraphOwners().Writer(owner)
+	w := rt.GraphWriters().Writer(owner)
 	if w == nil {
-		t.Fatalf("runtime has no bound projection client for owner %q", owner)
+		t.Fatalf("runtime resolves no contract-validated writer for owner %q", owner)
 	}
 	return w
 }

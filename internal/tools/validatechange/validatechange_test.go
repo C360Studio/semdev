@@ -66,7 +66,7 @@ type replaceCall struct {
 	group    string
 }
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	// The explicit remove list is gone: ReplaceOwned clears the owner's whole
 	// replace-owned group and re-adds Desired, so a clear is Desired == nil
 	// (migrate-beta159 D3a).

@@ -1,27 +1,29 @@
-// Package graphown derives semdev's pkg/projection ownership contracts from the
-// canonical vocabulary table (migrate-semstreams-beta159, ADR-056).
+// Package graphown derives semdev's pkg/projection contracts from the canonical
+// vocabulary table (migrate-semstreams-beta159 ADR-056; reshaped for beta.160's
+// ADR-091, which removed ownership — a contract now validates local caller
+// intent and reserves nothing).
 //
 // THE LEVER (design D1): internal/vocab already declares exactly one writer per
-// predicate (G5). That table IS the contract source — the owner of every
-// predicate is read from it, never re-typed here, so the runtime ownership claim
+// predicate (G5). That table IS the contract source — the writer of every
+// predicate is read from it, never re-typed here, so the runtime write contracts
 // and the checked-in writer census cannot drift. What vocab does NOT carry is the
 // ENTITY CLASS a predicate is stamped on, so that one axis is declared below and
 // pinned: a new Go-writer predicate with no entity-class entry fails
 // TestProjectionContractsMatchVocabWriters before it can reach a boot.
 //
-// SCOPE (design D2): only GO writers become projection owners. The rule-writer
-// Sources write via the engine's add_triple, not the Go mutation client, and are
+// SCOPE (design D2): only GO writers derive contracts. The rule-writer Sources
+// write via the engine's add_triple, not the Go mutation client, and are
 // excluded. Predicates that are DECLARED but have no Go write site today are
-// excluded too — an ownership claim with no writer would, under enforcement,
-// reject the very writer that later lands. Every exclusion set carries a
-// staleness census (an entry naming a predicate or Source vocab no longer
-// declares fails), and no predicate may sit in two of them.
+// excluded too — a contract exists to validate a writer's intent, and a contract
+// with no writer validates nothing while implying coverage the censuses would
+// then overstate. Every exclusion set carries a staleness census (an entry naming
+// a predicate or Source vocab no longer declares fails), and no predicate may sit
+// in two of them.
 //
-// # WHY ONE CONTRACT PER (OWNER, ENTITY CLASS)
+// # WHY ONE CONTRACT PER (WRITER, ENTITY CLASS)
 //
-// ReplaceOwned is NOT the old ReplaceTriples. The old writer sent
-// RemoveTriples = the caller's explicit remove list; ReplaceOwned sends
-// RemoveTriples = THE WHOLE SELECTED GROUP (mutation_client.go:714) and then adds
+// Reconcile is NOT the pre-ADR-056 ReplaceTriples. That writer sent the caller's
+// explicit remove list; Reconcile removes THE WHOLE SELECTED GROUP and then adds
 // Desired. So the group is the write's BLAST RADIUS: every predicate in the group
 // that Desired does not re-supply is DELETED from that entity.
 //
@@ -52,29 +54,13 @@
 // writing a subset onto an entity another site also writes would silently drop
 // facts.
 //
-// MODE (design D3, CONSERVATIVE): every write maps to replace-owned;
-// append-evidence is adopted nowhere in this change (semdev's "append-mirror"
-// ledgers are already simulated via read-all-then-write-full-set, which
-// replace-owned preserves byte-identically). The only birth predicates are
-// admission-check's entity-creation facts.
-//
-// # THE ADMISSION-CHECK CONTRACT OWNS NOTHING (deliberate, design D3)
-//
-// Birth predicates "derive no ownership claim" (projection/contract.go:66-70).
-// admission-check therefore has ZERO Groups, and the framework treats it
-// accordingly: Bind returns the zero token WITHOUT calling RegisterOwner
-// (contract.go:258-260), it needs no heartbeater and no registry
-// (contractsRequireHeartbeat / contractsRequireRegistration are both false), and
-// canonicalizeCreate leaves the wire OwnerToken empty (mutation_client.go:316-326).
-// So the admission record is deliberately UNOWNED and UNGATED: its writes are
-// never lease-checked, in either enforcement posture.
-//
-// As-built caveat: the contract is derived and bound, but NOTHING USES IT YET —
-// internal/intake still hand-rolls a graph.CreateEntityWithTriplesRequest, so no
-// call site resolves Clients.Writer("admission-check"). It WILL authorize the birth
-// predicates and pin the entity pattern once task 4.3 migrates that site; until
-// then it is a declaration, not an enforcement. Any claim that migrating it buys
-// LEASE coverage is false either way. See design D3/D5.
+// MODE (design D3, CONSERVATIVE): every write maps to a reconcile group; append
+// is adopted nowhere (semdev's "append-mirror" ledgers are already simulated via
+// read-all-then-write-full-set, which reconcile preserves byte-identically). The
+// only birth predicates are admission-check's entity-creation facts, issued as a
+// strict Create: the entity either births exactly once or the client reports the
+// conflict, which for a content-derived admission ID is the idempotent-duplicate
+// path.
 package graphown
 
 import (
@@ -83,7 +69,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/c360studio/semstreams/pkg/ownership"
 	"github.com/c360studio/semstreams/pkg/projection"
 	semtypes "github.com/c360studio/semstreams/pkg/types"
 
@@ -107,16 +92,16 @@ const (
 	// AgentExecPattern spans BOTH the run and the agentic loop. Exactly one fact
 	// needs it: station.dispatch.failed is stamped on whatever entity the station
 	// was dispatched FOR, which is a run for run-triggered stations and a loop for
-	// loop-triggered ones. Widening one predicate's claim is safe because ownership
-	// overlap requires pattern AND predicate intersection (ownership/overlap.go),
-	// and this predicate has a single writer — so the wider pattern captures no
-	// other owner's cell. Narrowing it would silently un-own the loop-fired station
-	// park; TestAgentExecPatternSpansBothExecutionClasses pins both halves.
+	// loop-triggered ones. Widening one predicate's pattern is safe because a
+	// contract validates only its OWN writer's intent (it reserves nothing), and
+	// this predicate has a single writer — so the wider pattern admits no other
+	// writer's fact. Narrowing it would reject the loop-fired station park at the
+	// write; TestAgentExecPatternSpansBothExecutionClasses pins both halves.
 	AgentExecPattern = "*.*.agent.*.execution.*"
 )
 
-// OwnedGroup is the name of the single replace-owned predicate group every
-// non-birth contract carries. Call sites pass it as ReplaceOwnedMutation.Group so
+// OwnedGroup is the name of the single reconcile predicate group every
+// non-birth contract carries. Call sites pass it as ReconcileMutation.Group so
 // the selection is explicit rather than relying on the client's
 // exactly-one-group default.
 const OwnedGroup = "owned"
@@ -387,14 +372,13 @@ func deriveContracts() ([]OwnedContract, error) {
 			EntityPattern: key.pattern,
 		}
 		if createOwners[key.owner] {
-			// Creation facts are authorized only on CreateWithTriples and derive no
-			// ownership claim (design D3 / OQ2) — so this contract owns nothing and
-			// its writes are never lease-gated. See the package doc.
+			// Creation facts are authorized only on the strict Create lane
+			// (design D3 / OQ2) — birth predicates, no reconcile group.
 			c.BirthPredicates = preds
 		} else {
 			c.Groups = []projection.PredicateGroup{{
 				Name:       OwnedGroup,
-				Mode:       ownership.ModeReplaceOwned,
+				Mode:       projection.ModeReconcile,
 				Predicates: preds,
 			}}
 		}
@@ -412,9 +396,8 @@ func contractName(key contractKey, multiClass bool) string {
 	return key.owner + "-" + classSuffix[key.pattern]
 }
 
-// ContractsFor returns the contracts one owner binds — its FULL claim set, which is
-// what BindMutationClient takes (the one-registration-per-owner invariant forbids
-// binding them separately).
+// ContractsFor returns one writer's complete contract set — every entity class it
+// writes onto.
 func ContractsFor(owner string) ([]projection.Contract, error) {
 	all, err := Contracts()
 	if err != nil {
@@ -494,12 +477,10 @@ func Owners() ([]string, error) {
 	return out, nil
 }
 
-// OwningOwners returns the owners whose contracts carry at least one replace-owned
-// group — the ones that actually register a claim, mint a token, and REQUIRE the
-// shared heartbeater. It excludes the birth-only create owners, which bind without
-// registering (see the package doc). The composition root's
-// one-bind-per-owner/ErrOwnerAlreadyBound pin applies to THIS set, not to Owners().
-func OwningOwners() ([]string, error) {
+// ReconcileOwners returns the writers whose contracts carry at least one
+// reconcile group. It excludes the birth-only create owners, whose contracts
+// authorize only the strict Create lane — the distinction the mode census pins.
+func ReconcileOwners() ([]string, error) {
 	cs, err := Contracts()
 	if err != nil {
 		return nil, err

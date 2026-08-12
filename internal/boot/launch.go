@@ -51,21 +51,13 @@ func RunLaunch(ctx context.Context, opts RunOptions, params launch.Params) (stri
 
 	platform := platformMeta(cfg)
 
-	// The launch driver stamps exactly ONE owned fact (experiment.run.condition,
-	// owner experiment-intake), so it binds ONLY that owner — never BindAll.
-	// Registering an owner SUPERSEDES whoever holds it: a fresh incarnation replaces
-	// the epoch entry with no liveness check, and a MutationClient never refreshes
-	// its captured token. Binding all 17 here would leave a running `task serve`
-	// permanently fenced out of its own write path (warn + meter per predicate per
-	// write today; a hard reject of every owned write once enforcement flips), with
-	// nothing to notice it — the runtime binds once at boot and never re-registers.
-	//
-	// Superseding experiment-intake specifically is harmless: the runtime never
-	// writes experiment.run.condition (StampCondition's only caller is this path), so
-	// no runtime write ever presents the stale token.
-	graphClients, err := graphown.BindOwners(ctx, natsClient, logger, experiment.Source)
+	// The launch driver stamps exactly ONE fact (experiment.run.condition, writer
+	// experiment-intake) through the same contract-validated surface the runtime
+	// uses. Construction registers nothing (ADR-091), so a concurrent `task serve`
+	// is unaffected by this process holding its own client.
+	graphClients, err := graphown.NewClients(natsClient)
 	if err != nil {
-		return "", fmt.Errorf("bind projection owners: %w", err)
+		return "", fmt.Errorf("build graph mutation client: %w", err)
 	}
 
 	// The experiment condition is operator-declared in the config (G3/G5 — the same evidence

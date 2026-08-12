@@ -27,12 +27,12 @@ func (r errReader) ReadFacts(_ context.Context, _, _ string) ([]message.Triple, 
 // okWriter passes the immutability check (no existing task.spec) and accepts writes.
 type okWriter struct{}
 
-func (okWriter) ReplaceOwned(_ context.Context, _ projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (okWriter) Reconcile(_ context.Context, _ projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
-func (okWriter) ReadAuthoritative(_ context.Context, id string) (*graph.EntityState, error) {
-	return &graph.EntityState{ID: id}, nil
+func (okWriter) ReadAuthoritative(_ context.Context, id string) (*graph.ExactEntity, error) {
+	return &graph.ExactEntity{Entity: &graph.EntityState{ID: id}, KVRevision: 1}, nil
 }
 
 func TestHandleFailsClosedOnProjectError(t *testing.T) {

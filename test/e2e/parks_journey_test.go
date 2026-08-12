@@ -126,14 +126,15 @@ func TestBridgeProofStationFailureParks(t *testing.T) {
 // TestPinGraphAddTripleAppendsDuplicatePredicate settles the engine add_triple
 // duplicate-predicate question (station-failure-parks task 2.2, D2's open
 // question) against the LIVE graph lane: a second add of an already-present
-// predicate APPENDS a second triple — graph-ingest's AddTriple is an
-// unconditional append (no per-predicate replace, no exact-triple dedup at this
-// lane; source: processor/graph-ingest Component.AddTriple appends into
-// entity.Triples under CAS). Both park rules are built on this answer: the
-// one-shot station.park.routed marker is the ONLY re-fire protection, and a
-// loop-fired park landing on an already-parked run yields a benign SECOND
-// run.awaiting.human triple ("at most once per failure", never "at most one
-// park triple per run"). If a semstreams bump flips this lane to
+// PREDICATE with a different object APPENDS a second triple. beta.160's
+// triple.append is SET-VALUED over exact tuples — only an identical
+// (predicate, object) tuple dedups as MutationUnchanged; a same-predicate
+// different-object add still lands beside the first. Both park rules are built
+// on this answer: the one-shot station.park.routed marker is the ONLY re-fire
+// protection, and a loop-fired park landing on an already-parked run yields a
+// benign SECOND run.awaiting.human triple ("at most once per failure", never
+// "at most one park triple per run") — park messages differ per failure, so
+// tuple dedup never collapses them. If a semstreams bump flips this lane to
 // replace-by-predicate, this pin fails and the rules' duplicate-park reasoning
 // must be revisited.
 func TestPinGraphAddTripleAppendsDuplicatePredicate(t *testing.T) {
@@ -159,7 +160,7 @@ func TestPinGraphAddTripleAppendsDuplicatePredicate(t *testing.T) {
 		Timestamp:  time.Now().UTC(),
 		Confidence: 1.0,
 	}
-	if err := pub.CreateEntityWithTriples(ctx, entityID,
+	if err := pub.Create(ctx, entityID,
 		message.Type{Domain: "semdev", Category: "park_pin", Version: "v1"},
 		[]message.Triple{birth}); err != nil {
 		t.Fatalf("create pin entity: %v", err)
@@ -168,7 +169,7 @@ func TestPinGraphAddTripleAppendsDuplicatePredicate(t *testing.T) {
 	dup := birth
 	dup.Object = "second park message (duplicate-predicate add)"
 	dup.Timestamp = time.Now().UTC()
-	if err := pub.AddTriple(ctx, dup); err != nil {
+	if err := pub.Append(ctx, []message.Triple{dup}); err != nil {
 		t.Fatalf("duplicate-predicate add: %v", err)
 	}
 

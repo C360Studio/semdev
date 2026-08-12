@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/c360studio/semstreams/pkg/ownership"
 	"github.com/c360studio/semstreams/pkg/projection"
 	semtypes "github.com/c360studio/semstreams/pkg/types"
 
@@ -142,17 +141,17 @@ func TestExclusionSetsAreNotStale(t *testing.T) {
 	}
 }
 
-// TestContractModesAreConservative pins the migrate-semstreams-beta159 D3 CONSERVATIVE
-// decision: every contract group is replace-owned, birth predicates appear only under
-// the sanctioned create owners, and append-evidence is adopted NOWHERE. A planted
-// append-evidence group (an accidental semantic change to a ledger — silent data loss)
-// fails here.
+// TestContractModesAreConservative pins the D3 CONSERVATIVE decision (beta.159,
+// carried through beta.160): every contract group is a reconcile group, birth
+// predicates appear only under the sanctioned create owners, and append mode is
+// adopted NOWHERE. A planted append group (an accidental semantic change to a
+// ledger — silent data loss) fails here.
 func TestContractModesAreConservative(t *testing.T) {
 	sawBirth := map[string]bool{}
 	for _, oc := range contracts(t) {
 		for _, g := range oc.Contract.Groups {
-			if g.Mode != ownership.ModeReplaceOwned {
-				t.Errorf("contract %q group %q has mode %q, want replace-owned — append-evidence is deferred (D3), and a ledger silently loses entries under the wrong mode", oc.Contract.Name, g.Name, g.Mode)
+			if g.Mode != projection.ModeReconcile {
+				t.Errorf("contract %q group %q has mode %q, want reconcile — append is deferred (D3), and a ledger silently loses entries under the wrong mode", oc.Contract.Name, g.Name, g.Mode)
 			}
 			if g.Name != graphown.OwnedGroup {
 				t.Errorf("contract %q group is named %q, want %q — call sites select the group by that one name", oc.Contract.Name, g.Name, graphown.OwnedGroup)
@@ -173,27 +172,18 @@ func TestContractModesAreConservative(t *testing.T) {
 	}
 }
 
-// TestBirthOnlyOwnersOwnNothing pins the framework consequence of a birth-only
-// contract, because three artifacts previously claimed the opposite.
-//
-// Birth predicates "derive no ownership claim" (projection/contract.go:66-70). So
-// admission-check registers NO claim, mints the ZERO token, needs no heartbeater, and
-// its create lands with an EMPTY wire OwnerToken — which graph-ingest's checkOwnerLease
-// skips unconditionally (`if ownerToken == "" { return nil }`), in BOTH enforcement
-// postures. The admission record is deliberately unowned and ungated.
-//
-// This is pinned rather than merely documented because the composition root's
-// one-bind-per-owner invariant does NOT hold for these owners — Bind returns before
-// RegisterOwner, so a second bind succeeds silently instead of returning
-// ErrOwnerAlreadyBound. Group 3's pin must scope to OwningOwners().
-func TestBirthOnlyOwnersOwnNothing(t *testing.T) {
+// TestBirthOnlyOwnersCarryNoReconcileGroup pins the create-lane split: a
+// birth-only contract authorizes ONLY the strict Create lane — it carries no
+// reconcile group, so no Replace call can ever select it, and the mode census
+// above cannot see the distinction collapse on its own.
+func TestBirthOnlyOwnersCarryNoReconcileGroup(t *testing.T) {
 	owners, err := graphown.Owners()
 	if err != nil {
 		t.Fatalf("owners: %v", err)
 	}
-	owning, err := graphown.OwningOwners()
+	reconciling, err := graphown.ReconcileOwners()
 	if err != nil {
-		t.Fatalf("owning owners: %v", err)
+		t.Fatalf("reconcile owners: %v", err)
 	}
 	for _, oc := range contracts(t) {
 		if !graphown.IsCreateOwner(oc.Owner) {
@@ -202,15 +192,15 @@ func TestBirthOnlyOwnersOwnNothing(t *testing.T) {
 		if len(oc.Contract.Groups) != 0 {
 			t.Errorf("create owner %q carries %d group(s) — a birth predicate overlapping a group is rejected by Contract.Validate, so this cannot be intentional", oc.Owner, len(oc.Contract.Groups))
 		}
-		if slices.Contains(owning, oc.Owner) {
-			t.Errorf("OwningOwners includes birth-only owner %q — it registers no claim and mints no token, so an ErrOwnerAlreadyBound pin over it would be vacuous", oc.Owner)
+		if slices.Contains(reconciling, oc.Owner) {
+			t.Errorf("ReconcileOwners includes birth-only owner %q — its contract authorizes only the Create lane", oc.Owner)
 		}
 		if !slices.Contains(owners, oc.Owner) {
-			t.Errorf("Owners omits %q — a birth-only owner still binds a client, it just owns nothing", oc.Owner)
+			t.Errorf("Owners omits %q — a birth-only owner still resolves a writer surface, it just reconciles nothing", oc.Owner)
 		}
 	}
-	if len(owning) >= len(owners) {
-		t.Errorf("OwningOwners (%d) is not a strict subset of Owners (%d) — the birth-only distinction collapsed", len(owning), len(owners))
+	if len(reconciling) >= len(owners) {
+		t.Errorf("ReconcileOwners (%d) is not a strict subset of Owners (%d) — the birth-only distinction collapsed", len(reconciling), len(owners))
 	}
 }
 
@@ -337,6 +327,7 @@ func TestEveryOwnerDerivesWithoutSelfOverlap(t *testing.T) {
 	if len(owners) == 0 {
 		t.Fatal("no projection owners derived — the vocab table produced an empty contract set")
 	}
+	var flat []projection.Contract
 	for _, owner := range owners {
 		cs, err := graphown.ContractsFor(owner)
 		if err != nil {
@@ -348,9 +339,12 @@ func TestEveryOwnerDerivesWithoutSelfOverlap(t *testing.T) {
 				t.Errorf("contract %q is invalid: %v", c.Name, verr)
 			}
 		}
-		if _, derr := projection.Derive(owner, cs...); derr != nil {
-			t.Errorf("owner %q does not derive its %d contracts: %v — this is exactly what BindMutationClient rejects at boot", owner, len(cs), derr)
-		}
+		flat = append(flat, cs...)
+	}
+	// The COMPLETE set, exactly as NewClients hands it to NewMutationClient — a
+	// duplicate name or cross-contract invalidity rejects there, at boot.
+	if err := projection.ValidateContracts(flat); err != nil {
+		t.Errorf("the complete contract set does not validate: %v — this is exactly what NewMutationClient rejects at boot", err)
 	}
 }
 
@@ -552,81 +546,28 @@ func TestStationDispatchRulesConfineTheFiringEntityClass(t *testing.T) {
 	}
 }
 
-// TestOwnerLeaseObserveOnlyOnLanding is migrate-beta159 task 3.3 / design D5 Phase A:
-// beta.159 lands and STAYS observe-only. The Phase-B flip is VOID, permanently —
-// semstreams' final refactor phase (the next tag) removes the ownership/lease
-// mechanism, so the posture question transfers to the next-tag migration change,
-// re-asked against ownership's replacement (design D5 as-built, 2026-08-11).
+// TestNoCallSiteHandRollsAnOwnedWrite is the POSITIVE write-coverage census
+// (born migrate-beta159 6.1(b), re-based for beta.160's ownership removal).
 //
-// Flipping is not a small mistake. Under enforcement every owned write from a
-// process whose token went stale is REJECTED, and the token goes stale from a cause
-// this repo cannot fully prevent: a second registration of the same owner ids
-// (registry.go replaces the epoch entry with no liveness check). The mismatch meter
-// cannot justify a flip either — an un-tokened write is neither metered nor
-// rejected (D5); coverage is proven positively by the group-6 census instead.
+// Coverage is proven by construction, on two legs. The first is the compile
+// break itself — no alternative Go write surface survives the framework's
+// deletions. The second is this: nobody hand-rolls a mutation subject to get
+// around the contract-validated client. Every write goes through the graphown
+// seam, which resolves a contract (D3b); the sanctioned-exception count is ZERO
+// — the last exception (the admission birth lane's raw create_with_triples)
+// migrated to the strict Create lane with beta.160.
 //
-// The pin also asserts the key is PRESENT: an absent key would default to false and
-// read as "observe-only" today, but silently inherit whatever the framework's default
-// becomes tomorrow.
-func TestOwnerLeaseObserveOnlyOnLanding(t *testing.T) {
-	for _, name := range []string{"semdev-bootstrap.json", "semdev-live-gemini.json"} {
-		raw, err := os.ReadFile(filepath.Join("..", "..", "configs", name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		var cfg struct {
-			Components map[string]struct {
-				Config struct {
-					EnforceOwnerLease *bool `json:"enforce_owner_lease"`
-				} `json:"config"`
-			} `json:"components"`
-		}
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		gi, ok := cfg.Components["graph-ingest"]
-		if !ok {
-			t.Errorf("%s declares no graph-ingest component — the owner-lease posture is unpinnable", name)
-			continue
-		}
-		switch {
-		case gi.Config.EnforceOwnerLease == nil:
-			t.Errorf("%s graph-ingest omits enforce_owner_lease — it must be EXPLICITLY false while this change lands, not inherited from a framework default that can change", name)
-		case *gi.Config.EnforceOwnerLease:
-			t.Errorf("%s sets enforce_owner_lease=true — beta.159 is permanently observe-only (D5 as-built: the flip was voided when the next tag's ownership removal was announced); enforcement rejects every owned write from any process whose token went stale", name)
-		}
-	}
-}
-
-// TestNoCallSiteHandRollsAnOwnedWrite is migrate-beta159 task 6.1(b) — the POSITIVE
-// coverage check that replaces the vacuous meter gate (D5).
+// Component PORT DECLARATIONS name the mutation subject family legitimately;
+// they build through graphown.RequesterPortDefinition so the literal still
+// lives only in this package.
 //
-// The owner-lease meter counts STALE tokens, not MISSING ones: graph-ingest returns
-// on `ownerToken == ""` before any enforcement branch, so an un-tokened write is
-// neither metered nor rejected. Coverage therefore has to be proven by construction,
-// and it rests on two legs. The first is the compile break itself — agentictools's
-// OwnedFactWriter is DELETED, so no alternative owned-write surface survives. The
-// second is this: nobody hand-rolls the subject to get around the contract.
-//
-// The UPDATE lane is the owned-write lane; every use must go through
-// graphown.Writer, which resolves a contract and carries the owner token. The
-// remaining sanctioned exceptions are named explicitly, so adding one is a
-// deliberate edit reviewed against ADR-056 rather than a quiet regression.
-//
-// Known boundary (review 2026-08-11, N4): the census greps STRING LITERALS, so an
-// owned write routed through an imported framework subject constant (e.g.
-// processor/rule's exported SubjectTripleAdd) would evade it. None exists today;
-// the compile break — OwnedFactWriter is deleted — remains the first leg.
+// Known boundary (review 2026-08-11, N4): the census greps STRING LITERALS, so
+// a write routed through an imported framework subject constant would evade
+// it. None exists today; the compile break remains the first leg.
 func TestNoCallSiteHandRollsAnOwnedWrite(t *testing.T) {
-	// subject → why a raw request to it is sanctioned.
-	sanctioned := map[string]string{
-		// The admission BIRTH lane. It is deliberately un-tokened (a birth-only
-		// contract mints no token, D5) and deliberately raw: the projection client
-		// SWALLOWS ErrorCodeEntityExists as success when the stored facts match,
-		// and the intake lane needs that signal to skip a duplicate wake — see
-		// design D3c / task 4.3.
-		"graph.mutation.entity.create_with_triples": "admission birth; needs the EntityExists signal the projection client swallows (D3c)",
-	}
+	// subject → why a raw request to it is sanctioned. EMPTY, deliberately —
+	// see the cap check at the bottom.
+	sanctioned := map[string]string{}
 
 	var offenders []string
 	err := filepath.WalkDir(filepath.Join("..", ".."), func(path string, d os.DirEntry, err error) error {
@@ -673,13 +614,13 @@ func TestNoCallSiteHandRollsAnOwnedWrite(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	for _, o := range offenders {
-		t.Errorf("a graph.mutation subject is named as a string literal outside graphown — an owned write that bypasses the contract carries no owner token, and the lease meter CANNOT see it (D5):\n  %s", o)
+		t.Errorf("a graph.mutation subject is named as a string literal outside graphown — a write that bypasses the seam evades the contract validation (D3b) and the port declarations' single source (graphown.RequesterPortDefinition):\n  %s", o)
 	}
-	// The exception list must not rot into a blanket waiver: exactly ONE entry is
-	// sanctioned today (the admission birth lane), so ANY growth is a deliberate,
-	// reviewed edit that trips this guard.
-	if len(sanctioned) > 1 {
-		t.Errorf("the sanctioned raw-subject list has grown to %d — each entry is an un-contracted write path; re-justify every entry against ADR-056 and raise this cap in the same reviewed edit", len(sanctioned))
+	// The exception list must not rot into a blanket waiver: ZERO entries are
+	// sanctioned (the admission birth lane migrated to the strict Create lane),
+	// so ANY growth is a deliberate, reviewed edit that trips this guard.
+	if len(sanctioned) > 0 {
+		t.Errorf("the sanctioned raw-subject list has grown to %d — each entry is an un-contracted write path; re-justify every entry and raise this cap in the same reviewed edit", len(sanctioned))
 	}
 }
 

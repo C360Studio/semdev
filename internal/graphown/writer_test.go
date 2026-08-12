@@ -15,19 +15,27 @@ import (
 	"github.com/c360studio/semdev/internal/graphown"
 )
 
-// The seam every migrated call site writes through. It was shipped untested in the
-// first pass of groups 3–5; these pin the four behaviors other packages rely on but
-// cannot themselves assert.
+// The seam every migrated call site writes through. These pin the behaviors other
+// packages rely on but cannot themselves assert.
 
-type recordingReplacer struct {
-	got projection.ReplaceOwnedMutation
-	err error
+// recordingReconciler scripts one error per attempt (nil = success) and records
+// the LAST mutation, so the retry pins can assert both the attempt count and the
+// final desired set.
+type recordingReconciler struct {
+	got    projection.ReconcileMutation
+	calls  int
+	script []error
 }
 
-func (r *recordingReplacer) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (r *recordingReconciler) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	r.got = m
-	if r.err != nil {
-		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, r.err
+	r.calls++
+	var err error
+	if len(r.script) > 0 {
+		err, r.script = r.script[0], r.script[1:]
+	}
+	if err != nil {
+		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, err
 	}
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
@@ -37,8 +45,14 @@ type stubReader struct {
 	err    error
 }
 
-func (s stubReader) ReadAuthoritative(context.Context, string) (*graph.EntityState, error) {
-	return s.entity, s.err
+func (s stubReader) ReadAuthoritative(context.Context, string) (*graph.ExactEntity, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.entity == nil {
+		return nil, nil
+	}
+	return &graph.ExactEntity{Entity: s.entity, KVRevision: 1}, nil
 }
 
 // TestWriterResolvesContractAndGroup pins the whole point of the type: the call site
@@ -46,7 +60,7 @@ func (s stubReader) ReadAuthoritative(context.Context, string) (*graph.EntitySta
 // that hardcoded the contract name would decouple the write from entityClass — the
 // one thing the offline censuses cannot check (design D3b).
 func TestWriterResolvesContractAndGroup(t *testing.T) {
-	r := &recordingReplacer{}
+	r := &recordingReconciler{}
 	w := graphown.NewWriter("measurement-harness", r)
 	tr := message.Triple{Subject: runEntity, Predicate: "measurement.result.passed", Object: "true"}
 	if err := w.Replace(context.Background(), runEntity, []message.Triple{tr}); err != nil {
@@ -67,6 +81,9 @@ func TestWriterResolvesContractAndGroup(t *testing.T) {
 	if r.got.Metadata.Source != "" || !r.got.Metadata.Timestamp.IsZero() {
 		t.Errorf("metadata = %+v, want zero — a non-zero Source rejects triples that carry their own", r.got.Metadata)
 	}
+	if r.calls != 1 {
+		t.Errorf("a clean write must issue exactly one reconcile, got %d", r.calls)
+	}
 }
 
 // TestWriterRejectsAnEntityOutsideTheOwnersClass is the behavioral proof D3b rests
@@ -74,7 +91,7 @@ func TestWriterResolvesContractAndGroup(t *testing.T) {
 // AT THE CALL SITE with both names in the message, rather than as the mutation
 // client's generic rejection inside a retry loop.
 func TestWriterRejectsAnEntityOutsideTheOwnersClass(t *testing.T) {
-	r := &recordingReplacer{}
+	r := &recordingReconciler{}
 	w := graphown.NewWriter("measurement-harness", r)
 	err := w.Replace(context.Background(), loopEntity, nil)
 	if err == nil {
@@ -83,7 +100,7 @@ func TestWriterRejectsAnEntityOutsideTheOwnersClass(t *testing.T) {
 	if !strings.Contains(err.Error(), "measurement-harness") || !strings.Contains(err.Error(), loopEntity) {
 		t.Errorf("error %q must name both the owner and the entity", err)
 	}
-	if r.got.Contract != "" {
+	if r.calls != 0 {
 		t.Error("a rejected write must not reach the mutation client")
 	}
 }
@@ -105,9 +122,77 @@ func TestNilWriterFailsLoudly(t *testing.T) {
 		t.Error("a nil writer must fail loudly on ReadOwnedPredicates")
 	}
 	// A write-only Writer has no reader bound; asking it to read must say so.
-	wo := graphown.NewWriter("task-projector", &recordingReplacer{})
+	wo := graphown.NewWriter("task-projector", &recordingReconciler{})
 	if _, err := wo.ReadOwnedPredicates(context.Background(), runEntity, "task.spec."); err == nil {
 		t.Error("a write-only Writer must reject a read-back rather than return an empty set")
+	}
+}
+
+// TestReplaceRetriesRevisionConflictBounded pins the D2 retry: a revision conflict
+// is interleaving noise under G5 (another writer bumped the ENTITY, never this
+// group), so the seam re-enters Reconcile — which re-reads and re-fences — up to
+// three attempts total, and the write lands with the caller's desired set intact.
+func TestReplaceRetriesRevisionConflictBounded(t *testing.T) {
+	conflict := &projection.MutationError{Kind: projection.MutationRevisionConflict}
+	r := &recordingReconciler{script: []error{conflict, conflict, nil}}
+	w := graphown.NewWriter("measurement-harness", r)
+	tr := message.Triple{Subject: runEntity, Predicate: "measurement.result.passed", Object: "true"}
+	if err := w.Replace(context.Background(), runEntity, []message.Triple{tr}); err != nil {
+		t.Fatalf("two conflicts then success must land the write, got: %v", err)
+	}
+	if r.calls != 3 {
+		t.Errorf("attempts = %d, want 3 (two retries after two conflicts)", r.calls)
+	}
+	if len(r.got.Desired) != 1 || r.got.Desired[0].Predicate != "measurement.result.passed" {
+		t.Errorf("final attempt carried %+v, want the caller's desired set unchanged", r.got.Desired)
+	}
+}
+
+// TestReplaceSurfacesExhaustedRevisionConflict pins the exhaustion half: three
+// conflicts surface the classified error to the caller UNCHANGED — the seam never
+// converts exhaustion into silence, and the caller's retry/park routing owns it.
+func TestReplaceSurfacesExhaustedRevisionConflict(t *testing.T) {
+	conflict := &projection.MutationError{Kind: projection.MutationRevisionConflict}
+	r := &recordingReconciler{script: []error{conflict, conflict, conflict}}
+	w := graphown.NewWriter("measurement-harness", r)
+	err := w.Replace(context.Background(), runEntity, nil)
+	if err == nil {
+		t.Fatal("three conflicts must surface, never silently succeed")
+	}
+	var me *projection.MutationError
+	if !errors.As(err, &me) || me.Kind != projection.MutationRevisionConflict {
+		t.Errorf("error %v must carry the classified revision-conflict unchanged", err)
+	}
+	if r.calls != 3 {
+		t.Errorf("attempts = %d, want exactly 3 — unbounded spinning hides sustained contention", r.calls)
+	}
+}
+
+// TestReplaceRetriesTransportKinds pins parity with the deleted framework retry:
+// the pre-beta.160 write path rode out graph-ingest blips via the client's retry
+// config, which beta.160's single-request client no longer carries. A no-responder
+// (the write did not land) and a commit-unknown (it may have landed, and a
+// reconcile is an idempotent full-group set) both converge on a later attempt. A
+// bug-shaped kind must NOT be retried.
+func TestReplaceRetriesTransportKinds(t *testing.T) {
+	unavailable := &projection.MutationError{Kind: projection.MutationUnavailable}
+	r := &recordingReconciler{script: []error{unavailable, nil}}
+	w := graphown.NewWriter("measurement-harness", r)
+	if err := w.Replace(context.Background(), runEntity, nil); err != nil {
+		t.Fatalf("one no-responder then success must land the write, got: %v", err)
+	}
+	if r.calls != 2 {
+		t.Errorf("attempts = %d, want 2", r.calls)
+	}
+
+	invalid := &projection.MutationError{Kind: projection.MutationInvalid}
+	r2 := &recordingReconciler{script: []error{invalid, nil}}
+	w2 := graphown.NewWriter("measurement-harness", r2)
+	if err := w2.Replace(context.Background(), runEntity, nil); err == nil {
+		t.Fatal("an invalid mutation is a wiring bug and must surface on the FIRST attempt")
+	}
+	if r2.calls != 1 {
+		t.Errorf("attempts = %d, want 1 — retrying a mutation the client can never accept burns the caller's budget", r2.calls)
 	}
 }
 
@@ -134,6 +219,26 @@ func TestReadOwnedPredicatesScopesToThePrefix(t *testing.T) {
 	}
 }
 
+// TestReadOwnedPredicatesMapsNotFoundToEmpty pins the beta.160 semantic shift: the
+// authority read now CLASSIFIES a missing entity as not-found where the old
+// surface returned an empty entity. The emptiness-gating callers (project_tasks'
+// immutability, check_floors' clear) treat "not born yet" as "nothing owned on
+// it", so absence maps to an empty read here — and every OTHER failure stays loud.
+func TestReadOwnedPredicatesMapsNotFoundToEmpty(t *testing.T) {
+	notFound := &projection.MutationError{Kind: projection.MutationNotFound}
+	got, err := graphown.ReadOwnedPredicates(context.Background(), stubReader{err: notFound}, runEntity, "task.spec.")
+	if err != nil {
+		t.Fatalf("a missing entity must read as EMPTY, not fail: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+	boom := &projection.MutationError{Kind: projection.MutationInternal}
+	if _, err := graphown.ReadOwnedPredicates(context.Background(), stubReader{err: boom}, runEntity, "task.spec."); err == nil {
+		t.Error("a non-absence read failure must stay loud — mapping it to empty would invert the immutability gate")
+	}
+}
+
 // TestWriteErrorKindSeparatesWiringBugsFromTransport pins the retry posture. A
 // mutation the client can never accept must not be retried to the loop's iteration
 // cap on paid tokens; a genuinely transient one must stay retryable.
@@ -144,10 +249,11 @@ func TestWriteErrorKindSeparatesWiringBugsFromTransport(t *testing.T) {
 		want agentic.ToolErrorKind
 	}{
 		{"invalid mutation is a wiring bug", &projection.MutationError{Kind: projection.MutationInvalid}, agentic.ToolErrorInternal},
-		{"stale owner token must not be retried", &projection.MutationError{Kind: projection.MutationStaleOwnerToken}, agentic.ToolErrorInternal},
-		{"committed-unverified will not converge on retry", &projection.MutationError{Kind: projection.MutationCommittedUnverified}, agentic.ToolErrorInternal},
+		{"not-found on a write is wiring, not timing", &projection.MutationError{Kind: projection.MutationNotFound}, agentic.ToolErrorInternal},
+		{"strict-create conflict is unreachable on the reconcile lane", &projection.MutationError{Kind: projection.MutationConflict}, agentic.ToolErrorInternal},
+		{"revision-conflict past the seam's retry stays retryable", &projection.MutationError{Kind: projection.MutationRevisionConflict}, agentic.ToolErrorNetwork},
 		{"unavailable is transport", &projection.MutationError{Kind: projection.MutationUnavailable}, agentic.ToolErrorNetwork},
-		{"commit-unknown is transport (ReplaceOwned is idempotent)", &projection.MutationError{Kind: projection.MutationCommitUnknown}, agentic.ToolErrorNetwork},
+		{"commit-unknown is transport (a reconcile is idempotent)", &projection.MutationError{Kind: projection.MutationCommitUnknown}, agentic.ToolErrorNetwork},
 		{"a classified handler error is internal", &errs.ClassifiedError{Code: "entity_not_found"}, agentic.ToolErrorInternal},
 		{"a graphown resolution failure is a wiring bug", errors.New("graphown: owner \"x\" has no projection contract"), agentic.ToolErrorInternal},
 		{"an unknown transport error stays retryable", errors.New("connection reset"), agentic.ToolErrorNetwork},
@@ -161,47 +267,22 @@ func TestWriteErrorKindSeparatesWiringBugsFromTransport(t *testing.T) {
 	}
 }
 
-// TestBindOwnersRejectsASecondBindInProcess pins that a FAILED bind leaves no claim
-// residue: both binds here fail at the nil-client check, and the second must not
-// report ErrOwnersAlreadyBoundInProcess — a transient boot failure must never poison
-// the owner for the rest of the process.
-//
-// It cannot exercise the LIVE-claim rejection: BindOwners checks the client for nil
-// BEFORE taking the claim, so no claim is ever held here. That half — and the
-// release/re-claim semantics — is pinned in-package by TestInProcessClaimLedger,
-// which drives the claim ledger directly.
-func TestBindOwnersRejectsASecondBindInProcess(t *testing.T) {
-	t.Cleanup(graphown.ResetInProcessBindingsForTest)
-	graphown.ResetInProcessBindingsForTest()
-
-	// First bind fails at the NATS step (nil client), and must RELEASE its claim so
-	// a failed bind does not poison the owner for the rest of the process.
-	if _, err := graphown.BindOwners(context.Background(), nil, nil, "measurement-harness"); err == nil {
-		t.Fatal("binding with a nil NATS client must fail")
-	}
-	if _, err := graphown.BindOwners(context.Background(), nil, nil, "measurement-harness"); err == nil {
-		t.Fatal("second bind must still fail on the nil client")
-	} else if errors.Is(err, graphown.ErrOwnersAlreadyBoundInProcess) {
-		t.Error("a FAILED bind must release its in-process claim — otherwise a transient boot failure permanently blocks the owner")
-	}
-}
-
-// TestRequireBoundNamesTheMissingOwners pins the boot census: an owner that failed
-// to bind, or a typo'd Source, must fail at boot rather than as a nil writer at the
-// first write inside a station handler that can only log.
-func TestRequireBoundNamesTheMissingOwners(t *testing.T) {
-	var none *graphown.Clients // the census path: nothing bound
-	err := none.RequireBound("measurement-harness", "route-mirror")
+// TestRequireWritersNamesTheMissingOwners pins the boot census: a Source with no
+// derived contract, or a typo'd Source, must fail at boot rather than as a nil
+// writer at the first write inside a station handler that can only log.
+func TestRequireWritersNamesTheMissingOwners(t *testing.T) {
+	var none *graphown.Clients // the census path: nothing constructed
+	err := none.RequireWriters("measurement-harness", "route-mirror")
 	if err == nil {
-		t.Fatal("RequireBound must fail when nothing is bound")
+		t.Fatal("RequireWriters must fail when nothing is constructed")
 	}
 	for _, want := range []string{"measurement-harness", "route-mirror"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q must name the missing owner %q", err, want)
 		}
 	}
-	if err := none.RequireBound(); err != nil {
-		t.Errorf("RequireBound() with no owners wanted must pass, got %v", err)
+	if err := none.RequireWriters(); err != nil {
+		t.Errorf("RequireWriters() with no owners wanted must pass, got %v", err)
 	}
 	if got := none.Writer("measurement-harness"); got != nil {
 		t.Error("a nil *Clients must yield a NIL *Writer — a Writer wrapping a nil client would pass a tool's nil guard and fail later, at the write")

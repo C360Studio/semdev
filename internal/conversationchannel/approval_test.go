@@ -97,7 +97,7 @@ type fakeWriter struct {
 	err error
 }
 
-func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (f *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	f.calls = append(f.calls, replacedFacts{entityID: m.EntityID, add: m.Desired, contract: m.Contract})
 	if f.err != nil {
 		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, f.err
@@ -129,11 +129,11 @@ func assertGateContract(t *testing.T, got []replacedFacts) {
 	}
 }
 
-func gateWriterFor2(r projection.OwnedReplacer) *graphown.Writer {
+func gateWriterFor2(r projection.PredicateReconciler) *graphown.Writer {
 	return graphown.NewWriter(ApprovedSource, r)
 }
 
-func pendingWriterFor2(r projection.OwnedReplacer) *graphown.Writer {
+func pendingWriterFor2(r projection.PredicateReconciler) *graphown.Writer {
 	return graphown.NewWriter(conversationintent.AdapterSource, r)
 }
 
@@ -180,7 +180,7 @@ func (f *fakeGraph) ReadFacts(_ context.Context, _ string, prefix string) ([]mes
 // complete owned set in one pass, so the two are equivalent for these fixtures
 // (migrate-beta159 D3a), and the per-predicate model keeps the group-8 state pins
 // (the wedge and the watermark) readable.
-func (f *fakeGraph) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (f *fakeGraph) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	f.writes++
 	f.contracts = append(f.contracts, m.Contract)
 	for _, tr := range m.Desired {

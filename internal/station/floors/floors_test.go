@@ -29,12 +29,12 @@ func (a errAttempts) Resolve(_ context.Context, _ string, _ int) (semfloors.Atte
 // path is a no-op and the resolve error surfaces).
 type okWriter struct{}
 
-func (okWriter) ReplaceOwned(_ context.Context, _ projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (okWriter) Reconcile(_ context.Context, _ projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 
-func (okWriter) ReadAuthoritative(_ context.Context, id string) (*graph.EntityState, error) {
-	return &graph.EntityState{ID: id}, nil
+func (okWriter) ReadAuthoritative(_ context.Context, id string) (*graph.ExactEntity, error) {
+	return &graph.ExactEntity{Entity: &graph.EntityState{ID: id}, KVRevision: 1}, nil
 }
 
 type nilReader struct{}

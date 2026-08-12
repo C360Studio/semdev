@@ -52,9 +52,9 @@ import (
 
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
+	"github.com/c360studio/semdev/internal/graphown"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
 	"github.com/c360studio/semstreams/natsclient"
 	"github.com/c360studio/semstreams/pkg/errs"
@@ -119,19 +119,32 @@ var Schema = component.GenerateConfigSchema(reflect.TypeOf(ComponentConfig{}))
 
 // DefaultPorts declares the issue consumer lane (github.event.issue on the GITHUB
 // stream). The comment + park-post lanes moved to the conversation-channel
-// component; the receiver still flattens BOTH event types onto the stream.
+// component; the receiver still flattens BOTH event types onto the stream. The
+// output is the admission-record birth write — the canonical typed mutation
+// requester (every component that mutates the graph declares one).
 func DefaultPorts() *component.PortConfig {
 	return &component.PortConfig{
 		Inputs: []component.PortDefinition{{
 			Name:        "github_events",
-			Type:        "jetstream",
-			Subject:     admission.SubjectIssue,
-			StreamName:  GithubStreamName,
 			Required:    true,
 			Description: "Flattened issue events (semdev's receiver or an e2e journey publishes them).",
+			Config: component.JetStreamPort{
+				StreamName: GithubStreamName,
+				Subjects:   []string{admission.SubjectIssue},
+			},
 		}},
-		Outputs: []component.PortDefinition{},
+		Outputs: []component.PortDefinition{graphown.RequesterPortDefinition("The admission-record birth write (strict create through the projection client).")},
 	}
+}
+
+// jetstreamLane extracts the consumer coordinates from a declared input port,
+// reporting false for a port that is not a subject-bearing JetStream lane.
+func jetstreamLane(port component.PortDefinition) (subject, stream string, ok bool) {
+	js, isJS := port.Config.(component.JetStreamPort)
+	if !isJS || len(js.Subjects) == 0 || js.Subjects[0] == "" {
+		return "", "", false
+	}
+	return js.Subjects[0], js.StreamName, true
 }
 
 // StreamPublisher is the narrow publish surface the lanes use (the wake and the
@@ -172,7 +185,7 @@ var (
 )
 
 // NewProcessor is the component factory.
-func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
+func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg ComponentConfig
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -208,11 +221,18 @@ func NewProcessor(rawConfig json.RawMessage, deps component.Dependencies) (compo
 			slog.String("token_env", cfg.TokenEnv))
 	}
 
+	// The admission birth surface: strict create under the admission-check
+	// contract. A nil clients (the census path) yields a nil creator, which
+	// fails loudly at the first write — never a silently dropped record.
+	var creator EntityCreator
+	if c := clients.Creator(RecordSource); c != nil {
+		creator = c
+	}
 	c := &Component{
 		config:   cfg,
 		nats:     deps.NATSClient,
 		pub:      deps.NATSClient,
-		creator:  &natsEntityCreator{client: deps.NATSClient},
+		creator:  creator,
 		checker:  checker,
 		resolver: admission.NewRunResolver(deps.NATSClient, deps.Platform.Org, deps.Platform.Platform),
 		platform: deps.Platform,
@@ -240,11 +260,15 @@ func applyConfigDefaults(cfg *ComponentConfig) {
 }
 
 // Register registers the issue-intake component with the component registry
-// (called from boot.RegisterAll so both binaries pick it up together).
-func Register(reg *component.Registry) error {
+// (called from boot.RegisterAll so both binaries pick it up together). clients
+// supplies the admission birth surface; nil is the schema-scanning census path
+// (a nil creator fails loudly if a write is ever attempted).
+func Register(reg *component.Registry, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
-		Name:        ComponentName,
-		Factory:     NewProcessor,
+		Name: ComponentName,
+		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
+			return NewProcessor(raw, deps, clients)
+		},
 		Schema:      Schema,
 		Type:        "processor",
 		Domain:      "forge-io",
@@ -289,7 +313,7 @@ func (c *Component) Start(ctx context.Context) error {
 	}
 
 	for _, port := range c.config.Ports.Inputs {
-		if port.Type != "jetstream" || port.Subject == "" {
+		if _, _, ok := jetstreamLane(port); !ok {
 			continue
 		}
 		if err := c.setupConsumer(ctx, port); err != nil {
@@ -310,11 +334,18 @@ func (c *Component) Start(ctx context.Context) error {
 // setupConsumer creates the durable GITHUB-stream consumer (the agentic-tools
 // consumer shape: bounded redelivery, heartbeat-acked work).
 func (c *Component) setupConsumer(ctx context.Context, port component.PortDefinition) error {
-	streamName := port.StreamName
+	subject, streamName, _ := jetstreamLane(port)
 	if streamName == "" {
 		streamName = GithubStreamName
 	}
-	consumerCfg := component.GetConsumerConfigFromDefinition(port)
+	resolved, err := port.Resolve(component.DirectionInput)
+	if err != nil {
+		return errs.WrapInvalid(err, ComponentName, "Start", "resolve input port "+port.Name)
+	}
+	consumerCfg, err := component.GetConsumerConfig(resolved)
+	if err != nil {
+		return errs.WrapInvalid(err, ComponentName, "Start", "consumer config for "+port.Name)
+	}
 	// max_deliver is set DELIBERATELY (review finding): the framework default
 	// of 3 gives the intake retry case only ~2 retries. ConsumeWithHeartbeat
 	// naks with a fixed 30s delay (its own contract — a BackOff list here would
@@ -329,7 +360,7 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 	cfg := natsclient.StreamConsumerConfig{
 		StreamName:     streamName,
 		ConsumerName:   "issue-intake-" + port.Name,
-		FilterSubject:  port.Subject,
+		FilterSubject:  subject,
 		DeliverPolicy:  consumerCfg.DeliverPolicy,
 		AckPolicy:      consumerCfg.AckPolicy,
 		MaxDeliver:     maxDeliver,
@@ -338,7 +369,7 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 		AutoCreate:     false,
 		MessageTimeout: 3 * time.Minute,
 	}
-	err := c.nats.ConsumeStreamWithConfig(ctx, cfg, func(msgCtx context.Context, msg jetstream.Msg) {
+	err = c.nats.ConsumeStreamWithConfig(ctx, cfg, func(msgCtx context.Context, msg jetstream.Msg) {
 		if hbErr := natsclient.ConsumeWithHeartbeat(msgCtx, msg, 20*time.Second, func(workCtx context.Context) error {
 			return c.handleEvent(workCtx, msg.Subject(), msg.Data())
 		}); hbErr != nil {
@@ -346,7 +377,7 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 		}
 	})
 	if err != nil {
-		return errs.WrapTransient(err, ComponentName, "Start", fmt.Sprintf("consumer setup for %s on %s", port.Subject, streamName))
+		return errs.WrapTransient(err, ComponentName, "Start", fmt.Sprintf("consumer setup for %s on %s", subject, streamName))
 	}
 	return nil
 }
@@ -488,32 +519,6 @@ func eventDeliveryID(payload []byte) string {
 // The github client satisfies the admission gate's checker contract — asserted
 // here (not in the github package: that direction would be an import cycle).
 var _ admission.PermissionChecker = (*github.Client)(nil)
-
-// natsEntityCreator is the classified create_with_triples adapter. It exists
-// (rather than reusing agentictools.NewNATSTriplePublisher) because the
-// framework publisher SWALLOWS EntityExists as idempotent-success — and the
-// intake lane NEEDS that signal (it means "skip the wake").
-type natsEntityCreator struct {
-	client *natsclient.Client
-}
-
-func (n *natsEntityCreator) CreateEntityWithTriples(ctx context.Context, entityID string, msgType message.Type, triples []message.Triple) error {
-	req := graph.CreateEntityWithTriplesRequest{
-		Entity:  &graph.EntityState{ID: entityID, MessageType: msgType, Triples: triples},
-		Triples: triples,
-	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal create_with_triples: %w", err)
-	}
-	// Classified + retry: a mutation whose duplicate is absorbed by must-exist
-	// semantics (EntityExists surfaces to the caller, who treats it as the
-	// already-processed signal).
-	if _, err := n.client.RequestWithRetryClassified(ctx, "graph.mutation.entity.create_with_triples", data, 5*time.Second, natsclient.DefaultRetryConfig()); err != nil {
-		return err
-	}
-	return nil
-}
 
 // --- the HTTP receiver ---
 
@@ -658,16 +663,31 @@ func (c *Component) Meta() component.Metadata {
 
 // InputPorts implements Discoverable.
 func (c *Component) InputPorts() []component.Port {
-	ports := make([]component.Port, 0, len(c.config.Ports.Inputs))
-	for _, p := range c.config.Ports.Inputs {
-		ports = append(ports, component.Port{Name: p.Name, Direction: component.DirectionInput, Required: p.Required, Config: component.NATSPort{Subject: p.Subject}})
+	return resolvePorts(c.config.Ports.Inputs, component.DirectionInput)
+}
+
+// OutputPorts implements Discoverable: the declared graph-mutation requester
+// (the admission birth write). The wake publish stays a stream write, not a
+// declared output port (it mirrors the journey's front-door publish).
+func (c *Component) OutputPorts() []component.Port {
+	return resolvePorts(c.config.Ports.Outputs, component.DirectionOutput)
+}
+
+// resolvePorts resolves declared definitions for discovery. A definition that
+// fails strict resolution is dropped here because Discoverable has no error
+// channel — Start's consumer setup (inputs) and flow validation (outputs)
+// surface the same fault loudly.
+func resolvePorts(defs []component.PortDefinition, dir component.Direction) []component.Port {
+	ports := make([]component.Port, 0, len(defs))
+	for _, d := range defs {
+		p, err := d.Resolve(dir)
+		if err != nil {
+			continue
+		}
+		ports = append(ports, p)
 	}
 	return ports
 }
-
-// OutputPorts implements Discoverable — the wake publish is a stream write, not
-// a declared output port (it mirrors the journey's front-door publish).
-func (c *Component) OutputPorts() []component.Port { return []component.Port{} }
 
 // ConfigSchema implements Discoverable.
 func (c *Component) ConfigSchema() component.ConfigSchema { return Schema }

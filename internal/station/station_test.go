@@ -58,7 +58,7 @@ type captureWriter struct {
 	err   error
 }
 
-func (w *captureWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *captureWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	w.calls = append(w.calls, replaceCall{entityID: m.EntityID, add: m.Desired})
 	if w.err != nil {
 		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
@@ -399,11 +399,12 @@ func TestDefaultPortsSubjectMatchesPrefix(t *testing.T) {
 		t.Fatalf("DefaultPorts inputs = %d, want 1", len(ports.Inputs))
 	}
 	want := SubjectPrefix + "floors-station.>"
-	if got := ports.Inputs[0].Subject; got != want {
-		t.Errorf("dispatch subject = %q, want %q (the rule publishes component.<name>.dispatch, the wildcard matches)", got, want)
+	np, ok := ports.Inputs[0].Config.(component.NATSPort)
+	if !ok {
+		t.Fatalf("dispatch port config = %T, want component.NATSPort (core NATS)", ports.Inputs[0].Config)
 	}
-	if ports.Inputs[0].Type != "nats" {
-		t.Errorf("dispatch port type = %q, want nats (core NATS)", ports.Inputs[0].Type)
+	if np.Subject != want {
+		t.Errorf("dispatch subject = %q, want %q (the rule publishes component.<name>.dispatch, the wildcard matches)", np.Subject, want)
 	}
 }
 

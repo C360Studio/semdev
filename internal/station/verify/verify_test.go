@@ -55,7 +55,7 @@ func (p fakeProver) ProveArtifact(_ context.Context, _, _ string, _ harness.Mani
 
 type okWriter struct{ replaces [][]message.Triple }
 
-func (w *okWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *okWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	w.replaces = append(w.replaces, m.Desired)
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }

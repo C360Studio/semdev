@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/pkg/errs"
+
+	"github.com/c360studio/semdev/internal/graphown"
 )
 
 // The admission record (forge-io-real-lanes): the canonical forge-io spec
@@ -24,7 +24,7 @@ import (
 //
 // The entity ID is CONTENT-DERIVED (UUIDv5 over ref + delivery GUID), which is
 // the intake lane's idempotency backstop: a webhook REDELIVERY collapses onto
-// the same entity, and create_with_triples' EntityExists tells the consumer the
+// the same entity, and the strict create's CONFLICT tells the consumer the
 // event was already processed (skip the wake rather than double-mint a run).
 
 const (
@@ -64,9 +64,9 @@ func AdmissionRecordMessageType() message.Type {
 }
 
 // EntityCreator is the narrow birth surface the recorder needs —
-// agentictools.TriplePublisher satisfies it.
+// *graphown.Creator satisfies it.
 type EntityCreator interface {
-	CreateEntityWithTriples(ctx context.Context, entityID string, msgType message.Type, triples []message.Triple) error
+	Create(ctx context.Context, entityID string, msgType message.Type, triples []message.Triple) error
 }
 
 // ErrAlreadyRecorded reports that the admission record already exists — the
@@ -88,9 +88,8 @@ func RecordAdmission(ctx context.Context, creator EntityCreator, entityID, actor
 		{Subject: entityID, Predicate: ActorAdmittedPredicate, Object: "true", Source: RecordSource, Timestamp: now, Confidence: 1.0},
 		{Subject: entityID, Predicate: EventRefPredicate, Object: ref, Source: RecordSource, Timestamp: now, Confidence: 1.0},
 	}
-	if err := creator.CreateEntityWithTriples(ctx, entityID, AdmissionRecordMessageType(), triples); err != nil {
-		var ce *errs.ClassifiedError
-		if errors.As(err, &ce) && ce.Code == graph.ErrorCodeEntityExists {
+	if err := creator.Create(ctx, entityID, AdmissionRecordMessageType(), triples); err != nil {
+		if graphown.IsConflict(err) {
 			return ErrAlreadyRecorded
 		}
 		return fmt.Errorf("intake: record admission on %s: %w", entityID, err)

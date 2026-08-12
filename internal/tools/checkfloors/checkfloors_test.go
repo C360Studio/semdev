@@ -118,7 +118,7 @@ type fakeWriter struct {
 	replaces  [][]message.Triple
 }
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	w.entities = append(w.entities, m.EntityID)
 	w.contracts = append(w.contracts, m.Contract)
 	w.replaces = append(w.replaces, m.Desired)
@@ -127,12 +127,12 @@ func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMu
 
 // ReadAuthoritative returns the WHOLE entity as the real client does; the caller's
 // LOCAL prefix filter reconstructs the owned set the old scoped read returned.
-func (w *fakeWriter) ReadAuthoritative(_ context.Context, id string) (*graph.EntityState, error) {
+func (w *fakeWriter) ReadAuthoritative(_ context.Context, id string) (*graph.ExactEntity, error) {
 	e := &graph.EntityState{ID: id}
 	for _, p := range w.owned {
 		e.Triples = append(e.Triples, message.Triple{Subject: id, Predicate: p, Object: "stale"})
 	}
-	return e, nil
+	return &graph.ExactEntity{Entity: e, KVRevision: 1}, nil
 }
 
 // clearedFindings reports whether any write CLEARED floor-tools' owned group. Under

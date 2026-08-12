@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/message"
 
 	"github.com/c360studio/semdev/internal/cliexec"
@@ -36,7 +37,7 @@ type fakeWriter struct {
 // production was hiding that (G8).
 const runEntity = "org.plat.agent.chain.execution.run-7"
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	if w.err != nil {
 		return projection.MutationReceipt{Commit: projection.CommitNotCommitted}, w.err
 	}
@@ -146,14 +147,21 @@ func TestHandleFailsClosedOnDeliveryFault(t *testing.T) {
 // UnmarshalJSON upstream would silently drop one half).
 func TestStationConfigEmbeddingFillsBothHalves(t *testing.T) {
 	raw := []byte(`{
-		"ports": {"inputs": [{"name": "dispatch", "type": "nats", "subject": "component.delivery-station.>"}]},
+		"ports": {"inputs": [{"name": "dispatch", "config": {"kind": "nats", "subject": "component.delivery-station.>"}}]},
 		"forge": {"owner": "acme", "repo": "widgets", "remote_url": "file:///tmp/b.git", "base_branch": "trunk"}
 	}`)
 	var cfg stationConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if cfg.Ports == nil || len(cfg.Ports.Inputs) != 1 || cfg.Ports.Inputs[0].Subject != "component.delivery-station.>" {
+	dispatch, ok := func() (component.NATSPort, bool) {
+		if cfg.Ports == nil || len(cfg.Ports.Inputs) != 1 {
+			return component.NATSPort{}, false
+		}
+		np, isNATS := cfg.Ports.Inputs[0].Config.(component.NATSPort)
+		return np, isNATS
+	}()
+	if !ok || dispatch.Subject != "component.delivery-station.>" {
 		t.Errorf("embedded station ports not filled: %+v", cfg.Ports)
 	}
 	if cfg.Forge.Owner != "acme" || cfg.Forge.Repo != "widgets" || cfg.Forge.BaseBranch != "trunk" {

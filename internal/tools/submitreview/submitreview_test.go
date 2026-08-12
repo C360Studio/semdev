@@ -44,7 +44,7 @@ type fakeWriter struct {
 	contracts []string
 }
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	w.replaces = append(w.replaces, m.Desired)
 	w.entityIDs = append(w.entityIDs, m.EntityID)
 	w.contracts = append(w.contracts, m.Contract)

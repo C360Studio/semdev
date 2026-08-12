@@ -92,7 +92,7 @@ type fakeWriter struct {
 	removes  [][]string
 }
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	w.replaces = append(w.replaces, m.Desired)
 	w.removes = append(w.removes, nil)
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil

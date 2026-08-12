@@ -14,13 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/c360studio/semdev/internal/forge/githubwebhook"
 	"github.com/c360studio/semdev/internal/intake/admission"
+
 	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/component"
-	"github.com/c360studio/semstreams/graph"
 	"github.com/c360studio/semstreams/message"
-	"github.com/c360studio/semstreams/pkg/errs"
+	"github.com/c360studio/semstreams/pkg/projection"
 )
 
 // --- fakes ---
@@ -58,12 +59,9 @@ type fakeCreator struct {
 	err     error
 }
 
-func (f *fakeCreator) CreateEntityWithTriples(_ context.Context, entityID string, msgType message.Type, triples []message.Triple) error {
+func (f *fakeCreator) Create(_ context.Context, entityID string, msgType message.Type, triples []message.Triple) error {
 	if f.exists {
-		return &errs.ClassifiedError{
-			Err: errs.ErrInvalidConfig, Message: "exists",
-			Code: graph.ErrorCodeEntityExists,
-		}
+		return &projection.MutationError{Kind: projection.MutationConflict, Err: errors.New("exists")}
 	}
 	if f.err != nil {
 		return f.err

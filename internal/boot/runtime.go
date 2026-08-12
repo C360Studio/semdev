@@ -210,19 +210,18 @@ type Runtime struct {
 	// containers so a shutdown leaks no docker resource. nil is a valid zero (no
 	// live tools wired), so Stop nil-guards it.
 	sandboxes *runspace.Sandboxes
-	// graphOwners is the process's ONE set of bound projection owners. Exposed via
-	// GraphOwners so an in-process caller (the e2e stand-ins) reuses it instead of
-	// binding again: a second registration mints a new incarnation and invalidates
-	// THIS runtime's tokens for every owner it re-binds (ADR-056; see
-	// graphown.BindOwners).
-	graphOwners *graphown.Clients
-	logger      *slog.Logger
+	// graphWriters is the process's contract-validated graph write surface (one
+	// shared mutation client; ADR-091 — contracts validate local intent, nothing
+	// registers). Exposed via GraphWriters so an in-process caller (the e2e
+	// stand-ins) resolves writers through the SAME contract table production uses.
+	graphWriters *graphown.Clients
+	logger       *slog.Logger
 }
 
-// GraphOwners returns the bound projection owners this runtime registered. Callers
-// that need to stamp an owned fact in-process MUST draw their writer from here
-// rather than binding their own — binding again supersedes the runtime's lease.
-func (r *Runtime) GraphOwners() *graphown.Clients { return r.graphOwners }
+// GraphWriters returns the runtime's contract-validated write surface. Callers
+// that need to stamp a fact in-process draw their writer from here so the
+// contract resolution (D3b) governs their write exactly as it does production's.
+func (r *Runtime) GraphWriters() *graphown.Clients { return r.graphWriters }
 
 // resolveNATSURLs implements the documented precedence: an explicit
 // RunOptions override beats the environment variable, which beats the config
@@ -532,8 +531,8 @@ type runtimeRegistries struct {
 	// docker container per run). Created only on the live path (a real NATS client);
 	// nil for the schema-scanning censuses.
 	sandboxes *runspace.Sandboxes
-	// graphOwners is the process's ONE set of bound projection owners (ADR-056),
-	// threaded to every component and tool that stamps an owned fact.
+	// graphOwners is the process's contract-validated write surface (ADR-091),
+	// threaded to every component and tool that stamps a fact.
 	graphOwners *graphown.Clients
 }
 
@@ -579,42 +578,26 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	if err != nil {
 		return nil, err
 	}
-	// ADR-056 ownership setup, BEFORE any component or tool that writes facts is
-	// registered: ensure the buckets, start the one process-lifetime heartbeater on
-	// ctx, and bind every derived owner to its complete contract set. A bind failure
-	// is fatal — an unbound owner's writes would be un-tokened, and the owner-lease
-	// meter cannot see that (design D5), so the failure must surface HERE or not at all.
-	graphClients, err := graphown.BindAll(ctx, natsClient, logger)
+	// The graph write surface, BEFORE any component or tool that writes facts is
+	// registered: one contract-validating mutation client carrying every derived
+	// contract (ADR-091 — contracts validate local intent, nothing registers or
+	// leases). Construction is purely local, so a failure here is a contract bug.
+	graphClients, err := graphown.NewClients(natsClient)
 	if err != nil {
-		return nil, fmt.Errorf("bind projection owners: %w", err)
+		return nil, fmt.Errorf("build graph mutation client: %w", err)
 	}
-	// A failure past this point abandons the boot with no Runtime for Stop to
-	// release, and the NEXT boot in this process (a journey binary's subsequent
-	// test) would fail ErrOwnersAlreadyBoundInProcess — a loud error that masks
-	// the real cause. Release exactly what THIS bind claimed, never
-	// graphown.Owners(): if BindAll ever fails because an earlier runtime in the
-	// process is still live, a blanket release would free the LIVE holder's
-	// claims and reopen the two-live-holders hazard the guard exists to close.
-	// BindOwners releases on its own internal failures; this defer covers every
-	// error return after a successful bind, including ones added later.
-	registriesBuilt := false
-	defer func() {
-		if !registriesBuilt {
-			graphown.ReleaseOwners(graphClients.Bound()...)
-		}
-	}()
 
 	componentReg := component.NewRegistry()
-	// Boot census (D5 task 6.1a): every owner the vocab table declares must have a
-	// live client BEFORE anything that writes is registered. Without this, an owner
-	// that failed to bind — or a typo'd Source at a call site — surfaces only as a
-	// nil writer at its FIRST WRITE, deep inside a station handler where several
-	// paths can do nothing but log. Fail at boot instead.
+	// Boot census: every writer the vocab table declares must resolve a writer
+	// surface BEFORE anything that writes is registered. Without this, a typo'd
+	// Source at a call site surfaces only as a nil writer at its FIRST WRITE, deep
+	// inside a station handler where several paths can do nothing but log. Fail at
+	// boot instead.
 	declaredOwners, err := graphown.Owners()
 	if err != nil {
 		return nil, err
 	}
-	if err := graphClients.RequireBound(declaredOwners...); err != nil {
+	if err := graphClients.RequireWriters(declaredOwners...); err != nil {
 		return nil, err
 	}
 
@@ -660,7 +643,6 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		return nil, fmt.Errorf("register lifecycle workflow: %w", err)
 	}
 
-	registriesBuilt = true
 	return &runtimeRegistries{
 		componentReg: componentReg,
 		payloadReg:   payloadReg,
@@ -712,14 +694,6 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 	if err != nil {
 		return nil, nil, err
 	}
-	// Same post-bind window as buildRuntimeRegistries' own guard, one layer up: a
-	// failure below abandons the bound owners with no Runtime for Stop to release.
-	servicesWired := false
-	defer func() {
-		if !servicesWired {
-			graphown.ReleaseOwners(regs.graphOwners.Bound()...)
-		}
-	}()
 
 	serviceReg := service.NewServiceRegistry()
 	if err := service.RegisterAll(serviceReg); err != nil {
@@ -753,7 +727,6 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 		return nil, nil, err
 	}
 
-	servicesWired = true
 	return svcMgr, regs, nil
 }
 
@@ -766,12 +739,7 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 // path below closes exactly the resources opened by the steps before it (the
 // NATS connection, then also the config manager once it exists), so a reader
 // can audit "what's alive at this point" by reading top-to-bottom without
-// tracing deferred closures. The one resource that outlives this frame is the
-// in-process projection-owner claims: wireServices and buildRuntimeRegistries
-// release them on their own post-bind failures, the seedPersonas path below
-// releases them explicitly, and once a Runtime exists Stop owns the release —
-// without that, a failed boot in a journey binary would poison every later
-// boot with ErrOwnersAlreadyBoundInProcess.
+// tracing deferred closures.
 func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	logger := opts.Logger
 	if logger == nil {
@@ -833,7 +801,6 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 	// than the framework defaults. A wiring fault (wrong path) fails boot here
 	// rather than silently degrading the coordinator's routing prompt.
 	if err := seedPersonas(ctx, natsClient, personasDir(opts), logger); err != nil {
-		graphown.ReleaseOwners(regs.graphOwners.Bound()...)
 		_ = configMgr.Stop(5 * time.Second)
 		_ = natsClient.Close(ctx)
 		return nil, err
@@ -846,7 +813,7 @@ func NewRuntime(ctx context.Context, opts RunOptions) (*Runtime, error) {
 		svcMgr:       svcMgr,
 		toolRegistry: regs.toolReg,
 		sandboxes:    regs.sandboxes,
-		graphOwners:  regs.graphOwners,
+		graphWriters: regs.graphOwners,
 		logger:       logger,
 	}, nil
 }
@@ -883,25 +850,6 @@ func (r *Runtime) Start(ctx context.Context) error {
 // released. Remove the bound once the upstream fix lands.
 func (r *Runtime) Stop(timeout time.Duration) error {
 	var errs []error
-
-	// Release this runtime's projection-owner claims unconditionally — DEFERRED,
-	// so it runs even on the wedge path (the known semstreams #508 ComponentManager
-	// deadlock, which is why Stop is best-effort here), and therefore LAST, after
-	// nats.Close. That ordering is load-bearing: once the shared NATS client is
-	// closed, an abandoned component cannot write, so there is no window in which a
-	// same-process re-bind coexists with a still-writing old holder. Do NOT
-	// "simplify" this into a direct call at the top of Stop — that would open
-	// exactly the two-live-holders window the in-process guard exists to close.
-	//
-	// The in-process bind guard catches a SECOND live binding — two clients holding
-	// tokens for one owner, where the later silently invalidates the earlier. A
-	// runtime that has finished stopping is no longer a live holder, so a
-	// subsequent boot in the same process (a test binary running journeys in
-	// sequence) legitimately re-binds. Note the heartbeater is NOT stopped here:
-	// its lifetime is the NewRuntime ctx, which every current caller cancels
-	// before or with Stop; a beat after nats.Close fails warn-only and presence
-	// ages out at ownership.PresenceTTL.
-	defer graphown.ReleaseOwners(r.graphOwners.Bound()...)
 
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- r.svcMgr.StopAll(timeout) }()

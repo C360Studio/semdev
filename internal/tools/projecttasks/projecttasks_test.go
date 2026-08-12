@@ -66,7 +66,7 @@ type fakeWriter struct {
 	replaces [][]message.Triple
 }
 
-func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (w *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	w.replaces = append(w.replaces, m.Desired)
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
@@ -75,12 +75,12 @@ func (w *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMu
 // set the old prefix-scoped ReadOwnedPredicates returned is reconstructed by the
 // caller's LOCAL prefix filter. The seeded `owned` predicates become triples so a
 // dropped filter (which would make project_tasks refuse universally) is visible.
-func (w *fakeWriter) ReadAuthoritative(_ context.Context, id string) (*graph.EntityState, error) {
+func (w *fakeWriter) ReadAuthoritative(_ context.Context, id string) (*graph.ExactEntity, error) {
 	e := &graph.EntityState{ID: id}
 	for _, p := range w.owned {
 		e.Triples = append(e.Triples, message.Triple{Subject: id, Predicate: p, Object: "x"})
 	}
-	return e, nil
+	return &graph.ExactEntity{Entity: e, KVRevision: 1}, nil
 }
 
 // writerFor wraps the fake in the owner-bound seam the production code takes, so

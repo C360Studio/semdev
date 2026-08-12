@@ -320,25 +320,26 @@ func (c *Component) Start(ctx context.Context) error {
 // subscribeInputs wires a core-NATS subscription for each nats input port.
 func (c *Component) subscribeInputs(ctx context.Context) error {
 	for _, port := range c.config.Ports.Inputs {
-		if port.Subject == "" {
+		np, ok := port.Config.(component.NATSPort)
+		if !ok {
+			c.logger.Warn("unsupported station port kind; skipping", slog.String("port", port.Name))
 			continue
 		}
-		if port.Type != "nats" {
-			c.logger.Warn("unsupported station port type; skipping", slog.String("port", port.Name), slog.String("type", port.Type))
+		if np.Subject == "" {
 			continue
 		}
 		// The callback's msgCtx is the framework's 30s-bounded per-message context;
 		// handleMessage deliberately runs the handler under the component-lifetime
 		// baseCtx instead (a docker station runs longer than 30s), so msgCtx is not
 		// forwarded — it would silently cap a healthy slow build.
-		sub, err := c.nats.Subscribe(ctx, port.Subject, func(_ context.Context, msg *nats.Msg) {
+		sub, err := c.nats.Subscribe(ctx, np.Subject, func(_ context.Context, msg *nats.Msg) {
 			c.handleMessage(msg.Subject, msg.Data)
 		})
 		if err != nil {
-			return errs.WrapTransient(err, c.name, "Start", fmt.Sprintf("subscribe to %s", port.Subject))
+			return errs.WrapTransient(err, c.name, "Start", fmt.Sprintf("subscribe to %s", np.Subject))
 		}
 		c.subscriptions = append(c.subscriptions, sub)
-		c.logger.Debug("subscribed to station subject", slog.String("port", port.Name), slog.String("subject", port.Subject))
+		c.logger.Debug("subscribed to station subject", slog.String("port", port.Name), slog.String("subject", np.Subject))
 	}
 	return nil
 }
@@ -574,20 +575,30 @@ func (c *Component) Meta() component.Metadata {
 // InputPorts implements Discoverable.
 func (c *Component) InputPorts() []component.Port {
 	ports := make([]component.Port, 0, len(c.config.Ports.Inputs))
-	for _, p := range c.config.Ports.Inputs {
-		ports = append(ports, component.Port{
-			Name:      p.Name,
-			Direction: component.DirectionInput,
-			Required:  p.Required,
-			Config:    component.NATSPort{Subject: p.Subject},
-		})
+	for _, d := range c.config.Ports.Inputs {
+		p, err := d.Resolve(component.DirectionInput)
+		if err != nil {
+			continue // Start's subscribe loop surfaces the same fault loudly
+		}
+		ports = append(ports, p)
 	}
 	return ports
 }
 
-// OutputPorts implements Discoverable. A station emits no NATS output — it stamps
-// facts via graph.mutation.* inside its Handler.
-func (c *Component) OutputPorts() []component.Port { return []component.Port{} }
+// OutputPorts implements Discoverable: the declared graph-mutation requester —
+// a station's Handler stamps facts through the projection client, and every
+// component that mutates the graph declares that requester output.
+func (c *Component) OutputPorts() []component.Port {
+	ports := make([]component.Port, 0, len(c.config.Ports.Outputs))
+	for _, d := range c.config.Ports.Outputs {
+		p, err := d.Resolve(component.DirectionOutput)
+		if err != nil {
+			continue
+		}
+		ports = append(ports, p)
+	}
+	return ports
+}
 
 // ConfigSchema implements Discoverable.
 func (c *Component) ConfigSchema() component.ConfigSchema { return Schema }
@@ -616,18 +627,19 @@ func (c *Component) DataFlow() component.FlowMetrics {
 	return component.FlowMetrics{ErrorRate: errRate, LastActivity: last}
 }
 
-// DefaultPorts builds the standard single-input PortConfig for a station whose
-// dispatch subject is component.<name>.>. Concrete-station DefaultConfig helpers
-// and the bootstrap config both build from this so the subject cannot drift.
+// DefaultPorts builds the standard PortConfig for a station whose dispatch
+// subject is component.<name>.>. Concrete-station DefaultConfig helpers and the
+// bootstrap config both build from this so the subject cannot drift. The output
+// is the canonical typed mutation requester: a station's Handler stamps facts
+// through the projection client.
 func DefaultPorts(name string) *component.PortConfig {
 	return &component.PortConfig{
 		Inputs: []component.PortDefinition{{
 			Name:        "dispatch",
-			Type:        "nats",
-			Subject:     SubjectPrefix + name + ".>",
 			Required:    true,
 			Description: "The station rule's publish target; the firing entity + properties travel in the payload.",
+			Config:      component.NATSPort{Subject: SubjectPrefix + name + ".>"},
 		}},
-		Outputs: []component.PortDefinition{},
+		Outputs: []component.PortDefinition{graphown.RequesterPortDefinition("The station's fact stamps (reconcile through the projection client).")},
 	}
 }

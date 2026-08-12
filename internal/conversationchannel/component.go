@@ -147,41 +147,54 @@ func (c *ComponentConfig) Validate() error {
 // Schema is the generated config schema for registration.
 var Schema = component.GenerateConfigSchema(reflect.TypeOf(ComponentConfig{}))
 
-// DefaultPorts declares the two consumer lanes: the comment events (GITHUB stream,
-// filtered to github.event.comment) and the park-lane publishes (USER stream).
+// DefaultPorts declares the consumer lanes — the comment events (GITHUB stream,
+// filtered to github.event.comment), the park-lane publishes (USER stream), and
+// the NL apply dispatch — plus the declared graph-mutation requester (the
+// approval adapter's fact stamps travel through the projection client).
 func DefaultPorts() *component.PortConfig {
 	return &component.PortConfig{
 		Inputs: []component.PortDefinition{{
 			Name:        "comment_events",
-			Type:        "jetstream",
-			Subject:     admission.SubjectComment,
-			StreamName:  GithubStreamName,
 			Required:    true,
 			Description: "Flattened comment events (issue-intake's receiver or an e2e journey publishes them).",
+			Config: component.JetStreamPort{
+				StreamName: GithubStreamName,
+				Subjects:   []string{admission.SubjectComment},
+			},
 		}, {
 			Name:        "user_responses",
-			Type:        "jetstream",
-			Subject:     UserResponseSubject,
-			StreamName:  "USER",
-			Required:    false,
 			Description: "The park rules' user.response publishes — posted to the thread via the Channel port.",
+			Config: component.JetStreamPort{
+				StreamName: "USER",
+				Subjects:   []string{UserResponseSubject},
+			},
 		}, {
 			Name:        "user_notes",
-			Type:        "jetstream",
-			Subject:     UserNoteSubject,
-			StreamName:  "USER",
-			Required:    false,
 			Description: "The classifier fault-note publishes (conversation/05) — posted to the thread via the Channel port. A message only; stamps no fact.",
+			Config: component.JetStreamPort{
+				StreamName: "USER",
+				Subjects:   []string{UserNoteSubject},
+			},
 		}, {
 			Name:        "apply_dispatch",
-			Type:        "jetstream",
-			Subject:     ApplyDispatchSubject,
-			StreamName:  ApplyStreamName,
-			Required:    false,
 			Description: "The NL intent routing rules' dispatch (conversation/03a+03b) — the deterministic apply consumer that re-authorizes, posts transparency, and releases the change gate.",
+			Config: component.JetStreamPort{
+				StreamName: ApplyStreamName,
+				Subjects:   []string{ApplyDispatchSubject},
+			},
 		}},
-		Outputs: []component.PortDefinition{},
+		Outputs: []component.PortDefinition{graphown.RequesterPortDefinition("The approval adapter's fact stamps (reconcile through the projection client).")},
 	}
+}
+
+// jetstreamLane extracts the consumer coordinates from a declared input port,
+// reporting false for a port that is not a subject-bearing JetStream lane.
+func jetstreamLane(port component.PortDefinition) (subject, stream string, ok bool) {
+	js, isJS := port.Config.(component.JetStreamPort)
+	if !isJS || len(js.Subjects) == 0 || js.Subjects[0] == "" {
+		return "", "", false
+	}
+	return js.Subjects[0], js.StreamName, true
 }
 
 // Component is the conversation-channel processor.
@@ -386,10 +399,11 @@ func (c *Component) activeConsumerPorts() []component.PortDefinition {
 	pollMode := c.config.pollEnabled()
 	var out []component.PortDefinition
 	for _, port := range c.config.Ports.Inputs {
-		if port.Type != "jetstream" || port.Subject == "" {
+		subject, _, ok := jetstreamLane(port)
+		if !ok {
 			continue
 		}
-		if pollMode && port.Subject == admission.SubjectComment {
+		if pollMode && subject == admission.SubjectComment {
 			continue
 		}
 		out = append(out, port)
@@ -400,11 +414,18 @@ func (c *Component) activeConsumerPorts() []component.PortDefinition {
 // setupConsumer creates a durable consumer for one input port (the agentic-tools
 // consumer shape: bounded redelivery, heartbeat-acked work).
 func (c *Component) setupConsumer(ctx context.Context, port component.PortDefinition) error {
-	streamName := port.StreamName
+	subject, streamName, _ := jetstreamLane(port)
 	if streamName == "" {
 		streamName = GithubStreamName
 	}
-	consumerCfg := component.GetConsumerConfigFromDefinition(port)
+	resolved, err := port.Resolve(component.DirectionInput)
+	if err != nil {
+		return errs.WrapInvalid(err, ComponentName, "Start", "resolve input port "+port.Name)
+	}
+	consumerCfg, err := component.GetConsumerConfig(resolved)
+	if err != nil {
+		return errs.WrapInvalid(err, ComponentName, "Start", "consumer config for "+port.Name)
+	}
 	// max_deliver is set DELIBERATELY (the framework default of 3 gives the
 	// approval-races-mint case only ~2 retries before a human's /semdev approve is
 	// silently dropped). ConsumeWithHeartbeat naks with a fixed 30s delay, so 10
@@ -431,14 +452,14 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 	// parked run could never be approved or cancelled and even /semdev approve
 	// would die. See apply.go's FAILURE POSTURE block; the opt-out is enforced by
 	// TestApplyLaneIsTheDeliberateNonParkingStation.
-	if port.Subject == ApplyDispatchSubject {
+	if subject == ApplyDispatchSubject {
 		maxAckPending = 1
 		maxDeliver = applyMaxDeliverCap
 	}
 	cfg := natsclient.StreamConsumerConfig{
 		StreamName:     streamName,
 		ConsumerName:   ComponentName + "-" + port.Name,
-		FilterSubject:  port.Subject,
+		FilterSubject:  subject,
 		DeliverPolicy:  consumerCfg.DeliverPolicy,
 		AckPolicy:      consumerCfg.AckPolicy,
 		MaxDeliver:     maxDeliver,
@@ -447,7 +468,7 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 		AutoCreate:     false,
 		MessageTimeout: 3 * time.Minute,
 	}
-	err := c.nats.ConsumeStreamWithConfig(ctx, cfg, func(msgCtx context.Context, msg jetstream.Msg) {
+	err = c.nats.ConsumeStreamWithConfig(ctx, cfg, func(msgCtx context.Context, msg jetstream.Msg) {
 		if hbErr := natsclient.ConsumeWithHeartbeat(msgCtx, msg, 20*time.Second, func(workCtx context.Context) error {
 			return c.handleEvent(workCtx, msg.Subject(), msg.Data())
 		}); hbErr != nil {
@@ -458,7 +479,7 @@ func (c *Component) setupConsumer(ctx context.Context, port component.PortDefini
 		}
 	})
 	if err != nil {
-		return errs.WrapTransient(err, ComponentName, "Start", "consumer setup for "+port.Subject+" on "+streamName)
+		return errs.WrapTransient(err, ComponentName, "Start", "consumer setup for "+subject+" on "+streamName)
 	}
 	return nil
 }
@@ -511,16 +532,31 @@ func (c *Component) Meta() component.Metadata {
 
 // InputPorts implements Discoverable.
 func (c *Component) InputPorts() []component.Port {
-	ports := make([]component.Port, 0, len(c.config.Ports.Inputs))
-	for _, p := range c.config.Ports.Inputs {
-		ports = append(ports, component.Port{Name: p.Name, Direction: component.DirectionInput, Required: p.Required, Config: component.NATSPort{Subject: p.Subject}})
+	return resolvePorts(c.config.Ports.Inputs, component.DirectionInput)
+}
+
+// OutputPorts implements Discoverable: the declared graph-mutation requester
+// (the approval adapter's fact stamps). The thread posts stay out-of-band (the
+// Channel port speaks the forge's API, not NATS).
+func (c *Component) OutputPorts() []component.Port {
+	return resolvePorts(c.config.Ports.Outputs, component.DirectionOutput)
+}
+
+// resolvePorts resolves declared definitions for discovery. A definition that
+// fails strict resolution is dropped here because Discoverable has no error
+// channel — Start's consumer setup (inputs) and flow validation (outputs)
+// surface the same fault loudly.
+func resolvePorts(defs []component.PortDefinition, dir component.Direction) []component.Port {
+	ports := make([]component.Port, 0, len(defs))
+	for _, d := range defs {
+		p, err := d.Resolve(dir)
+		if err != nil {
+			continue
+		}
+		ports = append(ports, p)
 	}
 	return ports
 }
-
-// OutputPorts implements Discoverable — the lanes post out-of-band (the Channel)
-// and stamp facts (the approval writer), not through a declared output port.
-func (c *Component) OutputPorts() []component.Port { return []component.Port{} }
 
 // ConfigSchema implements Discoverable.
 func (c *Component) ConfigSchema() component.ConfigSchema { return Schema }

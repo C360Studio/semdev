@@ -27,7 +27,7 @@ func (r errReader) ReadFacts(_ context.Context, _, _ string) ([]message.Triple, 
 
 type okWriter struct{}
 
-func (okWriter) ReplaceOwned(_ context.Context, _ projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (okWriter) Reconcile(_ context.Context, _ projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil
 }
 

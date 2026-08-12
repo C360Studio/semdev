@@ -104,9 +104,9 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 		return fmt.Errorf("register provision station: %w", err)
 	}
 	// The forge-io front door (forge-io-real-lanes): webhook receiver + durable
-	// admission consumer. Self-sufficient — its deps (NATS, forge client from the
-	// token env) build at construction.
-	if err := intake.Register(reg); err != nil {
+	// admission consumer. clients supplies the admission birth surface (the
+	// strict create under the admission-check contract).
+	if err := intake.Register(reg, clients); err != nil {
 		return fmt.Errorf("register issue-intake component: %w", err)
 	}
 	// The conversation-channel front door (conversation-channel-seam): the human

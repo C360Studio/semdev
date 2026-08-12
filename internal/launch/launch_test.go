@@ -77,7 +77,7 @@ type fakeWriter struct {
 	triples []message.Triple
 }
 
-func (f *fakeWriter) ReplaceOwned(_ context.Context, m projection.ReplaceOwnedMutation) (projection.MutationReceipt, error) {
+func (f *fakeWriter) Reconcile(_ context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
 	f.calls++
 	f.triples = append(f.triples, m.Desired...)
 	return projection.MutationReceipt{Commit: projection.CommitVerified}, nil

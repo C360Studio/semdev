@@ -753,10 +753,12 @@ func TestConversationLanePortsMatchConfigs(t *testing.T) {
 					Config struct {
 						Ports struct {
 							Inputs []struct {
-								Name       string `json:"name"`
-								Type       string `json:"type"`
-								Subject    string `json:"subject"`
-								StreamName string `json:"stream_name"`
+								Name   string `json:"name"`
+								Config struct {
+									Kind       string   `json:"kind"`
+									Subjects   []string `json:"subjects"`
+									StreamName string   `json:"stream_name"`
+								} `json:"config"`
 							} `json:"inputs"`
 						} `json:"ports"`
 					} `json:"config"`
@@ -769,7 +771,11 @@ func TestConversationLanePortsMatchConfigs(t *testing.T) {
 
 		byName := map[string]struct{ subject, stream string }{}
 		for _, in := range cfg.Components.ConversationChannel.Config.Ports.Inputs {
-			byName[in.Name] = struct{ subject, stream string }{in.Subject, in.StreamName}
+			subject := ""
+			if len(in.Config.Subjects) > 0 {
+				subject = in.Config.Subjects[0]
+			}
+			byName[in.Name] = struct{ subject, stream string }{subject, in.Config.StreamName}
 		}
 		for _, want := range []struct{ port, subject, stream string }{
 			{"apply_dispatch", conversationchannel.ApplyDispatchSubject, conversationchannel.ApplyStreamName},
