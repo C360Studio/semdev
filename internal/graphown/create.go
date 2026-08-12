@@ -82,12 +82,12 @@ func (c *Creator) Create(ctx context.Context, entityID string, msgType message.T
 		Metadata: projection.MutationMetadata{RequestID: entityID, Source: c.owner},
 	}
 	var lastErr error
-	for attempt := 1; attempt <= replaceAttempts; attempt++ {
+	for attempt := 1; attempt <= transportAttempts; attempt++ {
 		_, lastErr = c.creator.Create(ctx, mutation)
 		if lastErr == nil {
 			return nil
 		}
-		if attempt == replaceAttempts || !convergentCreateKind(lastErr) {
+		if attempt == transportAttempts || !convergentCreateKind(lastErr) {
 			break
 		}
 		select {

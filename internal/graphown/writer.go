@@ -74,10 +74,17 @@ func (w *Writer) Owner() string {
 	return w.owner
 }
 
-// replaceAttempts bounds Replace's convergent-kind retry. Three total attempts:
-// enough to ride out one rule-write interleave or one graph-ingest blip, small
-// enough that sustained contention surfaces to the caller instead of spinning.
+// replaceAttempts bounds the revision-conflict retry. Three total attempts:
+// enough to ride out one rule-write interleave, small enough that sustained
+// contention surfaces to the caller instead of spinning.
 const replaceAttempts = 3
+
+// transportAttempts bounds the transport-kind retry (unavailable /
+// commit-unknown) one attempt wider, restoring the deleted framework retry's
+// ride-out profile (1+3 requests, ~700ms window): the one caller that cannot
+// escalate a lost write is the station's dispatch-failed stamp, where an
+// under-ridden graph-ingest blip is a run that stalls instead of parking.
+const transportAttempts = 4
 
 // Replace reconciles this writer's COMPLETE owned group on entityID to desired.
 //
@@ -118,7 +125,7 @@ func (w *Writer) Replace(ctx context.Context, entityID string, desired []message
 		return err
 	}
 	var lastErr error
-	for attempt := 1; attempt <= replaceAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		_, lastErr = w.reconciler.Reconcile(ctx, projection.ReconcileMutation{
 			Contract: contract,
 			Group:    OwnedGroup,
@@ -128,7 +135,7 @@ func (w *Writer) Replace(ctx context.Context, entityID string, desired []message
 		if lastErr == nil {
 			return nil
 		}
-		if attempt == replaceAttempts || !convergentWriteKind(lastErr) {
+		if attempt >= attemptBound(lastErr) || !convergentWriteKind(lastErr) {
 			break
 		}
 		if delay := writeRetryBackoff(lastErr, attempt); delay > 0 {
@@ -142,6 +149,16 @@ func (w *Writer) Replace(ctx context.Context, entityID string, desired []message
 		}
 	}
 	return fmt.Errorf("reconcile %q on %s: %w", contract, entityID, lastErr)
+}
+
+// attemptBound picks the retry ceiling by kind: revision conflicts get the
+// tight bound (contention must surface), transport kinds the wider ride-out.
+func attemptBound(err error) int {
+	var me *projection.MutationError
+	if errors.As(err, &me) && me.Kind == projection.MutationRevisionConflict {
+		return replaceAttempts
+	}
+	return transportAttempts
 }
 
 // convergentWriteKind reports whether a later identical attempt can succeed.

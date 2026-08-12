@@ -142,17 +142,22 @@ predecessor. `max_bytes`/`discard` declarations survive as-is
 
 Each tool registered by `RegisterTools` declares its worst-effect class per
 the adopter note's two rules (a metered external read is `read_only`;
-mediation does not launder effect, but one hop is not external). Initial
-classification: `open_pr` is `external_effect` (pushes and creates PRs on a
-real forge); graph-writing and sandbox/workspace-mutating tools
-(`create_change`, `apply_patch`, `measure_task`, `check_floors`,
-`submit_review`, `verify_artifact`, `provision_sandbox`, `project_tasks`,
-`classify_intent`, `validate_change`) are `mutating`; pure readers
-(semsource proxy reads) are `read_only`. The census test walks semdev's
-registration table and fails on an absent or unrecognized value — mirroring
-the framework's own source-level check, which explicitly does not cover
-adopter tools. Effect metadata is descriptive (Rule 5): it changes no gate in
-either direction.
+mediation does not launder effect, but one hop is not external).
+
+As-built surface (review correction): only the MODEL-ADVERTISED registry is
+the effect surface — the R6 station cores (`open_pr`, `check_floors`,
+`verify_artifact`, `provision_sandbox`, `project_tasks`, `validate_change`)
+register no `ToolDefinition` and are outside it; effect metadata exists for
+discovery and approval policy over tools a model can call, which stations are
+not. The fourteen registered definitions classify as: `apply_patch`,
+`classify_intent`, `create_change`, `measure_task`, `submit_review`,
+`write_change` = `mutating`; `hydrate_change` (a projection renderer),
+`list_comments`, `read_diff`, `read_workspace`, and the four semsource
+proxies (metered external reads) = `read_only`; no registered tool reaches
+`external_effect`. The census test walks semdev's registration table and
+fails on an absent or unrecognized value — mirroring the framework's own
+source-level check, which explicitly does not cover adopter tools. Effect
+metadata is descriptive (Rule 5): it changes no gate in either direction.
 
 ### D7 — pins retire with their mechanism, censuses re-base
 

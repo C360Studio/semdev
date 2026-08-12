@@ -194,6 +194,20 @@ func TestReplaceRetriesTransportKinds(t *testing.T) {
 	if r2.calls != 1 {
 		t.Errorf("attempts = %d, want 1 — retrying a mutation the client can never accept burns the caller's budget", r2.calls)
 	}
+
+	// The transport bound is one WIDER than the revision-conflict bound (the
+	// deleted framework retry's ride-out profile): four attempts total, then
+	// loud exhaustion — the station's dispatch-failed stamp path cannot
+	// escalate a lost write, so an under-ridden blip is a stall, not a park.
+	always := &projection.MutationError{Kind: projection.MutationUnavailable}
+	r3 := &recordingReconciler{script: []error{always, always, always, always}}
+	w3 := graphown.NewWriter("measurement-harness", r3)
+	if err := w3.Replace(context.Background(), runEntity, nil); err == nil {
+		t.Fatal("four no-responders must surface, never silently succeed")
+	}
+	if r3.calls != 4 {
+		t.Errorf("attempts = %d, want 4 (the transport ride-out bound)", r3.calls)
+	}
 }
 
 // TestReadOwnedPredicatesScopesToThePrefix pins the filter whose ABSENCE inverts a
