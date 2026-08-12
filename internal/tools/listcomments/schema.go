@@ -25,6 +25,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectReadOnly,
 		Description: "List the comments on a GitHub issue or pull request (oldest first) to ground a decision in the conversation so far. Read-only.",
 		Parameters:  params,
 	}}

@@ -28,6 +28,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectMutating,
 		Description: "Record your adversarial review of one task's developed work. Provide the task_index and the required changes you found (findings); the per-task verdict is computed from that task's harness measurement plus your findings — approved only when the task has a passing measurement AND you raised no finding, otherwise changes_requested. You read the stamped measurement facts, not the work's claims about itself.",
 		Parameters:  params,
 	}}

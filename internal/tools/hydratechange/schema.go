@@ -18,6 +18,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectReadOnly,
 		Description: "Render an OpenSpec change back to markdown from the run's openspec.change.* facts (the graph is authoritative; the artifact is a projection). Returns proposal/specs/tasks as one document. Read-only — stamps nothing.",
 		Parameters:  params,
 	}}

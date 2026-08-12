@@ -18,6 +18,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectMutating,
 		Description: "Materialize an OpenSpec change as an on-disk folder in the run's target-repo workspace, rendered from the run's openspec.change.* facts, so it can be committed for the PR. Writes files only — stamps no facts.",
 		Parameters:  params,
 	}}

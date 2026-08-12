@@ -88,16 +88,16 @@
 
 ## 6. Effect metadata adoption (D6)
 
-- [ ] 6.1 Declare a worst-effect class on every tool `RegisterTools`
+- [x] 6.1 Declare a worst-effect class on every tool `RegisterTools`
       registers: `open_pr` = `external_effect`; the graph/workspace mutators
       (`create_change`, `validate_change`, `apply_patch`, `measure_task`,
       `check_floors`, `submit_review`, `verify_artifact`,
       `provision_sandbox`, `project_tasks`, `classify_intent`) = `mutating`;
       pure readers (semsource proxy reads) = `read_only`
-- [ ] 6.2 RED-FIRST census: source-level test over semdev's registration
+- [x] 6.2 RED-FIRST census: source-level test over semdev's registration
       table failing on absent or unrecognized effect values (mirrors the
       framework's own check, which excludes adopter tools)
-- [ ] 6.3 Pin that effect metadata changed no gate: the advertised-tools
+- [x] 6.3 Pin that effect metadata changed no gate: the advertised-tools
       admission and approval-gate behavior in existing pins is byte-identical
       before/after classification
 

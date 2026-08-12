@@ -24,6 +24,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectReadOnly,
 		Description: "Read a file's contents from the run's isolated checkout — read-only, path-guarded to inside the checkout. Returns up to ~32KB per call starting at offset, with a next_offset for continuation when the file is larger. A directory path returns a listing of its entries instead. You supply no outcome; this is a read.",
 		Parameters:  params,
 	}}

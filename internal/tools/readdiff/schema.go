@@ -8,6 +8,7 @@ import "github.com/c360studio/semstreams/agentic"
 func (e *Executor) ListTools() []agentic.ToolDefinition {
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectReadOnly,
 		Description: "Return the unified diff of everything this run has authored so far (base..HEAD over the run's committed checkout) — the cumulative change to review. Read-only; you supply nothing.",
 		Parameters: map[string]any{
 			"type":                 "object",

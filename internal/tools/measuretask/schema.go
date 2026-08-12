@@ -23,6 +23,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectMutating,
 		Description: "Run a projected task's test_command and record the measured outcome. Reads the immutable task.spec.<task_index>.test_command from the run (you do not supply the command), runs it in the run's workspace, and stamps measurement.result.<task_index> from the real exit code — the pass/fail is measured, never asserted. Emit only the task index.",
 		Parameters:  params,
 	}}

@@ -33,6 +33,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectMutating,
 		Description: "Record your classification of the human's message at the change-approval gate as exactly one intent (approve / reject / none) plus a short reason. You supply only the reading; the harness binds the message's author and id from the run and re-checks authorization before anything happens. Default to `none` unless the message is an explicit directive to proceed or to abandon the change.",
 		Parameters:  params,
 	}}

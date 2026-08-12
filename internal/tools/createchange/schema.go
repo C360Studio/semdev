@@ -94,6 +94,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectMutating,
 		Description: "Author an OpenSpec change from an intaken issue. Stamps openspec.change.* facts on the run entity (resolved for you); the graph is authoritative and the artifacts are hydrated from it. Emit the change CONTENT only — never a validation outcome.",
 		Parameters:  params,
 	}}

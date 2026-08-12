@@ -20,6 +20,7 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	}
 	return []agentic.ToolDefinition{{
 		Name:        ToolName,
+		Effect:      agentic.ToolEffectMutating,
 		Description: "Author a code change by emitting a unified diff. The harness applies it to the run's isolated checkout (path-guarded — a diff that escapes the checkout is rejected) and reports which files it touched. It does NOT run tests or record pass/fail — you cannot supply the outcome; the harness measures the real result separately.",
 		Parameters:  params,
 	}}

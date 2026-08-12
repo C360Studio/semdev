@@ -92,21 +92,25 @@ func (e *Executor) ListTools() []agentic.ToolDefinition {
 	return []agentic.ToolDefinition{
 		{
 			Name:        ToolCodeContext,
+			Effect:      agentic.ToolEffectReadOnly,
 			Description: "Fused code answer from the semsource knowledge graph: the resolved symbol, its verbatim body, and its callers/callees — 'show me this code and how it connects'. Read-only.",
 			Parameters:  param("The query — a symbol name (e.g. RunFloors)."),
 		},
 		{
 			Name:        ToolCodeImpact,
+			Effect:      agentic.ToolEffectReadOnly,
 			Description: "Reverse-dependency closure of a symbol from the semsource knowledge graph: what depends on it — what would break if you change it. A query grep cannot answer. Read-only.",
 			Parameters:  param("The query — a symbol name whose dependents to find."),
 		},
 		{
 			Name:        ToolCodeSearch,
+			Effect:      agentic.ToolEffectReadOnly,
 			Description: "Semantic natural-language discovery over the semsource-indexed code — 'where is the retry-with-backoff logic' — returning matching symbols and bodies. Read-only.",
 			Parameters:  param("The query — a natural-language phrase describing the code to find."),
 		},
 		{
 			Name:        ToolDocContext,
+			Effect:      agentic.ToolEffectReadOnly,
 			Description: "Fused documentation context (READMEs/ADRs/design prose) from the semsource knowledge graph for a query — the intended design, not just the code. Read-only.",
 			Parameters:  param("The query — a natural-language phrase describing the design topic."),
 		},
