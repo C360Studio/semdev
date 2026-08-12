@@ -227,6 +227,32 @@ client), and the contract↔vocab-table conformance census. Survives unchanged:
    version-beat the live config (they share one KV entry). The cutover bumps
    them to 0.32.1 / 0.32.0, preserving the strict ordering the conformance pin
    asserts.
+7. **`ConfigureFromServices` is now the WHOLE service composition** — it
+   constructs every enabled configured service itself and seals the running
+   set. semdev's follow-up `createConfiguredServices` pass double-constructed
+   ("heartbeat already registered") and is DELETED. Strict service-config
+   decode also rejects inline `_comment` keys inside a service's config block;
+   the service-manager http_port rationale moved to the top-level `_comment`.
+8. **Boot flow validation demanded four config shapes the docs did not
+   enumerate** (task 5.5, discovered against real NATS): (a) graph-query's
+   input is a CLOSED canonical port — name `graph_queries`, required,
+   `nats-request` on `graph.query.*` with interface `graph.query`/`v1`; (b)
+   the port MERGE rejects a kind override, so agentic-dispatch's
+   `user.response` output had to return to the component-default jetstream
+   shape (the old config's core-NATS override had been silently tolerated);
+   (c) agentic-loop's `trajectories` output must be required and carry
+   interface `agentic.trajectory.fact`/`v1` (Foundation B); (d) agentic-loop's
+   trajectory EVIDENCE offloads to a registered storage instance named
+   `objectstore` (config default), so semdev's configs now declare the
+   framework's `objectstore` storage component (bucket `AGENT_CONTENT`) —
+   without it every loop's evidence capture degrades with
+   `provider_unavailable` and the boot smoke never sees the loop healthy.
+9. **The parks-pin lane changed semantics under the same name**: rule
+   `add_triple` rides `triple.append` (must-exist, set-valued over exact
+   tuples) and rule `remove_triple` rides an internal read + revision-fenced
+   reconcile. The append pin re-based; the remove lane's new
+   conflict-possibility is a journey watch item (a lost race is a best-effort
+   action failure — log + counter — where the old lane could not lose one).
 
 ## Migration Plan
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect. \u26a0 TWO INVARIANTS, both load-bearing and both pinned by TestShippedConfigVersionsAreParseableSemver. (1) PLAIN SEMVER ONLY (MAJOR.MINOR.PATCH, digits): config.CompareVersions strconv.Atoi's each segment, so a suffixed value fails to parse, the manager treats the error as \"sync from KV\", and this file silently loses every boot. (2) THE MOCK CONFIG'S VERSION MUST STAY STRICTLY GREATER THAN THE LIVE CONFIG'S. Both files share ONE KV entry \u2014 the bucket name (\"semstreams_config\") and key (\"version\") are hardcoded globals, not platform-derived \u2014 and both declare the IDENTICAL platform identity (c360/semdev-bootstrap/development), so the framework's gh#459 cross-app detach guard cannot fire and VERSION ALONE decides which file wins. PushToKV writes model_registry, so if the live config could ever win, a subsequent mock-config boot would adopt gemini endpoints and the free ladder would spend real tokens behind a single WARN line. Keeping mock > live makes every stale-KV race resolve toward the FREE config; the live lane loads via its mandatory `task nats:reset`. A distinct platform.id for the live config is the framework's sanctioned isolation and is the stronger fix, but it changes entity-ID prefixes (the runbook's sidecar queries grep them), so it is a deliberate follow-up.",
+  "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect. \u26a0 TWO INVARIANTS, both load-bearing and both pinned by TestShippedConfigVersionsAreParseableSemver. (1) PLAIN SEMVER ONLY (MAJOR.MINOR.PATCH, digits): config.CompareVersions strconv.Atoi's each segment, so a suffixed value fails to parse, the manager treats the error as \"sync from KV\", and this file silently loses every boot. (2) THE MOCK CONFIG'S VERSION MUST STAY STRICTLY GREATER THAN THE LIVE CONFIG'S. Both files share ONE KV entry \u2014 the bucket name (\"semstreams_config\") and key (\"version\") are hardcoded globals, not platform-derived \u2014 and both declare the IDENTICAL platform identity (c360/semdev-bootstrap/development), so the framework's gh#459 cross-app detach guard cannot fire and VERSION ALONE decides which file wins. PushToKV writes model_registry, so if the live config could ever win, a subsequent mock-config boot would adopt gemini endpoints and the free ladder would spend real tokens behind a single WARN line. Keeping mock > live makes every stale-KV race resolve toward the FREE config; the live lane loads via its mandatory `task nats:reset`. A distinct platform.id for the live config is the framework's sanctioned isolation and is the stronger fix, but it changes entity-ID prefixes (the runbook's sidecar queries grep them), so it is a deliberate follow-up. | service-manager http_port: http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven \u2014 if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
   "version": "0.32.0",
   "platform": {
     "org": "c360",
@@ -129,7 +129,6 @@
     "service-manager": {
       "enabled": true,
       "config": {
-        "_comment": "http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven \u2014 if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
         "http_port": 18080
       }
     },
@@ -190,10 +189,15 @@
         "ports": {
           "inputs": [
             {
-              "name": "query_requests",
+              "name": "graph_queries",
+              "required": true,
               "config": {
                 "kind": "nats-request",
-                "subject": "graph.query.>"
+                "subject": "graph.query.*",
+                "interface": {
+                  "type": "graph.query",
+                  "version": "v1"
+                }
               }
             }
           ],
@@ -625,8 +629,13 @@
               "name": "trajectories",
               "config": {
                 "kind": "kv-write",
-                "bucket": "AGENT_TRAJECTORIES"
-              }
+                "bucket": "AGENT_TRAJECTORIES",
+                "interface": {
+                  "type": "agentic.trajectory.fact",
+                  "version": "v1"
+                }
+              },
+              "required": true
             },
             {
               "name": "graph_mutations",
@@ -698,8 +707,11 @@
             {
               "name": "user.response",
               "config": {
-                "kind": "nats",
-                "subject": "user.response.*"
+                "kind": "jetstream",
+                "stream_name": "USER",
+                "subjects": [
+                  "user.response.>"
+                ]
               }
             },
             {
@@ -952,6 +964,14 @@
       "type": "input",
       "name": "sim",
       "enabled": false
+    },
+    "objectstore": {
+      "type": "storage",
+      "name": "objectstore",
+      "enabled": true,
+      "config": {
+        "bucket_name": "AGENT_CONTENT"
+      }
     }
   },
   "source": {

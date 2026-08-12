@@ -82,7 +82,7 @@
       `tool.result.>`; bump top-level config `version`
 - [x] 5.4 Sweep journey-local/test configs for the same three surfaces (port
       envelope, services shape, stream subjects)
-- [ ] 5.5 Boot the assembled runtime against real NATS and iterate until
+- [x] 5.5 Boot the assembled runtime against real NATS and iterate until
       static flow validation admits the flow; record every validation demand
       the docs did not predict as a design note
 

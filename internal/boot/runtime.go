@@ -653,31 +653,6 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	}, nil
 }
 
-// createConfiguredServices constructs every enabled, constructor-registered
-// service in services except service-manager (ConfigureFromServices already
-// configured that one directly, from the same map — see semteams'
-// configureAndCreateServices). A configured-but-unregistered name (no
-// HasConstructor match) is skipped rather than treated as fatal: a config
-// typo or a not-yet-landed service should not crash boot, it should be quietly
-// absent — the same posture semteams' createServiceIfEnabled takes.
-func createConfiguredServices(svcMgr *service.Manager, services types.ServiceConfigs, svcDeps *service.Dependencies) error {
-	for name, svcCfg := range services {
-		if name == "service-manager" {
-			continue
-		}
-		if !svcCfg.Enabled {
-			continue
-		}
-		if !svcMgr.HasConstructor(name) {
-			continue
-		}
-		if _, err := svcMgr.CreateService(name, svcCfg.Config, svcDeps); err != nil {
-			return fmt.Errorf("create service %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
 // wireServices builds the metrics registry + platform identity, every
 // registry (buildRuntimeRegistries), the service registry/manager, the
 // service.Dependencies every constructed service and component shares, and
@@ -720,11 +695,12 @@ func wireServices(ctx context.Context, cfg *config.Config, expCfg experiment.Con
 		LifecycleManager:  regs.lifecycleMgr,
 	}
 
+	// ConfigureFromServices is the WHOLE composition in beta.160: it constructs
+	// every enabled configured service itself and seals the running set
+	// (services are restart-only composition). A follow-up construction pass
+	// would double-construct and be rejected.
 	if err := svcMgr.ConfigureFromServices(cfg.Services, svcDeps); err != nil {
 		return nil, nil, fmt.Errorf("configure service manager: %w", err)
-	}
-	if err := createConfiguredServices(svcMgr, cfg.Services, svcDeps); err != nil {
-		return nil, nil, err
 	}
 
 	return svcMgr, regs, nil
