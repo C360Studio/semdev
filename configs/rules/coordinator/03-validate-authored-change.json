@@ -1,0 +1,33 @@
+{
+  "id": "coordinator_validate_authored_change",
+  "type": "expression",
+  "name": "Authored change → validate it with the OpenSpec CLI oracle",
+  "description": "The validate station (R6, group 6 — now a publish-triggered COMPONENT). `validate` is a SUB-STEP of the OpenSpec lifecycle, not a coordinator taxonomy action, so no coordinator decision routes it — instead this rule chains off the authored marker. When an authoring loop calls create_change, the tool stamps openspec.change.authored=<slug> on THAT loop entity (the slug-independent signal; the run's own facts are slug-namespaced and no rule condition can wildcard-match them). This rule fires on that marker and fires a plain `publish` to component.validation-station.dispatch — the VALIDATION STATION component hydrates the change from the run's facts, shells `openspec validate <slug> --strict --json --no-interactive` in a temp dir, and — from the real exit code (G3) — stamps openspec.change.validated on the run (pass) or clears it (fail), with ZERO model turns (validate replaced its forced coordinator loop, R6). The existing run-lifecycle/01-offer-change-approval gate then advances executing→awaiting_approval.\n\nWHY IT FIRES ON THE LOOP + passes TWO properties: this rule fires on the authoring LOOP entity (that is where openspec.change.authored lives), which carries agent.loop.run (inherited via create_change's run_scope=inherit). The rule engine's executePublish stamps the dispatch entity_id = the LOOP (the firing entity) — but the validation station needs the RUN. So the publish threads BOTH the run_entity_id ($entity.triple.agent.run.entity-id) and the slug ($entity.triple.openspec.change.authored) as properties; the station reads them from the dispatch. (Contrast the projection station, which fires on the run and needs no run property.)\n\nMECHANISM: the validation station calls the SAME validatechange.Validate core the old tool used (one writer of openspec.change.validated, G5). It stamps the marker's VALUE = the content revision (D15 #0), so a re-author is detected. A CLI REJECT clears the marker (the gate cannot advance) — a definitive verdict, not a retry.\n\nNo openspec.change.validated guard: the rule fires on the LOOP marker, and openspec.change.validated lives on the RUN — not readable from the firing loop entity. Edge-triggering (fire-once on the authoring loop via RULE_STATE) is the re-fire guard; a rework re-author is a NEW loop entity, a legitimate fresh trigger (D5/D15#0: a re-author re-validates, idempotently). KNOWN M0 GAP (honest, general to all R6 stations): a persistent oracle-unrunnable transport fault (after the station's bounded retry) leaves the change unvalidated with nothing re-triggering — no auto-park at M0 (R8/group 8).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "openspec.change.authored", "operator": "ne", "value": "", "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "publish",
+      "subject": "component.validation-station.dispatch",
+      "properties": {
+        "run_entity_id": "$entity.triple.agent.run.entity-id",
+        "slug": "$entity.triple.openspec.change.authored"
+      }
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "coordinator",
+    "capability": "openspec-io / run-lifecycle",
+    "station": "validation-station — run the OpenSpec CLI oracle on the authored change (R6 component)",
+    "trigger": "openspec.change.authored on the authoring loop entity (create-change-author-tool stamps it; slug-independent so a rule can match it).",
+    "mechanism": "R6: a plain `publish` to component.validation-station.dispatch triggers the validation STATION component (zero model turns), replacing the forced validate_change coordinator turn. Fires on the authoring LOOP, so run_entity_id + slug travel as publish properties (the firing entity is the loop, not the run). Emitted on core NATS (the rule component declares no matching JetStream output port).",
+    "advances": "openspec.change.validated on the run → run-lifecycle/01-offer-change-approval fires executing→awaiting_approval.",
+    "known_gap": "general R6 station gap (honest): a persistent oracle-unrunnable fault after the station's bounded retry leaves the change unvalidated with no auto-park at M0 — reconciled by R8/group 8."
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "id": "run_park_station_failure_run",
+  "type": "expression",
+  "name": "Terminal station failure on the RUN → park toward the human",
+  "description": "The run-fired half of the station-failure park (station-failure-parks D2). A deterministic station whose Handle exhausted its bounded retries stamps station.dispatch.failed on the DISPATCHED entity (writer station-harness, G3 — the harness that ran the retries). For the RUN-dispatched stations — projection (dev-from-task/03), provision (sandbox/01), delivery (08a), per the dispatch-entity census pin — that entity IS the run, so this rule fires on the run itself (entity pattern *.*.agent.chain.execution.*, the ADR chain-anchor grammar; the pattern split with the loop-fired sibling 06 makes the two rules mutually exclusive by construction). Guards are DIRECT run facts (the firing entity carries them — the routing-upgrades crux: conditions read the FIRING entity only): not already parked (run.awaiting.human length_eq 0), not already delivered (delivery.pr.ref length_eq 0), and the fired-once self-extinguish marker station.park.routed length_eq 0 (rule add_triple APPENDS — graph-ingest AddTriple is an unconditional append, pinned by the e2e add-semantics pin — so the marker, not storage dedup, is the only re-fire protection). on_enter records run.awaiting.human FIRST (park-first: each action is its own KV revision, and a marker-set-park-absent crash window would be a permanent stall — see restart_safe), then the marker, then posts to the channel-agnostic user-response bus; the park message names the failed station via substitution of the stamped object (D3 — the fact's own object '<station>: <sanitized error>' is the source of truth; this message is display). The transition stays rule-owned (G2); run.awaiting.human's writer is the park-rule subsystem (G5, a sanctioned park realization alongside run-lifecycle/03, sandbox/02, 06d/06g/07c/08b). No Go reconciler advances a parked run (B3/B7).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.agent.chain.execution.*" },
+  "conditions": [
+    { "field": "station.dispatch.failed", "operator": "length_gte", "value": 1, "required": true },
+    { "field": "run.awaiting.human", "operator": "length_eq", "value": 0, "required": true },
+    { "field": "delivery.pr.ref", "operator": "length_eq", "value": 0, "required": true },
+    { "field": "station.park.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "run.awaiting.human",
+      "object": "station dispatch failed after retries: $entity.triple.station.dispatch.failed.value"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "station.park.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish",
+      "subject": "user.response.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "run-lifecycle",
+    "capability": "run-lifecycle",
+    "gate": "park",
+    "station": "station-failure park, run-fired half (station-failure-parks D2)",
+    "trigger_rationale": "station.dispatch.failed length_gte 1 on a chain-execution entity = a RUN-dispatched station (projection/provision/delivery) exhausted its retries. The entity-pattern split with rule 06 (loop pattern) replaces any racy cross-entity discrimination.",
+    "writer_note": "run.awaiting.human is written by the park-rule subsystem (G5, sanctioned realization); station.park.routed is the park rules' own fired-once marker (same subsystem). Rule add_triple stamps the engine's generic Source 'rule_engine', so the vocab's park-rule writer is a SUBSYSTEM label; the sanctioned-park-writers census is the honest tie.",
+    "restart_safe": "PARK-FIRST ordering (each rule action is its OWN KV revision — the engine has no same-pass batching): run.awaiting.human lands before the marker, so NO crash window can strand a marker-set-park-absent permanent stall (marker-first had exactly that window — the wedge this change exists to close). A crash after the park and before the marker cannot re-fire this rule either: the run.awaiting.human length_eq 0 guard already fails on replay (the park doubles as the extinguisher here); only the user-bus notification can be lost in that window, and the parked run remains visible to any awaiting-human surface. station.dispatch.failed is upsert-idempotent at the harness, so a crash-loop re-stamp cannot re-fire past either guard."
+  }
+}

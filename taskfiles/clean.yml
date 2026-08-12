@@ -1,0 +1,96 @@
+version: '3'
+
+# Local-infra cleanup, the sem* house pattern (mirrors semstreams/taskfiles/clean.yml).
+#
+# WHY THIS EXISTS: semdev stands up REAL docker resources per run — a sandbox
+# container (`run -d` with a keep-alive, so it never self-exits), one anonymous
+# cache volume per cache home, and a built `semdev-sandbox:<digest>` image. The
+# in-process teardown covers graceful shutdown, but a SIGKILL, a `go test` timeout,
+# an interrupted `task e2e`, or the known StopAll wedge (semstreams #508) leaves them
+# behind. Built images are never removed by the run at all, and are deliberately
+# tagged so `docker image prune` cannot reclaim them.
+#
+# EVERY TARGET IS SCOPED TO WHAT SEMDEV CREATES. semdev shares a docker daemon with
+# every other c360 stack, and this repo has already paid once for a broad teardown
+# reaching another project's resources (the compose-project incident, f2229da). So:
+# no `docker system prune`, no unscoped `volume prune`, no `container prune`.
+
+tasks:
+  docker:
+    desc: Remove semdev's sandbox containers, images, and their orphaned cache volumes
+    cmds:
+      - echo "[CLEAN] Removing semdev sandbox containers..."
+      # Containers are matched by IMAGE (semdev-sandbox:*) because semdev creates
+      # them unnamed and unlabelled. Anything else on this daemon is left alone.
+      - |
+        docker ps -a --format '{{"{{"}}.ID{{"}}"}} {{"{{"}}.Image{{"}}"}}' 2>/dev/null \
+          | awk '$2 ~ /^semdev-sandbox[:@]/ {print $1}' \
+          | xargs -r docker rm -f 2>/dev/null || true
+      - echo "[CLEAN] Removing semdev sandbox images..."
+      # Remove by TAG REFERENCE, never by image ID, and never with -f.
+      # `docker rmi -f <id>` deletes the image and EVERY tag pointing at it — so if a
+      # semdev-sandbox tag ever shares an image with another project's tag (identical
+      # layers, or a retag), removing by ID destroys THEIR image too. Verified the hard
+      # way: an ID-based version of this line deleted c360studio/semstreams:e2e-test.
+      # Removing by tag UNTAGS when other tags remain, and only deletes the image when
+      # semdev's tag was the last one — which is exactly the intended scope.
+      - |
+        docker images --filter 'reference=semdev-sandbox' \
+          --format '{{"{{"}}.Repository{{"}}"}}:{{"{{"}}.Tag{{"}}"}}' 2>/dev/null \
+          | grep -v '<none>' \
+          | xargs -r -n1 docker rmi 2>/dev/null || true
+      - echo "[CLEAN] Removing orphaned anonymous cache volumes..."
+      # semdev's cache volumes are ANONYMOUS (`docker volume create` with no name),
+      # so docker names them a 64-hex id. Matching that shape keeps every NAMED
+      # volume — semdev_*, semstreams_*, anyone's — out of range. Only dangling ones
+      # are touched, so a volume still mounted by a live container survives.
+      - |
+        docker volume ls -q --filter dangling=true 2>/dev/null \
+          | grep -E '^[0-9a-f]{64}$' \
+          | xargs -r docker volume rm 2>/dev/null || true
+      - echo "[OK] semdev docker resources cleaned"
+
+  census:
+    desc: Report what semdev currently owns on this docker daemon (read-only)
+    cmds:
+      - echo "[CENSUS] semdev sandbox containers:"
+      - |
+        docker ps -a --format '{{"{{"}}.ID{{"}}"}} {{"{{"}}.Image{{"}}"}} {{"{{"}}.Status{{"}}"}}' 2>/dev/null \
+          | awk '$2 ~ /^semdev-sandbox[:@]/' || true
+      - echo "[CENSUS] semdev sandbox images:"
+      - |
+        docker images --filter 'reference=semdev-sandbox' \
+          --format '  {{"{{"}}.Repository{{"}}"}}:{{"{{"}}.Tag{{"}}"}}  {{"{{"}}.Size{{"}}"}}  {{"{{"}}.CreatedSince{{"}}"}}' 2>/dev/null || true
+      - echo "[CENSUS] dangling anonymous volumes (candidates):"
+      - |
+        docker volume ls -q --filter dangling=true 2>/dev/null \
+          | grep -cE '^[0-9a-f]{64}$' || true
+      - echo "[CENSUS] docker disk usage:"
+      - docker system df 2>/dev/null || true
+
+  cache:
+    desc: Reclaim docker BUILD cache (opt-in — slows the next sandbox build)
+    # Deliberately NOT part of `clean:docker`, which runs after every e2e/serve/paid
+    # run. Sandbox image tags are content-derived, so a rebuild after clean:docker is
+    # mostly build-cache hits — pruning that cache on every run would turn a seconds-long
+    # rebuild into a full one. Reclaim it when the disk matters, not on a schedule.
+    cmds:
+      - echo "[CLEAN] Reclaiming docker build cache..."
+      - docker builder prune -f
+      - echo "[OK] Build cache reclaimed"
+
+  go:
+    desc: Clean Go build and test cache
+    cmds:
+      - echo "[CLEAN] Cleaning Go build and test cache..."
+      # Deliberately NOT -modcache: re-downloading every module is minutes of
+      # wallclock for no benefit here, and semdev pins semstreams by version.
+      - go clean -cache -testcache
+      - echo "[OK] Go cache cleaned"
+
+  all:
+    desc: Clean everything semdev owns (docker resources + Go cache)
+    cmds:
+      - task: docker
+      - task: go
+      - echo "[OK] Complete cleanup finished"

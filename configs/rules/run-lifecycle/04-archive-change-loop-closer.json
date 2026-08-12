@@ -1,0 +1,16 @@
+{
+  "id": "run_archive_change_on_merge",
+  "type": "expression",
+  "name": "Archive change back to OpenSpec on merge (designed; wired at M1)",
+  "description": "The 'back to OpenSpec' loop-closer. When a delivered change's PR merges, the run routes archive_change, which shells `openspec archive` via the archive harness and stamps openspec.change.archived — the step that keeps the target repo's specs truthful (G10). At M0 this rule is DECLARED but DISABLED: the merge-event trigger (a forge-io PR-merged fact) and the live archive call land at M1, and the M0 mock journey terminates at open_pr (delivery.pr.ref). Enabling this rule is an M1 task; its merge-trigger predicate is introduced by that change (G9). openspec.change.archived's single writer is the archive harness (G5).",
+  "enabled": false,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.run.phase", "operator": "eq", "value": "completed", "required": true },
+    { "field": "openspec.change.archived", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [],
+  "on_exit": [],
+  "metadata": { "pack": "run-lifecycle", "capability": "run-lifecycle", "gate": "archive", "task": "3.9", "wired": "M1", "note": "merge-event trigger + live openspec archive land at M1" }
+}

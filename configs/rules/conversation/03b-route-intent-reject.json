@@ -1,0 +1,47 @@
+{
+  "id": "conversation_route_intent_reject",
+  "type": "expression",
+  "name": "Classified REJECT intent on a still-gated run → dispatch the apply consumer",
+  "description": "The reject intent route (nl-conversation-intent group 4, design D6) — the exact mirror of 03a-route-intent-approve for conversation.intent.value = reject. The same deterministic apply consumer (component.conversation-apply.dispatch) re-checks the gate is open, re-Authorizes the HARNESS-bound cited author, posts the transparency comment, and stamps run.change.decision = \"reject\" under the one G5 writer (approval-adapter); the phase-guarded run-lifecycle CANCEL rule (group 5) then fires awaiting_approval → cancelled — never this rule, never Go (G2). See 03a for the full mechanism notes: run-as-dispatch-entity, the gate-undecided guard (H4a), the gate fact as the self-extinguisher, and the no-marker rationale (idempotent consumer, M6 Post-then-stamp).\n\nWHY approve and reject are TWO rules, not one: the engine's condition set is a flat AND (a single rule cannot express value ∈ {approve,reject} without logic:or, and a guarded pure-AND pair is the house OR-collapse shape — 06b/06e precedent), and the taxonomy census pins exactly one route per directive intent. `none` deliberately routes NOWHERE: no directive means the run stays gated (D1).",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "conversation.intent.value",
+      "operator": "eq",
+      "value": "reject",
+      "required": false
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "publish",
+      "max_iterations": 0,
+      "subject": "component.conversation-apply.dispatch"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "conversation",
+    "capability": "conversation-channel",
+    "station": "intent route (reject) — dispatch the deterministic apply consumer (group 4, design D6)",
+    "firing_cap": "max_iterations: 0 (grp4-review H1) — same rationale as 03a: legitimate unbounded re-fire on one run across the gate lifetime; the default per-action cap of 3 would silently stop routing.",
+    "trigger_rationale": "fires on the RUN; the run travels as the dispatch entity_id. Mirrors 03a exactly — one route per directive intent, censused.",
+    "mutual_exclusion": "phase-gate + both-gate-facts-absent (H4a); the landing gate fact extinguishes the trigger. The reject→cancel transition is the group-5 run-lifecycle rule's, phase-guarded to awaiting_approval (H1) — the conversation pack owns no transition (G2)."
+  }
+}

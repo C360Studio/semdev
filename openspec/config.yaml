@@ -1,0 +1,44 @@
+schema: spec-driven
+
+context: |
+  semdev: GitHub issue in → reviewed, clean-room-verified PR out. Built on
+  semstreams primitives (rules, personas, facts, deterministic tools).
+  Successor to semspec (verification floors) taking semteams' shape.
+
+  Read before authoring any change: docs/brief.md, docs/constitution.md
+  (ten guardrails G1–G10 = law), docs/port-manifest.md (T/S ports, B1–B10
+  banned patterns — nothing enters semdev except through the manifest).
+
+  Non-negotiables while authoring:
+  - Primitive-first (G1): prove a rule + persona + fact + existing component
+    can't do it before proposing new Go. New Go needs a framework-alignment
+    note and a registry entry.
+  - Rules own the lifecycle (G2): product Go never fires a lifecycle
+    transition. Engine gap → file the upstream semstreams ask + park toward
+    the human; never a silent Go reconciler.
+  - No LLM-supplied outcome facts (G3): pass/fail is stamped by the harness
+    that ran the command. Tool schemas take no outcome parameters.
+  - Clean room before done (G4), one writer per fact (G5), pins with every
+    fix (G6), honest evidence (G7), realistic fixtures (G8).
+  - Minimal vocabulary (G9): new predicates only via the change that needs
+    them, named in its spec delta. Start from zero. Docs match reality (G10).
+
+  Stack: Go 1.26+ (go.mod declares 1.26.3), semstreams v1.0.0-beta.150 (canonical predicate/entity
+  contracts FAIL-CLOSED at graph-write; every rule needs entity.pattern),
+  NATS via docker compose (never embedded). Conventional commits.
+
+  Status: M0 walking skeleton COMPLETE end-to-end (mock-LLM, real
+  containers) — see docs/evidence-ledger.md (G7: M0 claimed on bridge
+  proof; M1 real-LLM not claimed). openspec/specs/ holds the CANONICAL
+  synced capability specs; author deltas against them. Vocabulary is fully
+  canonical 3-seg lower-kebab, declared in internal/vocab (single writer
+  per predicate — check WriterOf before proposing a new fact).
+
+rules:
+  proposal:
+    - Keep the "## Why" section under 1000 characters (the CLI validator ERRORS above that)
+    - Name every new predicate in the spec delta with its single writer (G5/G9)
+  tasks:
+    - Every fix task lands with its red-first offline pin (G6)
+    - Evidence tasks name the exact test/journey that proves the behavior (G7)
+

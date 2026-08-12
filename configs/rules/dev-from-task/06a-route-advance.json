@@ -1,0 +1,46 @@
+{
+  "id": "dev_from_task_route_advance",
+  "type": "expression",
+  "name": "Floors route → ADVANCE: the attempt is clean, dispatch Quinn's review",
+  "description": "The advance route (design R1/R4, group 5). When check_floors mirrored route.attempt.passed=true (the attempt measured green in the sandbox) AND route.attempt.rejected=false (no structural floor rejected) onto the developer loop L_n, the task's dev loop converged — dispatch the reviewer (Quinn) to review the cleared task (D16 moved review INTO the per-task loop). This REPLACES the old gate-tool ADVANCE decision + the separate review-trigger rule: routing is now a RULE composed from the harness-stamped mirror facts (no Go route-token — check_gate is deleted, G2).\n\nTRIGGER = the developer loop L_n, keyed on the route mirror check_floors stamps on it. It fires on route.attempt.passed eq \"true\" AND route.attempt.rejected eq \"false\" — both required:false (a scalar eq with required:true ERRORS on the many entities lacking the field; route.attempt.passed/route.attempt.rejected exist ONLY on a floors loop, so the pair uniquely identifies it and, being concrete post-floors, cannot fire before floors ran). route.attempt.routed length_eq 0 is the self-extinguish guard.\n\nMUTUAL EXCLUSION + TOTALITY: exactly one of {advance, not_clean} matches a floors loop's (passed, rejected) state. advance requires the unique (true, false) cell; the not-clean route (06b) is the OR-complement (passed=false OR rejected=true). So a clean attempt advances and everything else routes to not_clean → retry/escalate. No default-advance (fail-closed, R1).\n\nRUN BINDING: run_scope=inherit reads the developer loop L_n's agent.loop.run and binds Quinn's review loop to the same run, so submit_review reads THIS run's task.spec + measurement.result and stamps review.verdict.value on it.\n\nROLE = reviewer (Quinn — the D16 gate, the one non-coordinator role). Quinn's loop is BOUNDED MULTI-TURN (R2/R7): allowlist [read_workspace, read_diff, submit_review, ask_human] + tool_choice=auto, so she reads the authored diff before judging; submit_review StopLoops (the review is terminal once submitted). The verdict is harness-DERIVED (floored by the measurement, G3); role=reviewer keeps the roster honest.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps route.attempt.routed=$entity.instance on the developer loop L_n, guarded by route.attempt.routed length_eq 0. The floors-route rules (advance/retry/escalate) SHARE this one loop marker (mutually exclusive anyway); a fresh developer loop L_n per attempt re-arms it. Marker stamped BEFORE the publish so a publish failure stalls-toward-human rather than duplicating Quinn.",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "route.attempt.passed", "operator": "eq", "value": "true", "required": false },
+    { "field": "route.attempt.rejected", "operator": "eq", "value": "false", "required": false },
+    { "field": "route.attempt.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.attempt.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.reviewer",
+      "role": "reviewer",
+      "model": "reviewer",
+      "tools": ["query_entity", "read_workspace", "read_diff", "submit_review", "ask_human"],
+      "tool_choice": { "mode": "auto" },
+      "properties": {
+        "phase": "review"
+      },
+      "prompt": "SEMDEV REVIEWER (Quinn) — the developed task cleared the sandbox gate (measured green, no structural floor rejected). Review it adversarially. Read the authored change with read_diff and inspect files with read_workspace; read the task contract with query_entity on the run. Then call submit_review with task_index 0, listing any required changes as findings. The harness derives the verdict from the task's recorded measurement (a failing/missing measurement, or any finding you raise, blocks approval) — you supply no verdict. Calling submit_review completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "route",
+    "station": "route advance — clean attempt → Quinn's review (R1/R4, group 5)",
+    "trigger_rationale": "fires on the developer loop L_n's route.attempt.passed=true + route.attempt.rejected=false mirror (required:false scalars — the pair identifies the developer loop L_n and is concrete post-floors, so no premature fire). The (true,false) cell; the not-clean route (06b) is its OR-complement.",
+    "role_rationale": "reviewer (Quinn's D16 gate). Bounded multi-turn (auto + [read_workspace, read_diff, submit_review, ask_human]) so she reads the diff before judging; the verdict is still harness-floored (G3).",
+    "restart_safe": "SELF-EXTINGUISHING via the shared LOOP-scoped route.attempt.routed marker + length_eq 0 guard, stamped BEFORE the publish (Quinn's publish is not idempotent). A fresh floors loop per attempt re-arms.",
+    "review_route_note": "the review route (07a approved→verify / 07b changes_requested+budget→re-dispatch / 07c changes_requested+exhausted→park / 07d no-verdict→park) fires on Quinn's loop reading the route.review.verdict mirror submit_review stamps."
+  }
+}

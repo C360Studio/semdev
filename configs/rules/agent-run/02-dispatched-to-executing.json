@@ -1,0 +1,32 @@
+{
+  "id": "agent_run_dispatched_to_executing",
+  "type": "expression",
+  "name": "Run handoff confirmed → dispatched → executing",
+  "description": "The dispatched→executing bridge, half 2 (the run-entity transition). ported from semteams agent-run/02. Fires on the RUN entity (agent.chain.execution.<runID>) when half 1 (01-handoff-marker) has stamped agent.run.handoff there AND the run is still in `dispatched`, and advances it to `executing` via lifecycle_transition (the firing entity IS the run entity, which is what the action transitions). Reaching `executing` is what makes the run's work 'in flight' and lets the downstream run-lifecycle gates (offer-change-approval, …) evaluate.\n\nThe phase guard (agent.run.phase == dispatched) is a TOP-LEVEL CONDITION, not an action `when`, so the rule simply does not match until the edge is legal — the illegal dispatched→X is never attempted (no ErrInvalidTransition, no lost transition). The processor re-evaluates every entity-state rule on each KV revision, so the transition fires exactly once when both the handoff marker and the dispatched phase hold.\n\nThe run.awaiting.human length_eq 0 guard is the D15 park-exclusion contract (a conformance pin enforces it on every lifecycle_transition rule): a run parked toward a human must not be swept through this advance before the human-resume path clears the marker. A freshly-minted run carries no awaiting_human, so this never blocks the normal path; it only holds a run that parked between mint and advance.",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.run.handoff", "operator": "ne", "value": "", "required": true },
+    { "field": "agent.run.phase", "operator": "eq", "value": "dispatched", "required": true },
+    { "field": "run.awaiting.human", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "lifecycle_transition",
+      "workflow": "agent-run",
+      "phase": "executing",
+      "reason": "child task handed off (rule.task.spawned confirmed) — run is now executing"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "agent-run",
+    "role": "dispatched→executing (run-entity transition, half 2)",
+    "joins_with": "01-handoff-marker.json",
+    "ported_from": "semteams configs/rules/agent-run/02-dispatched-to-executing.json",
+    "fires_on": "the run entity (agent.chain.execution.<runID>), evaluated on the beta.147 entity-state lane via this rule's entity.pattern (watch-all; conditions do the discrimination).",
+    "phase_guard_is_condition": "agent.run.phase == dispatched is a top-level condition so the invalid edge is never attempted.",
+    "park_exclusion": "run.awaiting.human length_eq 0 — D15 park-exclusion (TestLifecycleTransitionRulesExcludeParkedRuns)."
+  }
+}

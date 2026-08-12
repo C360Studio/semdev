@@ -1,0 +1,47 @@
+# NATS JetStream for semdev — NEVER embedded (project rule). Bring up with:
+#   task nats:up      (docker compose -f docker/compose/nats.yml up -d --wait)
+#
+# PLAYING NICE ON A BUSY DOCKER HOST. This file declares its project NAME, its
+# container NAME, and its network NAME explicitly. None of that is cosmetic:
+#
+#   Without a top-level `name:`, Compose derives the project name from the
+#   PARENT DIRECTORY — which for this file is the generic "compose". Every other
+#   repo laid out as docker/compose/*.yml (semstreams is, and so are most c360
+#   repos) then derives the SAME project name and the two become, to Docker, one
+#   project. The symptoms are ugly and misleading: `docker compose up` adopts the
+#   other repo's containers and warns about "orphan containers"; `docker compose
+#   down -v` from either side DELETES THE OTHER'S CONTAINERS AND VOLUMES; and a
+#   recreate can fail with "No such container" as the two racing projects
+#   invalidate each other's IDs. Worst of all, a `down -v` triggered by semdev's
+#   own `task nats:reset` can tear NATS out from under another repo's running
+#   test — which surfaces there as an inexplicable mid-run disconnect, not as a
+#   docker error.
+#
+#   `name: semdev` makes this project addressable and destructible on its own.
+#
+# PORTS are overridable so a busy host can remap without editing this file:
+#   SEMDEV_NATS_PORT=24222 SEMDEV_NATS_MONITOR_PORT=28222 task nats:up
+# If you remap, point the runtime at the same place — the framework config
+# loader honors STREAMKIT_NATS_URLS (it overrides the `nats.urls` in the JSON
+# configs), e.g. STREAMKIT_NATS_URLS=nats://localhost:24222.
+# The in-container port is always 4222, so nats-box sidecar commands that speak
+# to `nats://nats:4222` over this network are unaffected by any host remap.
+name: semdev
+
+services:
+  nats:
+    image: nats:2.14.4-alpine
+    container_name: semdev-nats # greppable + collision-proof (cf. semstreams-tiered-nats)
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "${SEMDEV_NATS_PORT:-24222}:4222" # client
+      - "${SEMDEV_NATS_MONITOR_PORT:-28222}:8222" # monitoring / healthz
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  default:
+    name: semdev_default # explicit, so a shared-project accident cannot re-attach us

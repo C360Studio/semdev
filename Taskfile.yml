@@ -1,0 +1,213 @@
+version: "3"
+
+# Secrets ride a gitignored .env (cp .env.example .env), loaded here for every
+# task — the semspec-proven pattern. Real env vars still win over .env values,
+# so a shell export overrides the file.
+dotenv: ['.env']
+
+includes:
+  clean:
+    taskfile: ./taskfiles/clean.yml
+
+tasks:
+  build:
+    desc: Build all binaries and packages
+    cmds:
+      - go build ./...
+
+  lint:
+    desc: Vet, gofmt, and revive (warnings = failure — the house standard)
+    cmds:
+      - go vet ./...
+      - test -z "$(gofmt -l .)"
+      - revive -config revive.toml -set_exit_status ./...
+
+  lint:ci:
+    desc: Revive with stylish output for CI (exits non-zero on any warning)
+    cmds:
+      - revive -config revive.toml -formatter stylish -set_exit_status ./...
+
+  test:
+    desc: Unit tests with the race detector
+    cmds:
+      - go test -race ./...
+
+  nats:preflight:
+    desc: >-
+      Fail LOUD if semdev's NATS host port is held by a container that is not ours.
+      On a busy docker host (multiple c360 stacks) a foreign holder of that port does not
+      announce itself: semdev boots, connects to SOMEONE ELSE'S NATS, and the symptom
+      is a confusing mid-run disconnect or a config-KV that keeps reappearing — not a
+      port error. This turns that into one clear message before anything starts.
+      Remap instead of killing theirs: SEMDEV_NATS_PORT=24222 + STREAMKIT_NATS_URLS.
+    silent: true
+    vars:
+      PORT: '{{.SEMDEV_NATS_PORT | default "24222"}}'
+    cmds:
+      - |
+        holder=$(docker ps --format '{{"{{"}}.Names{{"}}"}}\t{{"{{"}}.Ports{{"}}"}}' \
+          | grep -E ":{{.PORT}}->" | grep -v '^semdev-nats' | cut -f1 | head -1)
+        if [ -n "$holder" ]; then
+          echo "ERROR: host port {{.PORT}} is held by container '$holder', which is NOT semdev's." >&2
+          echo "       semdev would connect to that NATS and behave in confusing ways." >&2
+          echo "       Either stop it, or run semdev on another port:" >&2
+          echo "         SEMDEV_NATS_PORT=24222 SEMDEV_NATS_MONITOR_PORT=28222 task nats:up" >&2
+          echo "         STREAMKIT_NATS_URLS=nats://localhost:24222 task e2e" >&2
+          exit 1
+        fi
+
+  nats:up:
+    desc: Start NATS JetStream (never embedded)
+    deps: [nats:preflight]
+    cmds:
+      - docker compose -f docker/compose/nats.yml up -d --wait
+
+  nats:down:
+    cmds:
+      - docker compose -f docker/compose/nats.yml down -v
+
+  nats:reset:
+    desc: >-
+      Wipe + restart NATS so the next boot loads config FROM FILE. The framework's
+      config.Manager stores config in a versioned KV: on boot it compares the file
+      version to the KV version and, when they are EQUAL (or the file is older), it
+      syncs from KV and IGNORES the file — so an edited config with an unbumped
+      version silently runs the stale KV copy. Any live boot that must reflect the
+      current config file MUST run against a fresh KV (this task) OR bump the config
+      `version`. See config/manager.go version-compare in the framework.
+    cmds:
+      - task: nats:down
+      - task: nats:up
+
+  test:integration:
+    desc: >-
+      Boot smoke test against a FRESH NATS (internal/boot/runtime_integration_test.go).
+      Resets NATS first so the runtime loads the config file under test, not a stale
+      versioned KV copy (see nats:reset).
+    deps: [nats:reset]
+    cmds:
+      - go test -tags=integration -count=1 ./internal/boot/...
+
+  e2e:
+    desc: Mock-LLM spine journey — zero paid tokens (mock ladder must be green)
+    deps: [nats:reset]
+    cmds:
+      # defer: runs even when the journey FAILS or is interrupted, which is exactly
+      # when containers get stranded — in-process teardown only covers the graceful
+      # path. Without this, every red e2e run leaves a sandbox container, its cache
+      # volumes, and a multi-GB semdev-sandbox image behind.
+      - defer: { task: clean:docker }
+      - go test -race -tags=e2e ./test/e2e/...
+
+  check:
+    desc: The pre-push gauntlet (build + lint + unit)
+    cmds:
+      - task: build
+      - task: lint
+      - task: test
+
+  realllm:probe:
+    desc: >-
+      One cheap smoke turn against the real Gemini endpoint BEFORE any journey:
+      proves auth + model id + tool calling for the exact wire the runtime will
+      speak. Expected output: an assistant message whose tool_calls names
+      `ping`. Anything else — stop; the journey would fail the same way for
+      real money. See docs/real-llm-runbook.md §2.
+    preconditions:
+      - sh: test -n "$GEMINI_API_KEY"
+        msg: "GEMINI_API_KEY is empty — cp .env.example .env and fill it in (or export it; runbook §0)."
+    cmds:
+      - >-
+        curl -sS https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+        -H "Authorization: Bearer $GEMINI_API_KEY"
+        -H "content-type: application/json"
+        -d '{"model": "gemini-3.1-pro-preview", "max_tokens": 512,
+             "messages": [{"role": "user", "content": "Call the ping tool."}],
+             "tools": [{"type": "function", "function": {"name": "ping", "description": "reply check", "parameters": {"type": "object", "properties": {}}}}],
+             "tool_choice": "required"}' | head -c 2000; echo
+
+  realllm:launch:
+    desc: >-
+      THE PAID RUN (docs/real-llm-runbook.md is law): the real-LLM journey over
+      the fixture arc — real Gemini turns, real docker cold proofs, bounded by
+      the arc's own budgets. Preconditions: mock ladder green FIRST in this
+      session (task check + task e2e, uncached), `task realllm:probe` green,
+      sidecar armed in a second shell (task realllm:status), abort criteria
+      written down (runbook §3). Logs tee to /tmp/realllm-run.log for the
+      sidecar. -timeout 80m is LOAD-BEARING (go test's default 10m would
+      panic-kill the paid run mid-arc).
+    deps: [nats:reset]
+    preconditions:
+      - sh: test -n "$GEMINI_API_KEY"
+        msg: "GEMINI_API_KEY is empty — cp .env.example .env and fill it in (or export it; runbook §0)."
+    cmds:
+      # Runs even when the paid journey fails or is aborted mid-arc — the runbook's
+      # abort criteria mean this lane is EXPECTED to be killed sometimes, which is
+      # exactly when sandboxes and multi-GB images get stranded.
+      - defer: { task: clean:docker }
+      - >-
+        SEMDEV_REAL_LLM=1 go test -tags=e2e -count=1 -timeout 80m
+        -run 'TestRealLLMJourneyIssueToPR$' -v ./test/e2e/ 2>&1
+        | tee /tmp/realllm-run.log
+
+  realllm:status:
+    desc: >-
+      One sidecar poll (run every 30–60s in a second shell while realllm:launch
+      is in flight — runbook §5): the journey's own narration from the log plus
+      the AUTHORITATIVE fact-store state via nats-box (the NATS image ships no
+      nats CLI; both shapes dry-run-proven 2026-07-19). Wallclock rule: any
+      station with no new fact for >2× its expected step time is wedged — apply
+      the runbook §3 abort, do not wait for the backstop.
+    cmds:
+      - grep -E "real-llm (station|milestone|TERMINAL)|EVIDENCE|LEDGER|--- (PASS|FAIL|SKIP)" /tmp/realllm-run.log | tail -5 || true
+      - grep -iE "error|failed|panic" /tmp/realllm-run.log | tail -3 || true
+      - docker run --rm --network semdev_default natsio/nats-box:0.19.7 nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep chain.execution || echo "no run entity yet"
+
+  serve:
+    desc: >-
+      Bring up the semdev runtime (NATS + docker + every component) — the daemon
+      `semdev launch` and the (optional) webhook door talk to. Loads .env
+      (GITHUB_TOKEN authenticates the issue read + PR delivery); the config's
+      `source.forge` block selects self-target CLONE mode (absent → the fixture
+      default, self-target-provisioning-and-launch-driver D5). Run this in ONE
+      shell, then `task launch REF=owner/repo#N MODEL=<key>` in another. Ctrl-C
+      stops it. PULL-FIRST: no inbound webhook reachability is required.
+    deps: [nats:reset]
+    cmds:
+      # Ctrl-C is how this daemon is always ended, and defer runs on that path. The
+      # runtime already reaps warm sandboxes on a graceful Stop — this covers when it
+      # cannot get there (SIGKILL, the known StopAll wedge, semstreams #508) plus the
+      # sandbox IMAGES, which the runtime never removes at all.
+      - defer: { task: clean:docker }
+      - go run ./cmd/semdev
+
+  launch:
+    desc: >-
+      Operator front door (self-target-provisioning-and-launch-driver): mint ONE
+      run against a live issue through the sanctioned experiment.Launch seam — a
+      thin CLIENT of an ALREADY-RUNNING runtime (start it with `task serve` in
+      another shell). PULL-FIRST: `semdev launch` is OUTBOUND, so no webhook
+      reachability or secret is needed. The target repo MUST be SEEDED first (a
+      buildable project + a declared Dockerfile/devcontainer per the sandbox spec
+      + the authored issue) — an empty repo has no default branch to clone and no
+      issue to develop. MODEL is the running runtime's model_registry key (REQUIRED
+      — no default; `mock` for a mock runtime, the gemini key for a paid one).
+      Pass FORCE=--force to mint past the per-ref idempotency guard.
+    preconditions:
+      - sh: test -n "{{.REF}}"
+        msg: "REF is empty — usage: task launch REF=owner/repo#number MODEL=<model_registry key> [FORCE=--force]"
+      - sh: test -n "{{.MODEL}}"
+        msg: "MODEL is empty — pass the running runtime's model_registry key, e.g. MODEL=mock or MODEL=gemini (LaunchModel requires it)."
+      - sh: test -n "$GITHUB_TOKEN"
+        msg: "GITHUB_TOKEN is empty — the issue read + PR delivery need it (cp .env.example .env or export it)."
+    cmds:
+      - go run ./cmd/semdev launch {{.REF}} --model {{.MODEL}} {{.FORCE}}
+
+  launch:status:
+    desc: >-
+      One sidecar poll for a launched run (run every 30–60s in a second shell
+      while the arc is in flight): the AUTHORITATIVE fact-store state via nats-box
+      (the NATS image ships no nats CLI). Wallclock rule: any station with no new
+      fact for >2× its expected step time is wedged — abort rather than wait.
+    cmds:
+      - docker run --rm --network semdev_default natsio/nats-box:0.19.7 nats -s nats://nats:4222 kv ls ENTITY_STATES 2>/dev/null | grep -E "chain.execution" || echo "no run entity yet"

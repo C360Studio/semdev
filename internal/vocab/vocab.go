@@ -1,0 +1,409 @@
+// Package vocab is semdev's fact vocabulary — the checked-in source of truth the
+// G5 (single-writer) and G9 (minimal-vocabulary) conformance pins compare
+// against, and that docs project (G10). semspec accreted 224 predicates with
+// "sole writer" as a false comment; semdev starts from zero and every predicate
+// carries, in code, its single writer and the OpenSpec change that introduced it.
+//
+// Adding a predicate here is the deliberate act G9 requires: a new fact must be
+// named by the change that needs it. Product code and rules reference these
+// entries; the census tests in test/conformance enforce the invariants.
+//
+// beta.147: every name is CANONICAL (three lower-kebab segments domain.category.property,
+// no digit-start, no underscore). beta.150: the census is now FULLY CONCRETE — the last
+// deferred namespace, the brownfield living-spec tree, was flattened from openspec.spec.*
+// to the single concrete blob predicate openspec.spec.document (specfacts, mirroring the
+// D3 change blob), so Register() declares every entry and the ".*"-namespace machinery is
+// retired. Single-task at M0 (beta.147 D1): the per-task/-change index left the predicate
+// (it keys the entity ID at M1), so the old task.spec.<i>/measurement.result.<i>/
+// openspec.change.<slug> shapes collapsed to flat names.
+package vocab
+
+import (
+	_ "github.com/c360studio/semstreams/agentic/agentrun" // init() declares agent.run.phase (+ transition-audit predicates) semdev reads
+	"github.com/c360studio/semstreams/vocabulary"
+	agenticvocab "github.com/c360studio/semstreams/vocabulary/agentic"
+)
+
+// Predicate is one fact predicate: its name, the single writer allowed to stamp
+// it (G5), the capability that owns it, and the OpenSpec change slug that
+// introduced it (G9).
+type Predicate struct {
+	Name         string
+	Writer       string
+	Capability   string
+	IntroducedBy string
+}
+
+// m0 is the change slug that introduces semdev's founding vocabulary.
+const m0 = "m0-walking-skeleton-spine"
+
+// sandbox is the change slug that introduces the containerized sandbox / provision-
+// and-prove-cold vocabulary (the sandbox capability).
+const sandbox = "containerized-sandbox-dev-loop"
+
+// reshape is the change slug that reshapes the M0 execution rail (immutable git-backed
+// snapshot, rule-native routing, restart-safe provisioning).
+const reshape = "simplify-m0-execution-rail"
+
+// budgets is the change slug that adopts the per-task ATTEMPT budget (semstreams #568
+// length_gte): the routing rules read the projected task.spec.budget via a route-mirror
+// scalar instead of the hard-coded constant 3.
+const budgets = "adopt-per-task-routing-budgets"
+
+// reasonAware is the change slug that adopts reason-aware developer-loop routing (semstreams
+// #529/#569 agent.loop.terminal-reason): a TRANSIENT loop failure (model_error/handler_error)
+// gets bounded grace outside the convergence budget, and the escalate/park carries the reason.
+const reasonAware = "adopt-reason-aware-escalate"
+
+// semsourceAB is the change slug for the semsource A/B instrument: an operator-declared
+// per-run condition where the ONLY variable is the developer's available read tools, with
+// harness-measured condition-labeled evidence (semdev computes no winner).
+const semsourceAB = "integrate-semsource-ab-harness"
+
+// parks is the change slug for the terminal-station-failure park (M2's first
+// unattended-safety floor): the station harness stamps its dispatch outcome on
+// retries-exhausted and a park rule records run.awaiting.human from it.
+const parks = "station-failure-parks"
+
+// forgeIO is the change slug that makes the forge seam real (M2): the
+// issue-intake component on the webhook lane, the rule-owned run.issue.ref,
+// the comment approval adapter, park-message comments, and real PR delivery.
+const forgeIO = "forge-io-real-lanes"
+
+// nlIntent is the change slug for the natural-language conversation-intent layer
+// (Phase 2): the change-approval gate reads NL approve/reject intent from an
+// authorized author via a classifier persona, keeping the exact command as a
+// deterministic fast-path; a reject cancels the run.
+const nlIntent = "nl-conversation-intent"
+
+// Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
+// Order is presentational only; the pins treat it as a set keyed by Name. Framework
+// predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
+// and the four frameworkAdjacent below) are NOT here — this census is semdev's product
+// vocabulary, one product-owned writer per fact.
+var Predicates = []Predicate{
+	{"intake.actor.login", "admission-check", "forge-io", m0},
+	{"intake.actor.admitted", "admission-check", "forge-io", m0},
+	// intake.event.ref correlates an admission record (the intake component's
+	// per-admitted-event evidence entity, forge.intake.event grammar) to its
+	// issue. Deliberately DISTINCT from run.issue.ref: that predicate lives on
+	// the RUN with a rule writer — sharing it would give one fact two writers (G5).
+	{"intake.event.ref", "admission-check", "forge-io", forgeIO},
+	// run.issue.ref moved to its RULE writer exactly as the mint rule's
+	// deferred_issue_ref metadata planned (forge-io-real-lanes D2 as-built):
+	// the run does not exist at wake time, so the intake component cannot stamp
+	// it — the coordinator-pack issue-ref rule (04) substitutes the front-door
+	// loop's agent.loop.task (= the BARE issue ref, the wake's TaskID) onto the
+	// minted run via the agent.run.entity-id anchor.
+	{"run.issue.ref", "issue-ref-rule", "forge-io", m0},
+	// run.issue.stamped is the issue-ref rule's fired-once self-extinguish
+	// marker on the FIRING front-door loop (the rule's write target — the run —
+	// is invisible to the loop's conditions, so the marker is the extinguisher;
+	// ref-first ordering per the station-failure-parks park-first lesson).
+	{"run.issue.stamped", "issue-ref-rule", "forge-io", forgeIO},
+	// run.change.decision is the SINGLE-VALUED change-approval gate fact ("approve" |
+	// "reject") — the resume rule (run-lifecycle/02) matches approve, the phase-guarded
+	// cancel rule (run-lifecycle/07) matches reject. It REPLACES the former boolean pair
+	// run.change.approved / run.change.rejected (nl-conversation-intent D13, group 8):
+	// two independent booleans let one run carry BOTH, after which the mutually-exclusive
+	// lifecycle rules fired NEITHER and the run was wedged at the gate permanently. A
+	// single-valued fact makes that state UNREPRESENTABLE under replace-by-predicate.
+	// ONE logical writer (approval-adapter) across two realizing sites — the exact-command
+	// fast-path and the apply consumer — both routed through approvalAdapter.stampDecision
+	// and censused (G5, D11). Its capability tag is conversation-channel: the conversation
+	// seam owns the human-approval lane (conversation-channel-seam D5, G10).
+	{"run.change.decision", "approval-adapter", "conversation-channel", nlIntent},
+	// experiment.run.condition is the A/B EVIDENCE LABEL (integrate-semsource-ab-harness, D3):
+	// stamped once on the run at mint by the launch path (writer experiment-intake, G5) from
+	// the operator's boot-config condition. NEVER a routing input — a whole-document conformance
+	// lint forbids any rule document (conditions, actions, prompts, substitution tokens) from
+	// referencing an experiment.* field, so no deterministic channel can act on the label; only
+	// the ledger reads it. Unconfigured boots stamp nothing (baseline default, zero new facts).
+	{"experiment.run.condition", "experiment-intake", "semsource-ab", semsourceAB},
+	// human.opt.signal's writer moved comment-adapter → conversation-adapter (the
+	// channel-neutral G5 writer — channel impls plug in BEHIND the one adapter, so N
+	// channels stay single-writer-legal) and its capability forge-io →
+	// conversation-channel (conversation-channel-seam D5). It has NO writer/reader
+	// today (the ask_human-reply/resume lane is unimplemented), so this is a paper
+	// reassignment of the DECLARED vocab entry — no two-writer hazard.
+	{"human.opt.signal", "conversation-adapter", "conversation-channel", m0},
+	{"run.awaiting.human", "park-rule", "run-lifecycle", m0},
+	// station.dispatch.failed is the harness-stamped TERMINAL dispatch outcome
+	// (station-failure-parks D1): the generic station base (internal/station)
+	// stamps it on the DISPATCHED entity when a Handle exhausts its bounded
+	// retries — object "<station>: <sanitized error>" (bounded 512 BYTES, cut
+	// rune-safe), upsert via ReplaceTriples so a crash-loop converges to ONE
+	// triple. The harness that ran the retries is the single writer (G3/G5);
+	// the SUCCESS path stamps nothing (fail-closed — a fault can never read as
+	// completion).
+	{"station.dispatch.failed", "station-harness", "run-lifecycle", parks},
+	// station.park.routed is the park rules' fired-once self-extinguish marker
+	// (station-failure-parks D2), stamped on the FIRING entity by the run-fired
+	// and loop-fired park rules alongside the run.awaiting.human add + user-bus
+	// publish — same rule-owned marker pattern as route.attempt.routed. Rule
+	// add_triple stamps the engine's generic Source "rule_engine" (actions.go),
+	// so this park-rule entry is a SUBSYSTEM label, not a Source tie — the
+	// sanctioned-writer census (TestOnlySanctionedParkWriters family) is what
+	// keeps the realizations honest.
+	{"station.park.routed", "park-rule", "run-lifecycle", parks},
+	{"run.dev.kickoff", "dev-rewake-rule", "dev-from-task", m0},
+	{"run.projection.kickoff", "dev-projection-rule", "dev-from-task", m0},
+	// delivery.pr.ref is the delivered PR reference (was pr.ref). The DELIVERY-STATION
+	// component stamps it (off the delivery route's publish) via the same openpr.Deliver
+	// core the tool used — Source open-pr, so this single-writer declaration holds. An M0
+	// local-delivery stub; the M2 forge-io adapter replaces it with a live PR URL.
+	{"delivery.pr.ref", "open-pr", "forge-io", m0},
+
+	// openspec-io. beta.147 D3: the change is ONE scalar document + a slug pointer + a
+	// content revision, not a deep triple tree — an OpenSpec change is one artifact.
+	// openspec.change.authored is the fire-once marker create_change stamps on the
+	// authoring LOOP (value = slug) so the validate rule can fire slug-independently.
+	{"openspec.change.document", "create-change-author-tool", "openspec-io", m0},
+	{"openspec.change.slug", "create-change-author-tool", "openspec-io", m0},
+	{"openspec.change.revision", "create-change-author-tool", "openspec-io", m0},
+	{"openspec.change.authored", "create-change-author-tool", "openspec-io", m0},
+	{"openspec.change.validated", "openspec-validate-harness", "openspec-io", m0},
+	{"openspec.change.archived", "openspec-archive-harness", "openspec-io", m0},
+	// openspec.spec.document is the brownfield living-spec blob: the brownfield-spec-projector
+	// serializes each capability spec to one JSON scalar here (specfacts.SpecDocument), on that
+	// capability's spec entity — the canonical (3-part) twin of the openspec.change.document
+	// change blob. Concrete, so Register() declares it like any other name.
+	{"openspec.spec.document", "brownfield-spec-projector", "openspec-io", m0},
+
+	// task.spec.<field> — the immutable projected task package (flat, single-task M0).
+	{"task.spec.goal", "task-projector", "dev-from-task", m0},
+	{"task.spec.budget", "task-projector", "dev-from-task", m0},
+	{"task.spec.assumptions", "task-projector", "dev-from-task", m0},
+	{"task.spec.non-goals", "task-projector", "dev-from-task", m0},
+	{"task.spec.target-files", "task-projector", "dev-from-task", m0},
+	{"task.spec.test-command", "task-projector", "dev-from-task", m0},
+
+	// task.attempt.instance is the PER-TASK attempt counter: the dispatching rules append
+	// one triple per attempt AT SPAWN TIME (R3), object = the spawned developer loop
+	// instance (distinct per attempt). length_* over this ONE predicate is the per-attempt
+	// count. One logical writer dev-dispatch-rule realized by the three sanctioned spawners
+	// (04/06c/07b); rules carry no Source, so the single entry is not drifted.
+	{"task.attempt.instance", "dev-dispatch-rule", "dev-from-task", m0},
+	// task.transient.instance is the run-side TRANSIENT-retry counter (adopt-reason-aware-escalate,
+	// #529/#569): the transient-retry route appends one triple per transient (model_error/
+	// handler_error) re-dispatch, distinct from task.attempt.instance so a transient blip does NOT
+	// consume the convergence budget. Same one-writer/realized-by-a-spawner shape as
+	// task.attempt.instance; length_* over it (mirrored) bounds the transient grace.
+	{"task.transient.instance", "dev-dispatch-rule", "dev-from-task", reasonAware},
+	// attempt.commit.sha is the immutable-snapshot pointer: the SHA apply_patch commits
+	// after each successful apply (latest-wins, writer patch-committer). The cold verify
+	// clones this commit and read_diff diffs base..this — so what is verified/reviewed is a
+	// committed tree, never the mutable warm checkout (G4/G7, the reshape's P1 fix).
+	{"attempt.commit.sha", "patch-committer", "sandbox", reshape},
+
+	// floor.finding.* (flattened, beta.147 D4): the aggregate the route reads, one
+	// human-legible detail scalar, and the attempt binding. Writer floor-tools.
+	{"floor.finding.rejected", "floor-tools", "dev-from-task", m0},
+	{"floor.finding.detail", "floor-tools", "dev-from-task", m0},
+	{"floor.finding.attempt", "floor-tools", "dev-from-task", m0},
+
+	// measurement.result.<field> (flat): passed is the harness-DERIVED headline (G3);
+	// ran/exit-code/timed-out are the raw evidence a reader re-derives from; command records
+	// what ran (G7); commit binds the measurement to the snapshot. Writer measurement-harness.
+	{"measurement.result.passed", "measurement-harness", "harness-measurement", m0},
+	{"measurement.result.command", "measurement-harness", "harness-measurement", m0},
+	{"measurement.result.commit", "measurement-harness", "harness-measurement", m0},
+	{"measurement.result.ran", "measurement-harness", "harness-measurement", m0},
+	{"measurement.result.exit-code", "measurement-harness", "harness-measurement", m0},
+	{"measurement.result.timed-out", "measurement-harness", "harness-measurement", m0},
+
+	{"review.verdict.value", "reviewer-quinn", "harness-measurement", m0},
+	// review.findings.value is the reviewer's PROSE findings (the required changes Quinn
+	// raised) — model JUDGMENT (G3 restricts measurement outcomes, not review judgment),
+	// stamped by submit_review alongside the floored verdict. Same writer as the verdict.
+	{"review.findings.value", "reviewer-quinn", "harness-measurement", reshape},
+	{"verify.cleanroom.result", "verify-harness", "clean-room-verify", m0},
+	{"evidence.ledger.run", "evidence-ledger", "evidence-ledger", m0},
+
+	// sandbox (the provision-and-prove-cold station). The provisioning rule owns the
+	// fired-once kickoff marker; the provision_sandbox harness owns the readiness/
+	// attestation package it DERIVES from the cold proof (G3) — split so no predicate has
+	// two writers (G5). blocked routes an unprovable sandbox to the human (SB5).
+	{"sandbox.provision.marker", "sandbox-provision-rule", "sandbox", sandbox},
+	{"sandbox.provision.ready", "sandbox-provisioner", "sandbox", sandbox},
+	{"sandbox.provision.blocked", "sandbox-provisioner", "sandbox", sandbox},
+	{"sandbox.attestation.image", "sandbox-provisioner", "sandbox", sandbox},
+	{"sandbox.attestation.tier", "sandbox-provisioner", "sandbox", sandbox},
+
+	// the bounded dev loop + rule-native routing (the reshape, groups 4+5). Routing is
+	// RULES over harness-stamped facts (design R1); measure_task runs INSIDE Amelia's
+	// multi-turn loop. dev.developer.dispatched is the fired-once marker dispatch-developer
+	// (04) stamps on the coordinator loop so a graph replay cannot re-spawn Amelia.
+	{"dev.developer.dispatched", "dev-dispatch-rule", "dev-from-task", sandbox},
+	// dev.floors.dispatched is the fired-once marker the floors trigger (05) stamps on the
+	// DEVELOPER loop before spawning check_floors. A fresh developer loop per retry re-arms it.
+	{"dev.floors.dispatched", "dev-floors-rule", "dev-from-task", reshape},
+
+	// THE ROUTING INPUTS mirrored onto the fresh-per-attempt firing loop (route-mirror,
+	// design R1). RAW harness copies of measurement/floor verdicts + the attempt-count
+	// mirror, never a derived route DECISION (the advance/retry/escalate decision lives in
+	// the route RULES, G2). ONE logical writer route-mirror, realized by check_floors
+	// (attempt.passed/rejected/instance on its loop) and submit_review (review.verdict/
+	// attempt.instance on its loop). route.attempt.passed/rejected are single-valued; the
+	// MULTI-valued counter is route.attempt.instance, counted by length_* (exact predicate).
+	{"route.attempt.passed", "route-mirror", "dev-from-task", reshape},
+	{"route.attempt.rejected", "route-mirror", "dev-from-task", reshape},
+	{"route.review.verdict", "route-mirror", "dev-from-task", reshape},
+	{"route.attempt.instance", "route-mirror", "dev-from-task", reshape},
+	// route.transient.instance is the developer-loop MIRROR of task.transient.instance (adopt-
+	// reason-aware-escalate): check_floors mirrors it onto L_n so the transient-retry route counts
+	// the transient grace via length_lt/length_gte against a LITERAL cap. Same route-mirror writer
+	// and append-mirror shape as route.attempt.instance; an absent mirror is a valid count 0 (array
+	// op over empty), so — unlike the substituted budget — there is no fail-open wedge.
+	{"route.transient.instance", "route-mirror", "dev-from-task", reasonAware},
+	// route.task.budget is the per-task ATTEMPT budget (the projected task.spec.budget,
+	// clamped [1,5]) mirrored onto the firing loop so the retry/escalate routes read it via
+	// $entity.triple.route.task.budget.value instead of the old constant 3 (adopt-per-task-
+	// routing-budgets, semstreams #568 length_gte). A RAW copy of the authored contract value
+	// (not a derived decision — like route.attempt.*), stamped by the ONE logical writer
+	// route-mirror at its TWO sanctioned sites (check_floors→L_n for 06c/06d AND submit_review→
+	// the review loop for 07b/07c — the same one-writer/two-sites precedent as
+	// route.attempt.instance). Canonical 3-seg so `.value` arity-disambiguates.
+	{"route.task.budget", "route-mirror", "dev-from-task", budgets},
+
+	// THE ROUTE MARKERS (rule-owned, no Source drift — the multi-realized single-writer
+	// pattern). route.attempt.unclean is the OR-collapse intermediate (route.attempt.passed
+	// eq false OR route.attempt.rejected eq true), stamped single-valued "true" by the pure
+	// logic:or floors-route rule and read by the pure-AND retry/escalate rules.
+	{"route.attempt.unclean", "dev-route-rule", "dev-from-task", reshape},
+	// route.attempt.transient is the TRANSIENT classification of the loop's terminal
+	// (adopt-reason-aware-escalate): check_floors reads L_n's harness-stamped
+	// agent.loop.terminal-reason and stamps "true" (model_error/handler_error) or "false"
+	// (anything else, incl. absent) — ALWAYS present, in the SAME ReplaceTriples as
+	// route.attempt.passed. NOT a rule-stamped collapse: the engine writes each rule action as
+	// its own KV revision and evaluates per debounce-flush, so a sibling rule's stamp races the
+	// convergence routes' exclusion (the pinned double-dispatch). The transient-retry/park
+	// routes fire on eq "true"; the convergence retry/escalate exclude on eq "false" — a
+	// condition PARTITION over the one atomic mirror snapshot.
+	{"route.attempt.transient", "route-mirror", "dev-from-task", reasonAware},
+	// route.attempt.routed is the shared fired-once self-extinguish marker the floors-route
+	// and review-route rules stamp on their firing loop BEFORE any (non-idempotent) publish;
+	// a fresh loop per attempt re-arms it, so retries route for free.
+	{"route.attempt.routed", "dev-route-rule", "dev-from-task", reshape},
+	// delivery.route.routed is the fired-once self-extinguish marker the two delivery routes
+	// (coherent→publish / blocked→park) stamp on the RUN — delivery is terminal (never
+	// repeats), so a run-scoped guard is correct and load-bearing (real delivery is not
+	// idempotent at M2).
+	{"delivery.route.routed", "dev-route-rule", "dev-from-task", reshape},
+
+	// nl-conversation-intent (Phase 2): the NL approval/reject gate. Registered
+	// register-before-write (beta.150 fails closed at the graph-write boundary on an
+	// unregistered canonical predicate). conversation.pending.* is the authorized human
+	// message handleMessage stamps on the RUN for the classifier to read (writer
+	// conversation-adapter — the transport, a NEW live Source for the first time, split
+	// from approval-adapter which the same struct also emits, kept honest by the
+	// sanctioned-writer census). conversation.intent.* is the classifier's ROUTING output
+	// (writer conversation-classifier — its own tool): .value ∈ {approve,reject,none}, plus
+	// .message-id + .author HARNESS-BOUND from the pending triples (never LLM-supplied — the
+	// apply consumer re-Authorizes THIS author) and .reason (the model's cited words, G7).
+	// conversation.intent.classified is the MULTI-VALUED (append-set) ledger of message ids
+	// already classified — the dedup key that stops a poll re-read / webhook redelivery
+	// re-classifying. The gate DECISION itself is run.change.decision (declared above with
+	// the m0 predicates it replaces).
+	{"conversation.pending.message-id", "conversation-adapter", "conversation-channel", nlIntent},
+	{"conversation.pending.author", "conversation-adapter", "conversation-channel", nlIntent},
+	{"conversation.pending.body", "conversation-adapter", "conversation-channel", nlIntent},
+	{"conversation.intent.value", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.message-id", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.author", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.reason", "conversation-classifier", "conversation-channel", nlIntent},
+	{"conversation.intent.classified", "conversation-classifier", "conversation-channel", nlIntent},
+	// conversation.classifier.dispatched is the classifier spawn rule's self-extinguishing
+	// marker (value = the pending message id it dispatched a classifier for), the
+	// dev.developer.dispatched pattern: publish_agent is not idempotent and the run is a
+	// long-lived, replay-exposed entity, so the spawn rule stamps this marker in the same
+	// on_enter as the publish and guards on it, or a graph replay re-spawns a duplicate
+	// classifier. Rule add_triple is a graph write, so it MUST be registered (beta.150 fails
+	// closed) — the writer is the rule subsystem label (rules carry the engine Source; the
+	// sanctioned-rule census keeps the realization honest, like route.attempt.routed).
+	{"conversation.classifier.dispatched", "conversation-spawn-rule", "conversation-channel", nlIntent},
+	// conversation.classifier.attempted is the run's APPEND-SET classifier spend
+	// ledger (group 8, design D14): the spawn rule appends the dispatched message id
+	// in the same on_enter that arms the marker, and guards on length_lte N-1 — the
+	// marker SERIALIZES spawns, this ledger BOUNDS them at N=3 paid turns per run's
+	// gate. Counting on the spawn side makes faulted/refused/truncated attempts
+	// consume budget like successful ones. The terminal-release rule clears pending
+	// + marker but NEVER this ledger (the durable spend record). Writer: the spawn
+	// rule (same Source as the marker — one rule, one action set).
+	{"conversation.classifier.attempted", "conversation-spawn-rule", "conversation-channel", nlIntent},
+	// conversation.budget.noted is the exhaustion note's once-per-run
+	// self-extinguishing marker (group 8, D14): 06-classifier-budget-exhausted
+	// stamps it BEFORE publishing the user.note escape hatch, so the note posts
+	// exactly once and never re-posts on RULE_STATE replay (the grp6 lesson). Its
+	// object is the pending message id that tripped exhaustion — forensics.
+	{"conversation.budget.noted", "conversation-budget-rule", "conversation-channel", nlIntent},
+	// conversation.classifier.recorded is stamped by classify_intent on ITS OWN LOOP
+	// entity (the submit_review route-mirror shape) when a classification actually
+	// lands, carrying the classified message id. It exists because the fault-note
+	// rule fires on the LOOP, where rule conditions can only read the firing
+	// entity's own facts — the run's conversation.intent.* is unreachable from
+	// there. Its ABSENCE at a conversation-loop terminal is the honest, complete
+	// discriminator for "this classifier produced no reading", covering the
+	// read-once binding fault, a model error, a truncation, and cap exhaustion
+	// alike. Keying the note on agent.loop.outcome instead does NOT work: a tool
+	// that returns a ToolResult error does not fail its loop, so a classifier that
+	// refused to classify still terminates outcome=success (observed, not assumed).
+	{"conversation.classifier.recorded", "conversation-classifier", "conversation-channel", nlIntent},
+}
+
+// frameworkAdjacent are canonical predicates semdev READS or WRITES that the framework
+// leaves UNDECLARED, so beta.147's rule-load predicate-declaration check needs them
+// registered. They are deliberately NOT in the G5/G9 census (that is semdev's product
+// vocabulary — one product-owned writer per fact): agent.loop.run and agent.run.entity-id
+// are framework-written (publish_agent mint/inherit); rule.task.spawned is engine-written;
+// agent.run.handoff is the ported semteams handoff marker (an agent-run pack rule writes it).
+// Most framework predicates semdev reads ARE declared by agenticvocab.Register()
+// (agent.loop.role/outcome/…, coordinator.decision.*) or the agentrun init (agent.run.phase),
+// so they are not repeated here — but agent.loop.run and agent.run.entity-id are the two the
+// framework's registration OMITS, which is exactly why they appear above.
+var frameworkAdjacent = []string{
+	"agent.loop.run",      // publish_agent inherit anchor (the dev-from-task/01 rule writes it on the run)
+	"agent.run.entity-id", // publish_agent run_scope=new stamps it; semdev reads it
+	"rule.task.spawned",   // the rule engine stamps it on a published task; agent-run/01 reads it
+	"agent.run.handoff",   // the semteams handoff marker (agent-run pack) — a semdev rule writes+reads it
+}
+
+// Register declares every semdev predicate (the census + the framework-adjacent set) with
+// the framework vocabulary registry, and pulls in the framework's own agentic declarations
+// (agent.loop.role/outcome, coordinator.decision.next-action, …), so beta.147's
+// UNCONDITIONAL rule-load predicate-declaration check passes. Boot calls this before the
+// rule processor loads its packs. vocabulary.Register PANICS on a non-canonical name, so
+// this doubles as a boot-time canonical-shape guard over the whole census.
+func Register() {
+	agenticvocab.Register()
+	for _, p := range Predicates {
+		// The census is fully concrete (beta.150 — the last ".*" namespace, openspec.spec.*,
+		// was flattened to the concrete openspec.spec.document blob), so every entry declares.
+		vocabulary.Register(p.Name)
+	}
+	for _, name := range frameworkAdjacent {
+		vocabulary.Register(name)
+	}
+}
+
+// Names returns every predicate name in declaration order.
+func Names() []string {
+	names := make([]string, len(Predicates))
+	for i, p := range Predicates {
+		names[i] = p.Name
+	}
+	return names
+}
+
+// WriterOf returns the single writer declared for a predicate name. ok is false when the
+// name is not in the census. The census is fully CONCRETE (beta.150 retired the last ".*"
+// namespace, openspec.spec.*, for the concrete openspec.spec.document blob), so this is an
+// exact match — no namespace fallback.
+func WriterOf(name string) (writer string, ok bool) {
+	for _, p := range Predicates {
+		if p.Name == name {
+			return p.Writer, true
+		}
+	}
+	return "", false
+}

@@ -1,0 +1,37 @@
+{
+  "id": "coordinator_create_change_spawn",
+  "type": "expression",
+  "name": "Coordinator decide(create_change) → author the OpenSpec change",
+  "description": "The authoring station. When a coordinator loop terminates with decide(action=create_change) — the taxonomy token for 'an intaken issue needs an OpenSpec change authored' — spawn the authoring loop that calls the create_change tool. create_change (already registered) stamps openspec.change.<slug>.* on the RUN entity (resolved from the loop's inherited RunID → agent.run_entity_id metadata) and REPLACES that package atomically; the graph is authoritative and the artifacts hydrate from it.\n\nROLE = coordinator (design roster: only Sarah/Amelia/Quinn, and Sarah the coordinator OWNS create_change). There is no separate 'author' persona — the authoring loop is a coordinator loop scoped to author. It is NOT a routing turn: tool_choice=function forces the create_change call and tools is scoped to [create_change] (the one tool the forced call needs), so the loop calls create_change and terminates (StopLoop) rather than deciding. tool_choice=function pins the single call, so this authoring loop had no MEDIUM-3 exposure even before beta.149 — the model can only call create_change, exactly the tool its role owns; under beta.149 (#551) the executor also enforces the advertised [create_change] set, so it is doubly-safe. It writes openspec.change.* (not coordinator.decision.*), so it triggers no coordinator decision rule — no loop.\n\nrun_scope=inherit (NOT new): the run already exists (minted at issue_intake), so the author inherits it and stamps the change onto the SAME run entity. Keeping this inherit (never a second run_scope=new) is what keeps the single-anchor handoff valid and the dual-anchor conformance guard green.\n\nNo lineage fence (mirrors semteams create-change/01): a rework coordinator that re-decides create_change SHOULD re-fire this rule to re-author a fresh change (create_change REPLACES the package; the D5/D15#0 re-validate contract is owned by the approval gate, not here).\n\nDEFERRED (real-LLM fidelity): the authoring loop inherits Sarah's routing persona (decision contract), which is inert under the mock and structurally overridden by tool_choice=function here. Before the first real-LLM token, give authoring its own persona fragment (or an author sub-role) so the prompt does not fight the tool gate.",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "coordinator.decision.next-action", "operator": "eq", "value": "create_change", "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.coordinator",
+      "role": "coordinator",
+      "model": "coordinator",
+      "tools": ["create_change"],
+      "tool_choice": { "mode": "function", "function_name": "create_change" },
+      "properties": {
+        "phase": "author"
+      },
+      "prompt": "SEMDEV — author the OpenSpec change for this run.\n\nA coordinator classified this run as needing a spec authored: $entity.triple.coordinator.decision.reason\n\nTurn the issue into a structured OpenSpec change and record it with the create_change tool: a slug, a proposal (intent + scope), one spec delta per affected capability (each ADDED/MODIFIED requirement carries an RFC-2119 'The system SHALL …' statement and at least one Given/When/Then scenario), and the implementation tasks. Emit the change CONTENT only — never a validation outcome (the harness validates). Calling create_change completes your turn."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "coordinator",
+    "capability": "openspec-io / run-lifecycle",
+    "station": "create_change — author the change onto the run",
+    "run_scope_rationale": "inherit, NOT new — the run was minted at issue_intake; the author stamps openspec.change.* on the same run entity. Never a second run_scope=new (keeps the dual-anchor guard green).",
+    "role_rationale": "coordinator (Sarah owns create_change; 3-role roster has no separate author). tool_choice=function + tools scoped to [create_change] forces the create_change call, so this is an authoring turn, not a routing turn — and the function-pin means no MEDIUM-3 exposure even before beta.149 (the model can only call the one tool its role owns); under beta.149 (#551) the executor also enforces the advertised [create_change] set, doubly-safe.",
+    "deferred_authoring_persona": "the authoring loop inherits Sarah's routing persona; inert under the mock and overridden by tool_choice=function. Give authoring its own persona/sub-role before the first real-LLM token."
+  }
+}

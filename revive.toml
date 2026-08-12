@@ -1,0 +1,48 @@
+# semdev Revive Configuration
+# The house Go linting standard (base: semstreams StreamKit config), adopted at
+# M0 while the surface is small — waiting makes the first clean-up painful.
+
+ignoreGeneratedHeader = false
+severity = "warning"
+confidence = 0.8
+errorCode = 1
+# warningCode = 1 enforces the house policy "revive (warnings = failure)": every
+# PR is gated structurally on revive-clean, matching the sibling repos.
+warningCode = 1
+
+[rule.blank-imports]
+[rule.context-as-argument]
+  # Conformance/test helpers legitimately take *testing.T before context.
+  arguments = [{ allowTypesBefore = "*testing.T,*testing.B" }]
+[rule.context-keys-type]
+[rule.dot-imports]
+[rule.error-return]
+[rule.error-strings]
+[rule.error-naming]
+[rule.exported]
+[rule.if-return]
+[rule.increment-decrement]
+[rule.var-naming]
+[rule.var-declaration]
+[rule.package-comments]
+[rule.range]
+[rule.receiver-naming]
+[rule.time-naming]
+[rule.unexported-return]
+[rule.indent-error-flow]
+[rule.errorf]
+[rule.empty-block]
+[rule.superfluous-else]
+[rule.unused-parameter]
+[rule.unreachable-code]
+[rule.redefines-builtin-id]
+
+[rule.function-length]
+  # [maxStatements, maxLines]; 0 disables the line check. 80 statements
+  # accommodates scenario-style journey tests; production rarely needs >50.
+  arguments = [80, 0]
+
+[rule.max-public-structs]
+  arguments = [10]
+  # Conformance + e2e test infrastructure carries many small result DTOs.
+  exclude = ["**/test/**"]

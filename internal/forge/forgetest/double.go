@@ -1,0 +1,341 @@
+// Package forgetest is the protocol-faithful LOCAL FORGE DOUBLE
+// (forge-io-real-lanes 4.2): an in-process HTTP server speaking the exact
+// GitHub REST shapes semdev's client sends — query-PR-by-head, create-PR,
+// create-comment, collaborator-permission — recording every request in order
+// so tests can assert the REAL request shapes and their sequence (the
+// query-BEFORE-create idempotency ordering). e2e journeys point the client's
+// base URL here; no journey depends on a live forge.
+//
+// The GIT half of delivery (the branch push) does NOT go through this double —
+// a push is a git-protocol operation, not a REST call. Tests pair the double
+// with a local BARE repository (file:// remote): a REAL git push against a
+// real repository, plus real REST shapes against this recorder.
+package forgetest
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Request is one recorded call.
+type Request struct {
+	// Kind is "find_pr" | "create_pr" | "create_comment" | "list_comments" | "permission".
+	Kind string
+	// Method + Path are the raw HTTP surface.
+	Method string
+	Path   string
+	// Query is the raw query string (find_pr carries head=owner:branch&state=all).
+	Query string
+	// Body is the decoded JSON body for POSTs (nil for GETs).
+	Body map[string]any
+}
+
+// PR is a pull request the double holds.
+type PR struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Head   string `json:"head"`
+	Base   string `json:"base"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
+	URL    string `json:"html_url"`
+}
+
+// Comment is a recorded issue comment. ID + Author are carried so the poll
+// transport (pull-first-transport) can Read them back via ListComments — a park
+// post leaves Author empty (the bot posts), an AddComment sets the human author.
+//
+// CreatedAt is stamped at append time and is LOAD-BEARING since the D12a
+// gate-open watermark (nl-conversation-intent 8.1a): both inbound paths drop a
+// message at-or-before the moment the gate opened. The double originally served
+// a hardcoded constant here — protocol-faithful when created_at was decorative —
+// which made every journey comment read as historical and silently killed the
+// whole approval lane in every journey (the six-red-journeys class).
+type Comment struct {
+	ID          int64
+	IssueNumber int
+	Author      string
+	Body        string
+	CreatedAt   time.Time
+}
+
+// Double is the recording forge.
+type Double struct {
+	mu          sync.Mutex
+	server      *httptest.Server
+	requests    []Request
+	prs         []PR
+	comments    []Comment
+	nextPR      int
+	nextComment int64
+
+	// Permissions maps actor login → permission level for the permission
+	// endpoint ("" → 404/none). Set before use; read under the lock.
+	Permissions map[string]string
+
+	// commentHold, when non-nil, blocks the NEXT create_comment until closed —
+	// armed by HoldNextCreateComment, consumed one-shot. See that method's doc.
+	commentHold chan struct{}
+}
+
+// HoldNextCreateComment arms a barrier: the next create_comment request blocks
+// (after route() records it, before it is applied or replied to) until the
+// returned release func is called; every later create_comment passes normally.
+// The apply consumer POSTS its transparency comment BEFORE it stamps the gate
+// decision (nl-conversation-intent D6/M6), so this hold keeps the first
+// decision OPEN at a precise, deterministic point while a second opposite
+// message classifies — the D15 conflict-journey barrier. release is idempotent.
+//
+// The hold SURVIVES a client abort (8.6 round-2, both reviewers' HIGH): the
+// posting client carries a fixed 10s HTTP timeout, and the apply consumer
+// retries a failed Post in-process — so a naive one-shot hold, consumed at
+// arrival, would let the RETRY sail through and stamp the decision while the
+// journey still believes the gate is held (a coin-flip flake whose failure
+// message indicts a product violation that did not happen). Instead an aborted
+// held request RE-ARMS the hold and appends nothing: the barrier persists
+// across timeout/retry cycles until release() closes the channel, after which
+// the next attempt passes and applies exactly once.
+func (d *Double) HoldNextCreateComment() (release func()) {
+	ch := make(chan struct{})
+	d.mu.Lock()
+	d.commentHold = ch
+	d.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+// AddComment seeds a comment ON an issue thread — a human's comment the poll
+// transport Reads (via ListComments) to drive the /semdev approve gate. It assigns
+// the next monotonic comment id (the poll cursor key) and returns it.
+func (d *Double) AddComment(issueNumber int, author, body string) int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.nextComment++
+	id := d.nextComment
+	d.comments = append(d.comments, Comment{ID: id, IssueNumber: issueNumber, Author: author, Body: body, CreatedAt: time.Now().UTC()})
+	return id
+}
+
+// Start builds and starts the double.
+func Start() *Double {
+	d := &Double{nextPR: 1, Permissions: map[string]string{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", d.route)
+	d.server = httptest.NewServer(mux)
+	return d
+}
+
+// URL is the API base to point the client at.
+func (d *Double) URL() string { return d.server.URL }
+
+// Close shuts the double down.
+func (d *Double) Close() { d.server.Close() }
+
+// Requests returns the recorded calls in arrival order.
+func (d *Double) Requests() []Request {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]Request, len(d.requests))
+	copy(out, d.requests)
+	return out
+}
+
+// PRs returns the pull requests the double holds.
+func (d *Double) PRs() []PR {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]PR, len(d.prs))
+	copy(out, d.prs)
+	return out
+}
+
+// Comments returns the recorded issue comments.
+func (d *Double) Comments() []Comment {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]Comment, len(d.comments))
+	copy(out, d.comments)
+	return out
+}
+
+var (
+	pullsRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls$`)
+	commentsRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/comments$`)
+	permissionRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/collaborators/([^/]+)/permission$`)
+)
+
+func (d *Double) route(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	var decoded map[string]any
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &decoded)
+	}
+
+	switch {
+	case pullsRe.MatchString(r.URL.Path) && r.Method == http.MethodGet:
+		d.record("find_pr", r, decoded)
+		d.handleFindPR(w, r)
+	case pullsRe.MatchString(r.URL.Path) && r.Method == http.MethodPost:
+		d.record("create_pr", r, decoded)
+		d.handleCreatePR(w, r, decoded)
+	case commentsRe.MatchString(r.URL.Path) && r.Method == http.MethodGet:
+		d.record("list_comments", r, decoded)
+		d.handleListComments(w, r)
+	case commentsRe.MatchString(r.URL.Path) && r.Method == http.MethodPost:
+		d.record("create_comment", r, decoded)
+		d.handleCreateComment(w, r, decoded)
+	case permissionRe.MatchString(r.URL.Path) && r.Method == http.MethodGet:
+		d.record("permission", r, decoded)
+		d.handlePermission(w, r)
+	default:
+		http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+	}
+}
+
+func (d *Double) record(kind string, r *http.Request, body map[string]any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.requests = append(d.requests, Request{
+		Kind: kind, Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Body: body,
+	})
+}
+
+func (d *Double) handleFindPR(w http.ResponseWriter, r *http.Request) {
+	head := r.URL.Query().Get("head")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := []PR{}
+	for _, pr := range d.prs {
+		if pr.Head == headBranch(head) {
+			out = append(out, pr)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (d *Double) handleCreatePR(w http.ResponseWriter, r *http.Request, body map[string]any) {
+	m := pullsRe.FindStringSubmatch(r.URL.Path)
+	owner, repo := m[1], m[2]
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	pr := PR{
+		Number: d.nextPR,
+		Title:  str(body["title"]),
+		Head:   str(body["head"]),
+		Base:   str(body["base"]),
+		Body:   str(body["body"]),
+		State:  "open",
+		URL:    fmt.Sprintf("%s/%s/%s/pull/%d", d.server.URL, owner, repo, d.nextPR),
+	}
+	d.nextPR++
+	d.prs = append(d.prs, pr)
+	writeJSON(w, http.StatusCreated, pr)
+}
+
+func (d *Double) handleCreateComment(w http.ResponseWriter, r *http.Request, body map[string]any) {
+	// The hold is taken OUTSIDE the lock: blocking under d.mu would deadlock
+	// every other endpoint (the poller's list_comments above all). A client
+	// abort (the poster's 10s HTTP timeout) re-arms the hold and applies
+	// nothing, so the consumer's retry blocks too — the barrier holds until
+	// release() closes the channel (see HoldNextCreateComment).
+	d.mu.Lock()
+	hold := d.commentHold
+	d.commentHold = nil
+	d.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+			d.mu.Lock()
+			if d.commentHold == nil {
+				d.commentHold = hold
+			}
+			d.mu.Unlock()
+			return
+		}
+	}
+	m := commentsRe.FindStringSubmatch(r.URL.Path)
+	var number int
+	_, _ = fmt.Sscanf(m[3], "%d", &number)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.nextComment++
+	id := d.nextComment
+	d.comments = append(d.comments, Comment{ID: id, IssueNumber: number, Body: str(body["body"]), CreatedAt: time.Now().UTC()})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+// handleListComments serves GET /repos/{o}/{r}/issues/{n}/comments in the GitHub
+// shape the semdev client decodes (id, body, created_at, html_url, user.login) —
+// the poll transport's Read source. Comments are returned oldest-first (append
+// order), the order GitHub uses and the numeric cursor relies on.
+func (d *Double) handleListComments(w http.ResponseWriter, r *http.Request) {
+	m := commentsRe.FindStringSubmatch(r.URL.Path)
+	var number int
+	_, _ = fmt.Sscanf(m[3], "%d", &number)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	type userT struct {
+		Login string `json:"login"`
+	}
+	type item struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		CreatedAt string `json:"created_at"`
+		HTMLURL   string `json:"html_url"`
+		User      userT  `json:"user"`
+	}
+	out := []item{}
+	for _, c := range d.comments {
+		if c.IssueNumber != number {
+			continue
+		}
+		out = append(out, item{
+			ID:        c.ID,
+			Body:      c.Body,
+			CreatedAt: c.CreatedAt.Format(time.RFC3339Nano),
+			HTMLURL:   fmt.Sprintf("%s/issues/%d#comment-%d", d.server.URL, number, c.ID),
+			User:      userT{Login: c.Author},
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (d *Double) handlePermission(w http.ResponseWriter, r *http.Request) {
+	m := permissionRe.FindStringSubmatch(r.URL.Path)
+	actor := m[3]
+	d.mu.Lock()
+	level := d.Permissions[actor]
+	d.mu.Unlock()
+	if level == "" {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"permission": level, "role_name": level})
+}
+
+// headBranch strips the "owner:" prefix of a head query value.
+func headBranch(head string) string {
+	if i := strings.IndexByte(head, ':'); i >= 0 {
+		return head[i+1:]
+	}
+	return head
+}
+
+func str(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}

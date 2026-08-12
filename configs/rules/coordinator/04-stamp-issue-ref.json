@@ -1,0 +1,39 @@
+{
+  "id": "coordinator_stamp_issue_ref",
+  "type": "expression",
+  "name": "Stamp run.issue.ref on the minted run from the front-door loop's task ref",
+  "description": "The rule-owned half of D2 (forge-io-real-lanes as-built): the admitted issue's host-neutral ref reaches the RUN as run.issue.ref, stamped by RULE (G2 — the intake component cannot write it: the run does not exist at wake time, and a Go write racing the mint is the semspec disease). MECHANISM: the intake wake's TaskID is the BARE ref (owner/repo#number); the framework stamps it verbatim on the front-door coordinator loop as agent.loop.task; once the mint rule (01) has fired and the framework anchors the loop (agent.run.entity-id lands), THIS rule substitutes that task triple onto the run. DISCRIMINATOR: coordinator.decision.next-action eq issue_intake — the ONLY coordinator loops carrying that decision are front-door intake loops, so the re-wake/authoring coordinators (whose agent.loop.task is a rule-minted task id, NOT an issue ref) can never mis-stamp a garbage ref. ORDERING: ref add FIRST, marker second (the station-failure-parks park-first lesson — a marker-set-ref-absent crash window would strand a ref-less run, breaking the approval adapter's ref->run resolution forever; the re-fire the ordering allows appends a benign duplicate of the IDENTICAL ref triple). One-shot: run.issue.stamped on the FIRING loop (the write target is the run, invisible to the loop's conditions, so the marker is the extinguisher — the 06d loop-scoped-marker lesson). run.issue.ref stays an OPAQUE handle to the arc (host-neutrality): only forge-io adapters parse it.",
+  "enabled": true,
+  "entity": { "pattern": "*.*.agent.agentic-loop.execution.*" },
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "coordinator", "required": true },
+    { "field": "coordinator.decision.next-action", "operator": "eq", "value": "issue_intake", "required": true },
+    { "field": "agent.run.entity-id", "operator": "ne", "value": "", "required": true },
+    { "field": "agent.loop.task", "operator": "ne", "value": "", "required": true },
+    { "field": "run.issue.stamped", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "run.issue.ref",
+      "object": "$entity.triple.agent.loop.task"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "run.issue.stamped",
+      "object": "$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "coordinator",
+    "capability": "forge-io",
+    "station": "issue-ref stamp (forge-io-real-lanes D2 as-built)",
+    "trigger_rationale": "role=coordinator ∧ next-action=issue_intake ∧ anchor present ∧ task present ∧ marker absent. The issue_intake decision is the front-door discriminator: it fires exactly once per admitted issue, on the loop whose agent.loop.task IS the ref.",
+    "writer_note": "run.issue.ref's vocab writer is issue-ref-rule (moved from the intake-adapter placeholder per the mint rule's deferred_issue_ref plan); run.issue.stamped is the same rule's marker. Rule add_triple stamps the engine's generic Source 'rule_engine' — the vocab writers are subsystem labels.",
+    "restart_safe": "REF-FIRST ordering + the loop-scoped one-shot marker: a crash between the two adds re-fires on replay and appends a benign duplicate of the identical ref triple; a marker-first ordering would instead strand a ref-less run (the approval adapter could never resolve it)."
+  }
+}

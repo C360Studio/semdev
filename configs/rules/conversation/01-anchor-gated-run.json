@@ -1,0 +1,42 @@
+{
+  "id": "conversation_anchor_gated_run",
+  "type": "expression",
+  "name": "Gated run → stamp agent.loop.run anchor (enable classifier inherit-spawn)",
+  "description": "The conversation lane's anchor half (nl-conversation-intent group 4; the dev-from-task/01 two-rule split applied at the approval gate). The classifier spawn (02-spawn-classifier) binds its loop to the gated run via publish_agent run_scope=inherit — and inherit reads the FIRING entity's bare agent.loop.run triple. A run entity carries agent.run.phase / agent.run.entity-id but NEVER a bare agent.loop.run triple on its own: dev-from-task/01 stamps it only at executing+approved, which is AFTER the gate this lane serves. So this rule stamps the missing anchor (agent.loop.run = the bare run id, $entity.instance) the moment the run reaches awaiting_approval, and the spawn rule (a separate rule, next KV revision) can inherit — the same two-rule split as dev-from-task/01+02, because inherit reads the in-memory entity SNAPSHOT captured at evaluation and an add_triple earlier in the same on_enter is invisible to it.\n\nINERT TO EVERYTHING ELSE (reader audit): agentrun.ResolveRun reads agent.loop.run only on LOOP entities, never chain/run entities; every rule that conditions on the run's agent.loop.run (dev-from-task/02 rewake, dev-from-task/03 projection, sandbox/01 provision) ALSO requires run.change.decision eq \"approve\", which is absent while the run sits at the gate — so pre-stamping the anchor here fires nothing early. Once approval lands, dev-from-task/01's own agent.loop.run length_eq 0 guard sees this anchor already present and simply never fires (it would have stamped the identical value); the kickoff chain proceeds off THIS anchor unchanged.\n\nEDGE-TRIGGERED ONE-SHOT: the agent.loop.run length_eq 0 guard extinguishes the trigger the moment the anchor lands — the house fired-once pattern with the stamped fact itself as the marker (add_triple of the same deterministic value is idempotent on replay). G2: stamps a framework anchor fact, fires no lifecycle transition.",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "agent.loop.run",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "agent.loop.run",
+      "object": "$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "conversation",
+    "capability": "conversation-channel",
+    "station": "classifier anchor — make the gated run inherit-spawnable (group 4, design D3)",
+    "why_run_entity_stamp": "publish_agent inherit derives RunID from the firing entity's bare agent.loop.run triple (actions.go run_scope switch); a run/chain entity has none before dev-from-task/01 fires at executing+approved, so the gate-time classifier spawn cannot bind without this.",
+    "two_rule_split": "inherit reads the entity snapshot; an add_triple in the same on_enter is invisible to a same-rule inherit. The inherit publish lives in 02-spawn-classifier.json, fired on a later KV revision once agent.loop.run is present (the spawn conditions on it ne \"\").",
+    "inert_audit": "ResolveRun reads agent.loop.run on loop entities only; the three run-entity readers (dev-from-task/02, dev-from-task/03, sandbox/01) all also require run.change.decision eq \"approve\", absent at the gate. dev-from-task/01 is superseded-not-broken: its length_eq 0 guard sees this anchor and never fires; the value is identical."
+  }
+}

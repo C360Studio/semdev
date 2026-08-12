@@ -1,0 +1,42 @@
+{
+  "id": "dev_from_task_floors_trigger",
+  "type": "expression",
+  "name": "Developer loop terminated → publish the floors station (structural floors + route mirror on L_n)",
+  "description": "The floors station (design R1/R6, group 5+6 — now a publish-triggered COMPONENT). When Amelia's bounded dev loop TERMINATES (success or failed), the FLOORS STATION component runs semdev's deterministic structural floors over her authored diff — did she author a test at all, is it vacuous, did she ship a stub, does the source parse, did she 'test' only a mock, and (H1) did she author ANY declared target — with ZERO model turns (it replaced the forced check_floors coordinator turn). G2: this fires no lifecycle transition; the component measures + mirrors, the route rules decide.\n\n★ THE MAKE-OR-BREAK ROUTE-MIRROR COUPLING (R6): the g4+5 floors route (06a advance / 06b+06e not_clean / 06c retry / 06d escalate) fires on the entity carrying the route.* mirror. Pre-reshape that was the fresh check_floors coordinator loop (CF_n); with check_floors converted to a component there is NO CF_n. So the floors component stamps floor.finding on the RUN (unchanged) AND the route.* mirror (route.attempt.passed = the run's measurement bound to the current attempt.commit.sha, fail-closed 'false' if absent/stale; route.attempt.rejected = its aggregate; route.attempt.instance = the full task.attempt.instance set) onto the DEVELOPER loop L_n — which IS this rule's firing entity, so the rule engine's executePublish stamps the dispatch entity_id = L_n and the component mirrors onto it. L_n is still fresh per attempt (a new developer loop each attempt), so the loop-scoped route.attempt.routed self-extinguish is preserved, and the route rules 06a-d fire on L_n UNCHANGED (they key on route.*, not the loop's role; their run_scope=inherit still binds because L_n carries agent.loop.run). The run_entity_id travels as a publish PROPERTY (L_n is the firing entity, so the run is not the dispatch entity_id).\n\nTRIGGER = the DEVELOPER loop's TERMINAL (measure moved INTO Amelia's loop, R2). It fires on agent.loop.role=developer AND agent.loop.outcome ne \"\" (present iff the loop terminated, for BOTH success and failed) — a failed loop (max-iteration cap) is still a completed attempt the route must handle; routing reads measurement.result + floor.finding, not the loop outcome. agent.run.entity-id ne \"\" grounds the run property. Each attempt mints a FRESH L_n, so this re-fires per attempt for free.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe): on_enter FIRST stamps dev.floors.dispatched=$entity.instance on L_n (the firing entity), guarded by dev.floors.dispatched length_eq 0, BEFORE the publish. The core-NATS publish is not deduped, so this marker keeps the dispatch fire-once under RULE_STATE loss. A fresh L_n per attempt carries no marker, so floors re-run per attempt for free. KNOWN M0 GAP (honest, general to all R6 stations): a persistent floors-component fault (after the base's bounded retry) leaves L_n without the route mirror and nothing re-triggers — the route never fires, the attempt does not advance, no auto-park at M0 (R8/group 8).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "developer", "required": true },
+    { "field": "agent.loop.outcome", "operator": "ne", "value": "", "required": true },
+    { "field": "agent.run.entity-id", "operator": "ne", "value": "", "required": true },
+    { "field": "dev.floors.dispatched", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "dev.floors.dispatched",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish",
+      "subject": "component.floors-station.dispatch",
+      "properties": {
+        "run_entity_id": "$entity.triple.agent.run.entity-id",
+        "task_index": "0"
+      }
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "station": "floors-station — run the structural floors on the developer-loop terminal (R1/R6, group 5+6 component)",
+    "trigger_rationale": "fires on the DEVELOPER loop's terminal (role=developer stamped at spawn; outcome ne \"\" stamped at completion — present for both success and failed). Routing keys on the harness facts, not the loop outcome, so floors run on any terminal.",
+    "mechanism": "R6: a plain `publish` to component.floors-station.dispatch triggers the floors STATION component (zero model turns), replacing the forced check_floors coordinator turn. Fires on L_n (the developer loop), so run_entity_id + task_index travel as publish properties; the component stamps floor.finding on the run and the route.* mirror on L_n (= the dispatch entity_id). Emitted on core NATS (the rule component declares no matching JetStream output port).",
+    "route_mirror_on_ln": "★ make-or-break (R6): the floors route (06a-d) fires on the entity carrying route.*. With check_floors a component there is no check_floors coordinator loop (CF_n) — so the component mirrors route.attempt.passed/route.attempt.rejected/route.attempt.instance onto the DEVELOPER loop L_n (= this rule's firing entity = the dispatch entity_id), still fresh per attempt (route.attempt.routed self-extinguish preserved). The route rules 06a-d fire on L_n UNCHANGED (they key on route.*; run_scope=inherit binds because L_n carries agent.loop.run). Preserves the g4+5 measurement snapshot-commit staleness binding in check_floors.RunFloors.",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped dev.floors.dispatched marker + length_eq 0 guard, stamped BEFORE the publish (the core-NATS publish is not deduped). A fresh developer loop per attempt re-arms floors.",
+    "known_gap": "general R6 station gap (honest): a persistent floors-component fault (after the base's bounded retry) leaves L_n without the route mirror, nothing re-triggers, the attempt does not advance — no auto-park at M0 (R8/group 8)."
+  }
+}

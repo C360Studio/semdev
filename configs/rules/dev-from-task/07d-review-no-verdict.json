@@ -1,0 +1,43 @@
+{
+  "id": "dev_from_task_review_no_verdict",
+  "type": "expression",
+  "name": "Review route → NO VERDICT: reviewer terminated without submitting → park (fail-closed)",
+  "description": "The fail-closed no-verdict park (design R4/SB5, group 5). If Quinn's review loop TERMINATES without ever recording a verdict (she ran out of iterations, or called ask_human, or errored) — route.review.verdict is absent — the run cannot proceed on a missing judgment. This PARKS toward the human. This is the totality catch of the review route: route.review.verdict ∈ {approved (07a), changes_requested (07b/07c), ABSENT (here)} — no path silently advances (SB5, fail-closed).\n\nTRIGGER = Quinn's review LOOP identified by agent.loop.role eq \"reviewer\" (required:true — the one reviewer loop; route.review.verdict is absent here so it cannot be the discriminator) AND agent.loop.outcome ne \"\" (required:false — the loop terminated; ne \"\" on absent is false, so it never fires mid-loop) AND route.review.verdict length_eq 0 (required:true — no verdict was mirrored) AND route.attempt.routed length_eq 0 (self-extinguish). Mutually exclusive with 07a/07b/07c, which all require route.review.verdict PRESENT.\n\nWRITER: run.awaiting.human — a sanctioned park realization (G5). SELF-EXTINGUISHING: route.attempt.routed on the review loop (a LOOP-scoped guard).",
+  "enabled": true,
+  "entity": { "pattern": "*.*.*.*.*.*" },
+  "conditions": [
+    { "field": "agent.loop.role", "operator": "eq", "value": "reviewer", "required": false },
+    { "field": "agent.loop.outcome", "operator": "ne", "value": "", "required": false },
+    { "field": "route.review.verdict", "operator": "length_eq", "value": 0, "required": true },
+    { "field": "route.attempt.routed", "operator": "length_eq", "value": 0, "required": true }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.attempt.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "run.awaiting.human",
+      "object": "the reviewer loop terminated without submitting a verdict (out of iterations, escalated, or errored); no approval to act on"
+    },
+    {
+      "type": "publish",
+      "subject": "user.response.$entity.instance"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "park",
+    "station": "review no-verdict → park (fail-closed totality catch, R4/SB5, group 5)",
+    "totality": "route.review.verdict ∈ {approved, changes_requested, ABSENT}; this catches ABSENT (a terminated reviewer loop that never submitted), so no review path silently advances.",
+    "writer_note": "run.awaiting.human — a sanctioned park realization (G5).",
+    "restart_safe": "SELF-EXTINGUISHING via the LOOP-scoped route.attempt.routed marker."
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "id": "run_cancel_after_change_rejection",
+  "type": "expression",
+  "name": "Cancel after change rejection (awaiting_approval → cancelled)",
+  "description": "The reject side of the first human gate (nl-conversation-intent design D7). A run parked at awaiting_approval carrying run.change.decision == \"reject\" transitions to cancelled: the authored change is abandoned and a re-triggered issue starts a fresh run (a rework loop that KEEPS the change is a Phase 3 concern, OQ2). Rule-owned transition (G2) — no Go fires it. The decision is stamped by the ONE sanctioned gate writer (approval-adapter) from either the exact `/semdev reject` fast-path or the deterministic apply consumer; this rule never inspects who decided, only that the decision landed.\n\nPHASE GUARD — LOAD-BEARING (architect H1): the agent-run state machine (agentrun.go:46-48) permits a LEGAL executing → cancelled edge. An unguarded reject rule would therefore fire on an ALREADY-APPROVED, ALREADY-EXECUTING run and destroy work the human explicitly approved — the irreversibility asymmetry the design settles: an approval is final once landed (transparency is VISIBILITY, not undo; the downstream PR merge is the real human stop). Gating on agent.run.phase == awaiting_approval confines the cancel to a run still AT the gate, mirroring the resume rule. The guard is ALSO what makes the D13 residual benign: if a decision flips after the run has already left the gate, this rule cannot act on it.\n\nSINGLE-VALUED DECISION (D13, group 8): this rule and run-lifecycle/02 are mutually exclusive BY CONSTRUCTION. They previously read two independent booleans and each carried a guard requiring the OTHER absent, because a run could hold BOTH and then fire NEITHER — an unsurfaced permanent wedge that was documented rather than removed. One single-valued fact under replace-by-predicate makes that state unrepresentable; the cross-guards are retired. Pinned by TestOppositeCommandsCannotWedgeTheGate (offline) and the reworked 6.4 conflict journey (end-to-end).\n\nPARK EXCLUSION (repo-wide invariant): like every active lifecycle_transition rule, this one carries `run.awaiting.human length_eq 0` so a run parked toward the human is never swept through a gate before the park is cleared. The guard is inert on the normal path — the change-approval gate is PHASE-based and stamps no run.awaiting.human — and bites only when an ask_human park and a rejection coincide, where holding still is the correct conservative outcome.\n\nFIRING CAP: the transition is terminal for this run (cancelled leaves awaiting_approval, so the conditions can never re-satisfy), hence a single fire per run — the engine's default per-action cap of 3 is never approached and no explicit max_iterations is needed (contrast the conversation routes, which re-fire across the gate's lifetime and must opt out explicitly).",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "eq",
+      "value": "reject",
+      "required": true
+    },
+    {
+      "field": "run.awaiting.human",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "lifecycle_transition",
+      "workflow": "agent-run",
+      "phase": "cancelled",
+      "reason": "human rejected the authored change; abandoning this run"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "run-lifecycle",
+    "capability": "run-lifecycle",
+    "gate": "change-approval",
+    "task": "5.3",
+    "phase_guard": "awaiting_approval only (H1): the legal executing→cancelled edge means an unguarded rule would kill an approved, executing run.",
+    "mutual_exclusion": "structural since D13 (group 8): the gate is ONE single-valued fact (run.change.decision), so a run cannot hold both an approve and a reject and the former cross-guards are retired. The old two-boolean design could wedge a run permanently; see the description."
+  }
+}

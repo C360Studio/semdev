@@ -1,0 +1,63 @@
+{
+  "id": "conversation_classifier_terminal_release",
+  "type": "expression",
+  "name": "Classifier loop terminal → clear the pending slot, then release the spawn marker",
+  "description": "The one-at-a-time release (nl-conversation-intent group 4, design D5). Fires on the conversation classifier LOOP entity's terminal — ANY terminal, clean or faulted (agent.loop.outcome ne \"\") — and clears, on the RUN (subject-override via the loop's agent.run.entity-id), first the conversation.pending.{author,body,message-id} slot and THEN the conversation.classifier.dispatched spawn marker. Releasing the marker re-arms 02-spawn-classifier for the NEXT authorized message: without this release the FIRST classification would permanently close the NL lane for the run (the conflict journey needs two classifications on one run), and the human's follow-up 'ship it' after a conservative `none` would silently never classify.\n\nORDER IS LOAD-BEARING, twice over (grp4-review M2): the engine writes each rule action as its OWN KV revision. (1) The message-id removal must precede the marker removal — marker-first would expose an intermediate revision (pending id present, marker absent) that is exactly the spawn trigger, re-spawning a classifier for the ALREADY-classified message. (2) The author and body removals must precede the message-id removal — id-first would let the bridge's atomic pending write (a new message landing between these revisions) be TORN by the trailing author/body removals into an id-present/author-absent state that spawns a classifier guaranteed to fault on the missing author, burning its whole loop budget. With the order author → body → message-id → marker, every interleaving of a concurrent bridge write yields either a whole slot or an id-absent slot, neither of which mis-spawns.\n\nHONEST LIMITS (grp4-review M3 / semstreams MEDIUM-1): action execution is BEST-EFFORT — a failed action logs, bumps actionFailuresTotal, and the engine CONTINUES to the next action; this rule cannot re-fire for the run once its per-loop edge is consumed. So a transiently failed pending-removal with a successful marker-removal reproduces the re-spawn state ((1) above) for one bounded duplicate paid turn (the intent re-stamp is idempotent, the ledger dedups); and a failed MARKER-removal with successful pending-removals leaves the marker stale FOREVER — the NL lane closes silently for that run (new messages stamp pending and die at the spawn guard; the exact command recovers; actionFailuresTotal is the operator tripwire). The orderings narrow these windows; they cannot eliminate them — an atomic multi-remove (or abort-on-first-failure on_enter) is a named upstream semstreams ask (tasks 7.1).\n\nACCEPTED-AND-NAMED LOSS WINDOW (the D5 latest-wins asymmetry, direction-flipped in flight): a new authorized message stamped into the pending slot WHILE a classifier is in flight is never classified — classify_intent's read-once binding (the dispatched-marker check, HIGH-1) faults on the moved slot rather than misattribute, so the newcomer is retired UNCLASSIFIED and UN-DEDUPED (the ledger never sees it), and this release wipes it. The faulted terminal drives the group-5 fallback note, so the miss is SURFACED, not silent; a re-nudge (a new message id) classifies fresh and the exact command always works. Inside the flight window latest-wins becomes latest-LOSES — bounded to one model turn, with the conservative persona, gate-still-open guard, and PR-merge backstop bounding the consequence.\n\nWhat this rule deliberately does NOT touch: the conversation.intent.* facts (the routing rules and apply consumer read them; the ledger is the durable dedup) and any lifecycle fact. This is the repo's FIRST remove_triple rule; cross-writer removal stamps no Source and impersonates no writer (G5 governs who WRITES values) — the shape the park-exclusion pin (rules_test.go) anticipates for a future resume-from-park rule clearing run.awaiting.human. Clearing pending on a FAULTED terminal is also the storm-breaker: a deterministic classifier fault must NOT retry on the same message. G2: no lifecycle transition. Each classifier loop is a fresh entity, so this edge-triggers once per loop; remove_triple on an absent predicate is an idempotent no-op on replay. COMPOUND RULE_STATE-LOSS RESIDUAL (grp4 re-review LOW-b; mechanism corrected in the 7.3 review — named, not fixed): under RULE_STATE loss with ENTITY_STATES intact, a replayed release plus a fresh spawn can re-arm the marker to a NEW message id while an OLD classifier is still in flight. Interleavings caught MID-move fault correctly (slot moved or marker absent → the read-once binding refuses). But the FULLY-re-armed terminal state — marker AND slot both carrying the new id — defeats the graph-mediated binding (the tool holds no loop-local copy of its dispatch id; it compares two graph reads that now AGREE), so the old classifier CAN stamp its judgment of the OLD message's text under the NEW message's id and author: this shape RE-OPENS the HIGH-1 misattribution, it is not a narrower version of it. Bounds, all real: the trigger needs RULE_STATE loss + an in-flight classifier + a new authorized message inside the window; the cited author is the NEW message's real author, RE-AUTHORIZED at apply; the transparency post names them; and the PR merge is the downstream human stop. Recorded here so a state-loss postmortem finds the true mechanism, not a reassurance.",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.loop.role",
+      "operator": "eq",
+      "value": "conversation",
+      "required": true
+    },
+    {
+      "field": "agent.loop.outcome",
+      "operator": "ne",
+      "value": "",
+      "required": true
+    },
+    {
+      "field": "agent.run.entity-id",
+      "operator": "ne",
+      "value": "",
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "remove_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "conversation.pending.author"
+    },
+    {
+      "type": "remove_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "conversation.pending.body"
+    },
+    {
+      "type": "remove_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "conversation.pending.message-id"
+    },
+    {
+      "type": "remove_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "conversation.classifier.dispatched"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "conversation",
+    "capability": "conversation-channel",
+    "station": "classifier terminal release — consume the pending slot, re-arm the spawn (group 4, design D5)",
+    "trigger_rationale": "fires on the classifier LOOP terminal (role=conversation + outcome present, the floors-trigger shape); the run id travels as the loop's agent.run.entity-id triple (inherit stamps it), and the agent.run.entity-id ne \"\" condition guards the subject substitution (substitution fails open on absence).",
+    "ordering_invariant": "author → body → message-id → marker (grp4-review M2): the id-before-marker half prevents the re-spawn revision; the author/body-before-id half prevents a torn slot (id present, author absent) when a concurrent bridge write interleaves the removals — a torn slot spawns a classifier that can only fault. Pinned offline by TestClassifierTerminalReleaseContract. Best-effort action execution means a FAILED removal can still reproduce either state once (bounded duplicate turn) or brick the lane (stale marker — see description; actionFailuresTotal is the tripwire).",
+    "fault_posture": "a faulted terminal releases the lane too (the marker must not brick NL for the run) and consumes the faulted message (no same-message retry storm); the group-5 fallback-note rule tells the human to use the exact command or re-type.",
+    "loss_window": "a message stamped into pending mid-classification is retired UNCLASSIFIED and UN-DEDUPED (classify_intent's dispatched-marker check faults rather than misattribute, HIGH-1); the faulted terminal drives the group-5 fallback note, so the miss is surfaced. Bounded to one model turn. The intent facts + classified ledger are NOT touched — they are the durable dedup and the apply consumer's input."
+  }
+}

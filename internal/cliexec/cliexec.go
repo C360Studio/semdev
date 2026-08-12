@@ -1,0 +1,121 @@
+// Package cliexec is the thin exec seam semdev uses to shell out to a local, TRUSTED
+// command and read its exit code as data. Its consumers: the OpenSpec CLI
+// compatibility oracle — `openspec validate` (the validate step) and, at M1,
+// `openspec archive` — and `git apply` (the apply_patch code-authoring seam, group 6,
+// which applies a developer's diff to the run's checkout). It exists so those steps
+// depend on an interface, not os/exec directly, and can be unit-tested with a scripted
+// runner (no CLI, no filesystem) while production runs the real binary.
+//
+// It is deliberately DISTINCT from the clean-room verification Runner (group 8):
+// that seam provisions fresh product-build isolation to PROVE the delivered
+// artifact; this one only shells a local, trusted command to read its exit code.
+// Keeping them separate avoids conflating "run a trusted local tool" with "prove the
+// product in a cold sandbox" — different trust and isolation contracts.
+//
+// A non-zero exit is DATA, not an error: Run returns the captured Result (with the
+// real ExitCode) and a nil error whenever the process ran to completion, so the
+// caller reads the oracle's verdict from ExitCode. A non-nil error means the
+// command could not be run at all (binary missing, context cancelled) — a
+// transport-class failure the caller must not read as "invalid."
+package cliexec
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+)
+
+// Result is one command invocation's captured outcome. ExitCode is the real OS
+// exit status (the harness-measured verdict, never a model-supplied one — G3);
+// TimedOut reports that the context deadline killed the process.
+type Result struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+	TimedOut bool
+}
+
+// Runner runs name with args in working directory dir and returns the captured
+// Result. A completed process (any exit code) returns a nil error; a non-nil
+// error means the process could not be started or was cancelled — the caller
+// treats that as a transport failure, not a verdict.
+type Runner interface {
+	Run(ctx context.Context, dir, name string, args ...string) (Result, error)
+}
+
+// EnvRunner is an OPTIONAL extension of Runner: it runs a command with EXTRA
+// environment variables (additive to the process environment, this call only) so a
+// secret can reach the subprocess WITHOUT appearing in any command argument — the
+// host's process listing never sees it (the no-argv-leak token channel, design D3).
+// Its INTENDED first consumer is the forthcoming forge-clone lane (group 3), which will
+// pass a token via GIT_ASKPASS; nothing wires it yet (the local-remote clones today need
+// no credential). A consumer must type-assert a Runner to EnvRunner (Checkouts.runner is
+// typed Runner) WITH a fail-closed branch when the assertion fails — a silent fallback to
+// plain Run would put the token back on argv, defeating D3. Existing Runner
+// implementations (the scripted test fakes) are unaffected: this is a separate interface,
+// not a new method on Runner.
+type EnvRunner interface {
+	Runner
+	RunWithEnv(ctx context.Context, dir string, env []string, name string, args ...string) (Result, error)
+}
+
+// OSRunner is the production Runner (and EnvRunner) over os/exec.
+type OSRunner struct{}
+
+// Run executes the command with CommandContext (so a cancelled/expired context
+// kills the process) in dir, capturing stdout and stderr. A non-zero exit is
+// returned in Result with a nil error; only a genuine start/cancel failure
+// returns a non-nil error.
+func (OSRunner) Run(ctx context.Context, dir, name string, args ...string) (Result, error) {
+	return runCmd(ctx, dir, nil, name, args...)
+}
+
+// RunWithEnv is Run with extra environment. env holds KEY=VALUE entries appended to
+// os.Environ() for this invocation only; use it to pass a secret (a token) that MUST
+// NOT ride argv. A nil/empty env behaves exactly like Run.
+func (OSRunner) RunWithEnv(ctx context.Context, dir string, env []string, name string, args ...string) (Result, error) {
+	return runCmd(ctx, dir, env, name, args...)
+}
+
+// runCmd is the shared exec body for Run and RunWithEnv. extraEnv is appended to the
+// inherited process environment only when non-empty (so Run stays byte-identical to
+// its pre-EnvRunner behavior — a nil cmd.Env inherits os.Environ automatically).
+func runCmd(ctx context.Context, dir string, extraEnv []string, name string, args ...string) (Result, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	res := Result{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded),
+	}
+
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		res.ExitCode = cmd.ProcessState.ExitCode()
+		return res, nil
+	case errors.As(err, &exitErr):
+		// The process ran and exited non-zero — a verdict, not a failure to run.
+		res.ExitCode = exitErr.ExitCode()
+		if res.TimedOut {
+			// Killed by the deadline: surface as a transport failure so the
+			// caller retries rather than reading it as a validation verdict.
+			return res, fmt.Errorf("run %s: timed out: %w", name, ctx.Err())
+		}
+		return res, nil
+	default:
+		// Could not start (binary missing, permission, cancelled before start).
+		return res, fmt.Errorf("run %s in %q: %w", name, dir, err)
+	}
+}

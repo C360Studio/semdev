@@ -1,0 +1,48 @@
+{
+  "id": "conversation_route_intent_approve",
+  "type": "expression",
+  "name": "Classified APPROVE intent on a still-gated run → dispatch the apply consumer",
+  "description": "The approve intent route (nl-conversation-intent group 4, design D6). When the classifier has stamped conversation.intent.value = approve on a run still at awaiting_approval with the gate UNDECIDED, publish the conversation-channel component's deterministic apply consumer (component.conversation-apply.dispatch — the R6 station shape, mirroring validate-authored-change → component.validation-station.dispatch). The rule fires on the RUN, so the run IS the dispatch entity_id (no property needed — the provision/projection-station shape, not the loop-fired validate shape). The consumer, in Go, re-checks the gate is still open, reads the cited author from conversation.intent.author (HARNESS-bound, H4b — never the overwrite-prone pending slot), RE-RUNS admission.Authorize on that author, POSTS the transparency comment, and only then stamps run.change.decision = \"approve\" under the ONE G5 writer (approval-adapter). This rule itself stamps nothing and transitions nothing (G2).\n\nGATE-UNDECIDED GUARD (H4a; single-valued since D13/group 8): run.change.decision length_eq 0 — a second racing classification cannot dispatch once a gate fact lands, and the landing gate fact is ALSO what extinguishes this trigger (the absence guard flips false), so no self-extinguish marker is needed: between publish and stamp the consumer's gate-still-open re-check + Post-then-stamp at-least-once posture (M6) make a duplicate dispatch a bounded duplicate comment at worst, never a double gate release — the coordinator/03 idempotent-station posture.\n\nNOTE the consumer reads the run's CURRENT intent facts at consume time, not a snapshot threaded through the dispatch: if a later classification flipped the intent between this fire and the consume, the consumer acts on the latest classified reading — still gate-open-checked and re-authorized, and the transparency post names exactly what it acted on.",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "agent.run.phase",
+      "operator": "eq",
+      "value": "awaiting_approval",
+      "required": true
+    },
+    {
+      "field": "conversation.intent.value",
+      "operator": "eq",
+      "value": "approve",
+      "required": false
+    },
+    {
+      "field": "run.change.decision",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "publish",
+      "max_iterations": 0,
+      "subject": "component.conversation-apply.dispatch"
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "conversation",
+    "capability": "conversation-channel",
+    "station": "intent route (approve) — dispatch the deterministic apply consumer (group 4, design D6)",
+    "firing_cap": "max_iterations: 0 (grp4-review H1): this rule can legitimately re-fire on ONE run across the gate's lifetime (each fresh classification is an edge); the engine's default per-action cap (3, per rule+entity) would silently stop routing on the 4th. The gate-facts guards + the consumer's gate-still-open re-check bound the effect instead.",
+    "trigger_rationale": "fires on the RUN (the classifier subject-overrides conversation.intent.* there, H2), so the run travels as the dispatch entity_id and the consumer reads every fact it needs off the run.",
+    "mutual_exclusion": "phase-gate + both-gate-facts-absent (H4a). The landing gate fact extinguishes the trigger; the apply consumer's gate-still-open re-check is the serializer for the publish→stamp window (a duplicate dispatch re-Posts at worst, M6).",
+    "no_marker_rationale": "the publish is idempotent at the consumer (gate-still-open + Post-then-stamp), and the downstream gate fact self-extinguishes the trigger — the coordinator/03 station posture, unlike the non-idempotent publish_agent spawns."
+  }
+}

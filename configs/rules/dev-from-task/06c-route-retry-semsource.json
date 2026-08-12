@@ -1,0 +1,90 @@
+{
+  "id": "dev_from_task_route_retry_semsource",
+  "type": "expression",
+  "name": "Floors route → RETRY: not clean, budget remains → re-dispatch Amelia [semsource condition]",
+  "description": "The retry route (design R1/R3, group 5). When the attempt was NOT clean (route.attempt.unclean=true, stamped by 06b's OR-collapse) AND the task's attempt budget still has room (route.attempt.instance count < B, where B is the PER-TASK budget task.spec.budget mirrored onto L_n as route.task.budget), spawn a FRESH developer loop (Amelia) to revise the fix. That fresh loop re-arms the whole chain FOR FREE: terminate → floors (05) re-mirrors → route again, until the task advances or the budget is exhausted (escalate, 06d).\n\n⚠ SERIALIZATION INVARIANT (load-bearing, pinned): this rule, dispatch-developer (04), the review-retry route (07b), and the transient-retry route (06f, adopt-reason-aware-escalate) are the ONLY four rules permitted to spawn a role=developer loop. The chain is strictly serial (one developer loop in flight per task), which is what guarantees floors evaluated the SAME frozen checkout the attempt measured (it replaced the dropped token handshake). Every sanctioned spawner fires on a TERMINATED loop's terminal (or the initial dispatch) and is self-extinguishing, so a fifth spawner — or any spawner firing mid-flight — would race the shared checkout.\n\nTRIGGER = the developer loop L_n: route.attempt.unclean eq \"true\" (required:false — the intermediate exists only on a not-clean developer loop L_n) AND route.attempt.transient eq \"false\" (required:false — a TRANSIENT loop failure, model_error/handler_error, is diverted to the bounded transient-retry route 06f and does NOT consume the convergence budget. The flag is check_floors' ATOMIC-MIRROR classification of the loop's terminal reason, stamped ALWAYS \"true\"/\"false\" in the SAME ReplaceTriples as route.attempt.passed — so this exclusion and 06f's trigger are a condition PARTITION over one atomic snapshot, never a race against a sibling rule's stamp landing in its own KV revision (the pinned double-dispatch, TestBridgeProofTransientGraceRetries); adopt-reason-aware-escalate #529/#569) AND route.attempt.instance length_lt $entity.triple.route.task.budget.value (required:true — the attempt count vs the per-task budget mirror; #519 scalar .value + #568 length_lt; safe on absence = empty array) AND route.attempt.routed length_eq 0 (self-extinguish). It is mutually exclusive with escalate (06d, length_gte B): length_lt B = {0..B-1}, length_gte B = {B, B+1, ...} partition the count with no gap and no overlap (fail-closed — retry provably cannot fire at count ≥ B). The budget mirror is a raw copy of the projection's clamped [1,5] value; its absence faults the floors station loudly (D7), never a silent default.\n\nRUN BINDING + ATTEMPT COUNT (R3): run_scope=inherit binds the fresh developer loop to the run (the developer loop L_n's agent.loop.run), and on_enter appends task.attempt.instance = $entity.instance on the RUN (subject-override the developer loop L_n's agent.run.entity-id) AT SPAWN — so the count rises exactly +1 per retry dispatch and the next floors route sees the incremented budget.\n\nSELF-EXTINGUISHING ONE-SHOT (restart-safe, CRITICAL): on_enter FIRST stamps route.attempt.routed=$entity.instance on the developer loop L_n, guarded by route.attempt.routed length_eq 0, BEFORE the publish. publish_agent is NOT idempotent — a re-fire would spawn a DUPLICATE developer, breaking the one-in-flight invariant. A fresh floors loop per attempt re-arms it.",
+  "enabled": true,
+  "entity": {
+    "pattern": "*.*.*.*.*.*"
+  },
+  "conditions": [
+    {
+      "field": "route.attempt.unclean",
+      "operator": "eq",
+      "value": "true",
+      "required": false
+    },
+    {
+      "field": "route.attempt.transient",
+      "operator": "eq",
+      "value": "false",
+      "required": false
+    },
+    {
+      "field": "route.attempt.instance",
+      "operator": "length_lt",
+      "value": "$entity.triple.route.task.budget.value",
+      "required": true
+    },
+    {
+      "field": "route.attempt.routed",
+      "operator": "length_eq",
+      "value": 0,
+      "required": true
+    }
+  ],
+  "logic": "and",
+  "on_enter": [
+    {
+      "type": "add_triple",
+      "subject": "$entity.id",
+      "predicate": "route.attempt.routed",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "add_triple",
+      "subject": "$entity.triple.agent.run.entity-id",
+      "predicate": "task.attempt.instance",
+      "object": "$entity.instance"
+    },
+    {
+      "type": "publish_agent",
+      "run_scope": "inherit",
+      "subject": "agent.task.developer",
+      "role": "developer",
+      "model": "developer",
+      "tools": [
+        "query_entity",
+        "read_workspace",
+        "apply_patch",
+        "measure_task",
+        "ask_human",
+        "code_context",
+        "code_impact",
+        "code_search",
+        "doc_context"
+      ],
+      "tool_choice": {
+        "mode": "auto"
+      },
+      "related_loops": {
+        "run-loop-entity-id": "$entity.triple.agent.run.entity-id"
+      },
+      "properties": {
+        "phase": "develop"
+      },
+      "prompt": "SEMDEV DEVELOPER (Amelia) — your previous attempt at this run's task did NOT pass the sandbox gate (the test failed or a structural floor rejected it). Revise the fix.\n\nYour run entity ID is $entity.triple.agent.run.entity-id. Read the task contract and your prior recorded measurement/floor findings with query_entity(entity_id=\"$entity.triple.agent.run.entity-id\"); read the files with read_workspace. Author a CORRECTED unified diff touching only task.spec.target-files and record it with apply_patch, then measure_task(task_index=0). Iterate until the test passes, then stop. You author the fix; the harness measures it and you never claim the outcome (G3)."
+    }
+  ],
+  "on_exit": [],
+  "metadata": {
+    "pack": "dev-from-task",
+    "capability": "dev-from-task",
+    "gate": "route",
+    "station": "route retry — not clean + budget remains → re-dispatch Amelia (R1/R3, group 5)",
+    "serialization_invariant": "this rule + dispatch-developer (04) + review-retry (07b) + transient-retry (06f) are the ONLY sanctioned role=developer spawners (pinned) — one developer in flight per task, so floors saw the same frozen checkout.",
+    "budget": "route.attempt.instance length_lt $entity.triple.route.task.budget.value (the attempt count vs the PER-TASK budget B = task.spec.budget, mirrored onto L_n as route.task.budget by the floors station). Partitions the count with escalate's length_gte B (no gap, no overlap): retry provably cannot fire at count ≥ B. Replaces the old constant 3 (#519 scalar .value + #568 length_lt).",
+    "attempt_count": "on_enter appends task.attempt.instance on the RUN at spawn (R3), so the count rises exactly +1 per retry and the next route sees it.",
+    "restart_safe": "SELF-EXTINGUISHING via route.attempt.routed (shared, LOOP-scoped) + length_eq 0 guard, stamped BEFORE the publish — CRITICAL: the publish is not idempotent (a re-fire duplicates the developer and breaks the one-in-flight invariant)."
+  }
+}

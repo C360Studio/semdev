@@ -1,0 +1,429 @@
+// Package submitreview is the submit_review tool (harness-measurement, task 7.3):
+// the reviewer persona Quinn's gate, run PER TASK. Quinn reviews one unit of work —
+// one projected task — adversarially (trying to refute the attempt) against its
+// immutable task.spec, and records a per-task verdict (review.verdict.<i>) — but the
+// verdict is FLOORED by that task's harness fact, not by Quinn's prose. That is the
+// whole point of gating review on measurements (G3): a false success claim cannot
+// earn an approving verdict, however confidently the change describes itself.
+//
+// The asymmetry is deliberate and structural:
+//
+//   - Quinn's inputs are the task selector (task_index) and FINDINGS — required
+//     changes it raises reviewing THAT task. A finding is an ADDITIVE constraint: it
+//     can require more, never approve past a failure. The schema takes no
+//     outcome/approve field (G3); the verdict is DERIVED here from the measured fact.
+//   - Approval requires the deterministic floor: measurement.CanApprove over the
+//     single reviewed task proves it has exactly one passing measurement, re-derived
+//     from the raw exit evidence (ignoring any stored passed). A failing or missing
+//     measurement blocks approval regardless of findings; an open finding blocks
+//     approval regardless of the measurement. approved ⟺ CanApprove([task], observed)
+//     ∧ no findings.
+//   - Findings NEVER weaken task.spec (7.3): this tool's single writer is
+//     reviewer-quinn and it stamps ONLY review.verdict.<i> — it holds no writer for
+//     task.spec, so a finding is structurally incapable of removing or relaxing a
+//     task.spec requirement (G5 single-writer).
+//
+// It fires no lifecycle transition (G2): it stamps the per-task verdict; the open_pr
+// gate is a rule that rolls up every review.verdict.* (wired with the coordinator
+// spawn rules + the clean-room verify.result at a later group). It reads evidence it
+// cannot parse as a FAILURE, never a defaulted approve (ResultsFromFacts fails closed).
+package submitreview
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/c360studio/semstreams/agentic"
+	"github.com/c360studio/semstreams/message"
+	"github.com/c360studio/semstreams/types"
+
+	"github.com/c360studio/semdev/internal/changefacts"
+	"github.com/c360studio/semdev/internal/devtask"
+	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/measurement"
+)
+
+// ToolName is the registered tool name and the reviewer's verdict handler.
+const ToolName = "submit_review"
+
+// Source is stamped on every review.verdict.<i> AND review.findings.<i> triple. It MUST
+// equal the writer declared for those namespaces in internal/vocab (G5) — a conformance
+// pin cross-checks it.
+const Source = "reviewer-quinn"
+
+// RouteMirrorSource is stamped on the route.* facts submit_review MIRRORS onto its own
+// review loop so the rule-native review route (approved / changes_requested) can fire on
+// them (design R1). It MUST equal the single writer declared for the route.* mirror
+// namespace in internal/vocab (G5). It is a SECOND, distinct Source than reviewer-quinn:
+// review.verdict/findings (the substance, on the run) is reviewer-quinn; the route mirror
+// (raw COPIES onto the loop, one logical writer route-mirror shared with check_floors) is
+// route-mirror — so neither predicate has two writers.
+const RouteMirrorSource = "route-mirror"
+
+// The route-mirror predicates submit_review stamps on ITS OWN review loop (not the run):
+// route.review.verdict is the copy of review.verdict.value, and route.attempt.instance is
+// the append-mirror of task.attempt.instance's distinct objects (review cycles share the
+// one attempt budget, R4), so the review-route rules can count the budget via length_* on
+// the loop. The budget rule MUST bind route.attempt.instance exactly (length_* resolves by
+// exact predicate), never the route.attempt. prefix.
+const (
+	RouteVerdictPredicate = "route.review.verdict"
+	RouteAttemptPredicate = "route.attempt.instance"
+	// RouteBudgetPredicate is the SINGLE-VALUED per-task attempt budget mirrored onto the
+	// REVIEW loop (adopt-per-task-routing-budgets, #568): a RAW copy of the run's projected
+	// task.spec.budget so the review retry/park routes (07b/07c) read `length_lt`/`length_gte
+	// $entity.triple.route.task.budget.value` instead of the constant 3. Stamped in the SAME
+	// ReplaceTriples pass as route.attempt.* (the D7 atomicity invariant — the routes never
+	// see the attempt count without the budget). A budget stamped only by the floors site
+	// would stall EVERY changes_requested verdict on the empty substitution, hence both sites.
+	RouteBudgetPredicate = "route.task.budget"
+)
+
+// budgetPredicate is the run's projected per-task attempt budget (task.spec.budget, writer
+// task-projector, clamped [1,5]). Composed from the SAME devtask consts the projector writes it
+// under, so a canonical-vocab rename cannot silently desync the read side (this tool already reads
+// the task.spec family via devtask.TaskSpecPrefix). The review-route mirror copies it RAW.
+const budgetPredicate = devtask.TaskSpecPrefix + devtask.FactBudget
+
+// errBudgetContract marks an absent/blank/non-canonical task.spec.budget — a projection-contract
+// violation (D7), distinct from a transient graph read fault — so Execute classifies it
+// ToolErrorInternal (a bug), while a transport ReadFacts fault keeps changefacts.ReadErrorKind's
+// classification (matching the sibling readAttemptObjects and the ReadErrorKind anti-drift contract).
+var errBudgetContract = errors.New("task.spec.budget projection-contract violation")
+
+// VerdictPredicate is the predicate this tool owns on the run entity: the reviewer's
+// current verdict (review.verdict.value). Single-task at M0 (beta.147 D1): the per-task
+// index is out of the predicate; a re-review upserts it (the graph merges replace
+// per-(subject, predicate)). The M1 multi-task future keys the task into the entity ID.
+const VerdictPredicate = "review.verdict.value"
+
+// FindingsPredicate is the predicate this tool owns for the reviewer's PROSE findings
+// (review.findings.value) — the required changes Quinn raised, joined into one scalar.
+// A changes_requested re-entry (D16) tells the fresh Amelia to re-read them off the run
+// and address them. Same single writer as the verdict (reviewer-quinn).
+const FindingsPredicate = "review.findings.value"
+
+// findingsPredicate returns the findings predicate (idx retained for call-site
+// continuity; single-task at M0 so it does not key the predicate).
+func findingsPredicate(taskIndex int) string { _ = taskIndex; return FindingsPredicate }
+
+// verdictPredicate returns the verdict predicate (idx retained for call-site continuity).
+func verdictPredicate(taskIndex int) string { _ = taskIndex; return VerdictPredicate }
+
+// The two verdicts. A rule gates open_pr on VerdictApproved (wired later).
+const (
+	VerdictApproved         = "approved"
+	VerdictChangesRequested = "changes_requested"
+)
+
+// Executor reads the run's task.spec + measurement facts, derives the floored
+// verdict, and stamps review.verdict.
+type Executor struct {
+	reader   changefacts.Reader
+	writer   *graphown.Writer
+	mirror   *graphown.Writer
+	platform types.PlatformMeta // builds the review loop's entity id for the chaining marker
+	logger   *slog.Logger
+}
+
+// New builds the submit_review executor. reader/writer/mirror may be nil for
+// schema-only registration (the tool censuses inspect ListTools without a live NATS
+// client); Execute fails loudly if they are nil. platform builds the review loop's
+// entity id for the dev.reviewed chaining marker.
+//
+// TWO writers, because submit_review stamps as two vocab Sources and ADR-056 binds a
+// client to exactly one owner: writer is reviewer-quinn (the verdict + findings, on
+// the RUN), mirror is route-mirror (the route inputs, on ITS review LOOP). They are
+// deliberately not interchangeable — the mirror's ReplaceOwned wipes route-mirror's
+// whole loop group, so sending a verdict through it, or a mirror through the
+// verdict writer, is a silent data loss the contract resolution then rejects.
+func New(reader changefacts.Reader, writer, mirror *graphown.Writer, platform types.PlatformMeta, logger *slog.Logger) *Executor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Executor{reader: reader, writer: writer, mirror: mirror, platform: platform, logger: logger}
+}
+
+type payload struct {
+	// TaskIndex is a pointer so an ABSENT argument is distinguishable from index 0
+	// (a valid task). Absent → error; a negative index → error.
+	TaskIndex *int `json:"task_index"`
+	// Findings are the required changes Quinn raises against THIS task. Absent/empty
+	// means none; each is an additive constraint that blocks this task's approval.
+	Findings []string `json:"findings"`
+}
+
+// Execute derives the review verdict from the run's harness facts and Quinn's
+// findings, and stamps review.verdict. approved requires the measurement floor
+// (CanApprove) AND no open finding; anything else is changes_requested.
+func (e *Executor) Execute(ctx context.Context, call agentic.ToolCall) (agentic.ToolResult, error) {
+	if e.reader == nil || e.writer == nil || e.mirror == nil {
+		return errResult(call, agentic.ToolErrorInternal, "submit_review: harness not fully wired (reader/writer)")
+	}
+	runEntityID, ok := call.Metadata[agentic.MetadataKeyRunEntityID].(string)
+	if !ok || runEntityID == "" {
+		return errResult(call, agentic.ToolErrorInternal, "submit_review: %s missing on the tool call — cannot target the run entity", agentic.MetadataKeyRunEntityID)
+	}
+
+	var p payload
+	raw, err := json.Marshal(call.Arguments)
+	if err != nil {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: encode arguments: %v", err)
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: decode arguments: %v", err)
+	}
+	if p.TaskIndex == nil {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: task_index is required")
+	}
+	idx := *p.TaskIndex
+	if idx < 0 {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: task_index must be non-negative, got %d", idx)
+	}
+	idxStr := strconv.Itoa(idx)
+
+	findings := nonBlank(p.Findings)
+	if dropped := len(p.Findings) - len(findings); dropped > 0 {
+		// A blank finding carries no objection and cannot block (nonBlank is safe —
+		// dropping only moves toward approval, never past the measurement floor). But
+		// surface it: a finding stripped to whitespace upstream is a would-be block
+		// that silently evaporated, worth seeing rather than swallowing.
+		e.logger.Warn("submit_review dropped blank findings",
+			slog.Int("dropped", dropped), slog.Int("kept", len(findings)), slog.Int("task_index", idx))
+	}
+
+	// The reviewed task must be a projected task — you cannot review work that was
+	// never projected. Read the task.spec.* namespace and confirm this index is in it.
+	specTriples, err := e.reader.ReadFacts(ctx, runEntityID, devtask.TaskSpecPrefix)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "submit_review: read task.spec on %s: %v", runEntityID, err)
+	}
+	if !slices.Contains(projectedTaskIDs(specTriples), idxStr) {
+		return errResult(call, agentic.ToolErrorInvalidArgs, "submit_review: task.spec.%d not on %s — nothing to review (was the change projected, and is %d a real task?)", idx, runEntityID, idx)
+	}
+
+	// Reconstruct the measurements. A fact we cannot parse fails the review CLOSED —
+	// the reviewer must not approve on evidence it cannot read.
+	measTriples, err := e.reader.ReadFacts(ctx, runEntityID, measurement.ResultPrefix)
+	if err != nil {
+		return errResult(call, changefacts.ReadErrorKind(err), "submit_review: read measurements on %s: %v", runEntityID, err)
+	}
+	observed, err := measurement.ResultsFromFacts(measTriples)
+	if err != nil {
+		return errResult(call, agentic.ToolErrorInternal, "submit_review: unparseable measurement evidence on %s: %v", runEntityID, err)
+	}
+
+	// The floor for THIS task: it has exactly one passing measurement (re-derived from
+	// raw exit evidence). Approval also requires Quinn raised no finding against it.
+	measurementPass := measurement.CanApprove([]string{idxStr}, observed)
+	approved := measurementPass && len(findings) == 0
+	verdict := VerdictChangesRequested
+	if approved {
+		verdict = VerdictApproved
+	}
+
+	if err := e.stampVerdict(ctx, runEntityID, idx, verdict, findings); err != nil {
+		return errResult(call, graphown.WriteErrorKind(err), "submit_review: stamp %s on %s: %v", verdictPredicate(idx), runEntityID, err)
+	}
+
+	e.logger.Info("submit_review recorded verdict",
+		slog.String("run_entity_id", runEntityID),
+		slog.Int("task_index", idx),
+		slog.String("verdict", verdict),
+		slog.Bool("measurement_pass", measurementPass),
+		slog.Int("findings", len(findings)))
+
+	// MIRROR the routing inputs onto THIS review loop so the rule-native review route
+	// (approved → verify / changes_requested → retry-or-park / no-verdict → park) can fire
+	// on them (design R1/R4: a rule reads only the firing entity's triples, so the run-level
+	// verdict + attempt facts are copied onto the review loop). RAW copies (never a derived
+	// route decision, G2): route.verdict (the copy of review.verdict.<i>) and route.attempt
+	// (the append-mirror of the run's task.attempt.<i> — review cycles share the one attempt
+	// budget, R4). The verdict (the substance) is written to the run FIRST; the mirror (the
+	// chaining signal the route triggers on) follows. Failure posture: a mirror error returns
+	// errResult WITHOUT StopLoop, so the loop re-runs (re-stamping idempotently) until it
+	// lands — never a silent green. A missing LoopID (unit-test-only) skips the mirror.
+	if call.LoopID == "" {
+		e.logger.Warn("submit_review: no loop_id on the tool call — skipping the route mirror; the review route will not fire",
+			slog.String("run_entity_id", runEntityID), slog.Int("task_index", idx))
+	} else {
+		loopEntityID, lerr := agentic.TryLoopExecutionEntityID(e.platform.Org, e.platform.Platform, call.LoopID)
+		if lerr != nil {
+			return errResult(call, agentic.ToolErrorInternal, "submit_review: construct review loop entity id: %v", lerr)
+		}
+		attempts, aerr := e.readAttemptObjects(ctx, runEntityID, idx)
+		if aerr != nil {
+			return errResult(call, changefacts.ReadErrorKind(aerr), "submit_review: read task.attempt for the route mirror on %s: %v", runEntityID, aerr)
+		}
+		// D7 / migrate-beta159 task 4.6 (the check_floors twin, grp3-5 review M-1): an
+		// EMPTY attempt set is a projection-contract violation — the dispatch rule
+		// appends one task.attempt.instance at spawn. The old remove list was
+		// [verdict, budget], so an empty read left a prior route.attempt.instance
+		// standing; ReplaceOwned wipes the WHOLE seven-predicate group, so it would be
+		// deleted and the review routes would read the budget as unexhausted. This site
+		// is the more reachable of the two: a mirror error returns WITHOUT StopLoop, so
+		// repeated mirror writes on one review loop are the designed path.
+		if len(attempts) == 0 {
+			return errResult(call, agentic.ToolErrorInternal, "submit_review: task.attempt.instance is EMPTY on %s — the dispatch rule appends one at spawn, so this is a projection-contract violation; mirroring now would group-wipe the prior attempt count and read as budget-unexhausted", runEntityID)
+		}
+		// D7: the per-task budget is authored + clamped [1,5] on every task, so an absent or
+		// unparseable value is a projection-contract violation, not a normal input. Fault
+		// loudly (errResult back to the loop — the tool's documented "never a silent green"
+		// posture) and stamp NOTHING on the review loop this pass: rules 07b/07c fire here, and
+		// the route substitution fails OPEN on absence ($…value→"" → length_* coerce error
+		// swallowed → neither retry nor park fires → the changes_requested verdict stalls). No
+		// route.attempt.* is stamped without route.task.budget (the D7 atomicity invariant).
+		budget, berr := e.readTaskBudget(ctx, runEntityID)
+		if berr != nil {
+			// A projection-contract violation (absent/blank/non-canonical budget) is INTERNAL — a
+			// bug, not retryable; a transport ReadFacts fault keeps its ReadErrorKind classification
+			// (transient), matching the sibling readAttemptObjects above. Either way the errResult
+			// carries no StopLoop, so the loop re-runs and faults loudly (D7 — never a silent green).
+			kind := changefacts.ReadErrorKind(berr)
+			if errors.Is(berr, errBudgetContract) {
+				kind = agentic.ToolErrorInternal
+			}
+			return errResult(call, kind, "submit_review: read task.spec.budget for the route mirror on %s: %v", runEntityID, berr)
+		}
+		now := time.Now().UTC()
+		mirror := []message.Triple{
+			{Subject: loopEntityID, Predicate: RouteVerdictPredicate, Object: verdict, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0},
+			{Subject: loopEntityID, Predicate: RouteBudgetPredicate, Object: budget, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0},
+		}
+		for _, obj := range attempts {
+			mirror = append(mirror, message.Triple{Subject: loopEntityID, Predicate: RouteAttemptPredicate, Object: obj, Source: RouteMirrorSource, Timestamp: now, Confidence: 1.0})
+		}
+		if merr := e.mirror.Replace(ctx, loopEntityID, mirror); merr != nil {
+			return errResult(call, graphown.WriteErrorKind(merr), "submit_review: stamp the route mirror on %s: %v", loopEntityID, merr)
+		}
+	}
+
+	summary, _ := json.Marshal(map[string]any{
+		"task_index":       idx,
+		"verdict":          verdict,
+		"approved":         approved,
+		"measurement_pass": measurementPass,
+		"findings":         findings,
+	})
+	return agentic.ToolResult{CallID: call.ID, Name: ToolName, Content: string(summary), StopLoop: true}, nil
+}
+
+// stampVerdict upserts review.verdict.value AND review.findings.value on the run entity
+// (replace-by-predicate, so a re-review replaces the prior verdict and findings rather than
+// appending). Single-task at M0 (beta.147 D1): the per-task index is out of the predicate;
+// taskIndex is retained for call-site continuity. The findings are Quinn's prose (joined
+// into one scalar) — model JUDGMENT the changes_requested re-entry (D16) tells the fresh
+// Amelia to re-read and address.
+func (e *Executor) stampVerdict(ctx context.Context, runEntityID string, taskIndex int, verdict string, findings []string) error {
+	now := time.Now().UTC()
+	mk := func(pred, obj string) message.Triple {
+		return message.Triple{Subject: runEntityID, Predicate: pred, Object: obj, Source: Source, Timestamp: now, Confidence: 1.0}
+	}
+	// review.findings.<i> is always stamped (empty string when Quinn raised none), so a
+	// re-review that clears prior findings does not leave a stale set readable.
+	triples := []message.Triple{
+		mk(verdictPredicate(taskIndex), verdict),
+		mk(findingsPredicate(taskIndex), strings.Join(findings, "\n")),
+	}
+	return e.writer.Replace(ctx, runEntityID, triples)
+}
+
+// readAttemptObjects reads the distinct objects of the run's task.attempt.instance counter
+// (each object is a developer-loop instance, one per attempt) so the review-route mirror
+// can append them onto the review loop and the route rules count the shared attempt budget
+// via length_* (R4: review cycles and measurement retries share the one budget). idx is
+// retained for call-site continuity (single-task at M0; the index is out of the predicate).
+func (e *Executor) readAttemptObjects(ctx context.Context, runEntityID string, idx int) ([]string, error) {
+	_ = idx
+	want := "task.attempt.instance"
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, want)
+	if err != nil {
+		return nil, err
+	}
+	var objs []string
+	for _, tr := range triples {
+		if tr.Predicate != want {
+			continue
+		}
+		if s, ok := tr.Object.(string); ok {
+			objs = append(objs, s)
+		}
+	}
+	return objs, nil
+}
+
+// readTaskBudget reads the run's projected per-task attempt budget (task.spec.budget) as a
+// RAW string for the review-route mirror. It PARSE-VALIDATES the EXACT value it will stamp —
+// strconv.Atoi on the raw string, matching the engine's coerceToInt (no trim) that the route's
+// $…value substitution feeds — but NEVER re-renders it (no re-clamp, no derived value — G3/G5).
+// A transport read fault returns the raw ReadFacts error (transient, classified by ReadErrorKind);
+// an absent/blank/non-canonical value (anything Atoi rejects, e.g. " 3 ") wraps errBudgetContract
+// (a projection-contract violation, D7) so Execute faults loudly (errResult, nothing stamped on the
+// review loop) rather than stamping a value the route fails OPEN on.
+func (e *Executor) readTaskBudget(ctx context.Context, runEntityID string) (string, error) {
+	triples, err := e.reader.ReadFacts(ctx, runEntityID, budgetPredicate)
+	if err != nil {
+		return "", err
+	}
+	for _, tr := range triples {
+		if tr.Predicate != budgetPredicate {
+			continue
+		}
+		s, _ := tr.Object.(string)
+		if s == "" {
+			return "", fmt.Errorf("%s present but empty/non-string: %w", budgetPredicate, errBudgetContract)
+		}
+		if _, perr := strconv.Atoi(s); perr != nil {
+			return "", fmt.Errorf("%s %q is not a bare integer the route can coerce: %w (%v)", budgetPredicate, s, errBudgetContract, perr)
+		}
+		return s, nil
+	}
+	return "", fmt.Errorf("%s absent — the projection station authors a clamped [1,5] budget on every task: %w", budgetPredicate, errBudgetContract)
+}
+
+// projectedTaskIDs returns the projected task IDs (matching measurement Result.TaskID)
+// present under the task.spec.* family — the set a reviewed task_index must belong to.
+// Single-task at M0 (beta.147 D1): the index is out of the predicate, so ANY task.spec
+// fact means the one task (ID "0") is projected.
+func projectedTaskIDs(triples []message.Triple) []string {
+	for _, tr := range triples {
+		if strings.HasPrefix(tr.Predicate, devtask.TaskSpecPrefix) {
+			return []string{"0"}
+		}
+	}
+	return nil
+}
+
+// nonBlank drops empty/whitespace-only findings so a stray "" cannot count as a
+// blocking constraint, and returns a non-nil slice for a clean result payload.
+func nonBlank(findings []string) []string {
+	out := make([]string, 0, len(findings))
+	for _, f := range findings {
+		if strings.TrimSpace(f) != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// writeErrKind mirrors the sibling tools: a handler-classified graph error is
+// internal/ordering, not retryable transport.
+func writeErrKind(err error) agentic.ToolErrorKind {
+	return changefacts.ReadErrorKind(err)
+}
+
+func errResult(call agentic.ToolCall, kind agentic.ToolErrorKind, format string, args ...any) (agentic.ToolResult, error) {
+	return agentic.ToolResult{
+		CallID:    call.ID,
+		Name:      ToolName,
+		Error:     fmt.Sprintf(format, args...),
+		ErrorKind: kind,
+	}, nil
+}
