@@ -1,6 +1,7 @@
 package conversationchannel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -105,6 +106,20 @@ const (
 	postLoop = "c360.semdev-001.agent.agentic-loop.execution.l4"
 )
 
+func parkPostPayload(t *testing.T, entityID string) []byte {
+	t.Helper()
+	payload, err := json.Marshal(parkPostRequest{
+		EntityID:  entityID,
+		Subject:   parkPostRequestSubject,
+		Timestamp: "2026-08-13T18:30:00.123456789Z",
+		Source:    "rule_engine",
+	})
+	if err != nil {
+		t.Fatalf("marshal park-post request: %v", err)
+	}
+	return payload
+}
+
 // TestParkPostPostsViaPort pins the carve (conversation-channel-seam 4.2): the
 // run-fired park publish's firing entity IS the run — the poster reads the park
 // message + ref and posts to the resolved THREAD via Channel.Post (ResolveThread +
@@ -122,8 +137,8 @@ func TestParkPostPostsViaPort(t *testing.T) {
 		}},
 		logger: slog.Default(),
 	}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postRun+`"}`)); err != nil {
-		t.Fatalf("handleUserResponse: %v", err)
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postRun)); err != nil {
+		t.Fatalf("handleParkPostRequest: %v", err)
 	}
 	if len(ch.posts) != 1 {
 		t.Fatalf("posts via the port = %d, want 1", len(ch.posts))
@@ -134,6 +149,59 @@ func TestParkPostPostsViaPort(t *testing.T) {
 	}
 	if !strings.Contains(got.body, "projection-station") || !strings.Contains(got.body, postRun) {
 		t.Errorf("message body must carry the park message + the run pointer, got %q", got.body)
+	}
+}
+
+// TestParkPostRejectsOffContractPayloads is the red-first wire pin for gh#952.
+// The old user.response decoder trusted only entity_id and therefore accepted a
+// framework-owned typed message or any partial JSON object by accident. The
+// semdev.park_post_request/v1 lane fails closed unless every framework-authored
+// identity field is present and exact.
+func TestParkPostRejectsOffContractPayloads(t *testing.T) {
+	base := map[string]any{
+		"entity_id": postRun,
+		"subject":   "semdev.park-post.request",
+		"timestamp": "2026-08-13T18:30:00.123456789Z",
+		"source":    "rule_engine",
+	}
+	cases := map[string]func(map[string]any){
+		"missing subject":   func(v map[string]any) { delete(v, "subject") },
+		"wrong subject":     func(v map[string]any) { v["subject"] = "user.response.r9" },
+		"missing timestamp": func(v map[string]any) { delete(v, "timestamp") },
+		"bad timestamp":     func(v map[string]any) { v["timestamp"] = "yesterday" },
+		"missing source":    func(v map[string]any) { delete(v, "source") },
+		"wrong source":      func(v map[string]any) { v["source"] = "adopter" },
+		"noncanonical id":   func(v map[string]any) { v["entity_id"] = "r9" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			wire := make(map[string]any, len(base))
+			for k, v := range base {
+				wire[k] = v
+			}
+			mutate(wire)
+			payload, err := json.Marshal(wire)
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			ch := &fakeChannel{}
+			p := &parkPoster{
+				channel: ch,
+				fetcher: &fakeFetcher{entities: map[string]*graph.EntityState{
+					postRun: entityWith(postRun, map[string]string{
+						"run.awaiting.human": "parked",
+						"run.issue.ref":      "c360studio/semdev-fixture#7",
+					}),
+				}},
+				logger: slog.Default(),
+			}
+			if err := p.handleParkPostRequest(context.Background(), payload); err != nil {
+				t.Fatalf("off-contract request must be definitively rejected/acked, got %v", err)
+			}
+			if len(ch.posts) != 0 {
+				t.Fatalf("off-contract request produced %d posts, want 0", len(ch.posts))
+			}
+		})
 	}
 }
 
@@ -152,8 +220,8 @@ func TestLoopFiredParkResolvesTheRun(t *testing.T) {
 		}},
 		logger: slog.Default(),
 	}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postLoop+`"}`)); err != nil {
-		t.Fatalf("handleUserResponse: %v", err)
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postLoop)); err != nil {
+		t.Fatalf("handleParkPostRequest: %v", err)
 	}
 	if len(ch.posts) != 1 || ch.posts[0].thread != conversation.ThreadRef("c360studio/semdev-fixture#7") {
 		t.Fatalf("posts = %+v, want the loop's run resolved via the anchor", ch.posts)
@@ -171,7 +239,7 @@ func TestRefLessParkStaysGraphOnly(t *testing.T) {
 		}},
 		logger: slog.Default(),
 	}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postRun+`"}`)); err != nil {
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postRun)); err != nil {
 		t.Fatalf("ref-less park must ack, got %v", err)
 	}
 	if len(ch.posts) != 0 {
@@ -195,7 +263,7 @@ func TestMalformedRefStaysGraphOnly(t *testing.T) {
 		}},
 		logger: slog.Default(),
 	}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postRun+`"}`)); err != nil {
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postRun)); err != nil {
 		t.Fatalf("a malformed ref must ack (graph-only skip), got %v", err)
 	}
 	if len(ch.posts) != 0 {
@@ -208,8 +276,39 @@ func TestMalformedRefStaysGraphOnly(t *testing.T) {
 // loop (grp2-review carry-forward a).
 func TestNoChannelSkipsQuietly(t *testing.T) {
 	p := &parkPoster{channel: nil, fetcher: &fakeFetcher{}, logger: slog.Default()}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"x"}`)); err != nil {
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postRun)); err != nil {
 		t.Fatalf("no-channel must ack, got %v", err)
+	}
+}
+
+// TestNoChannelStillValidatesTheRawContract pins the ordering at the optional
+// adapter seam: graph-only operation may skip the external effect, but it must
+// not bypass validation and silently legitimize malformed or misrouted traffic.
+func TestNoChannelStillValidatesTheRawContract(t *testing.T) {
+	valid := parkPostPayload(t, postRun)
+	cases := map[string][]byte{
+		"malformed JSON":         []byte(`{"entity_id":`),
+		"unknown field":          []byte(`{"entity_id":"` + postRun + `","subject":"semdev.park-post.request","timestamp":"2026-08-13T18:30:00Z","source":"rule_engine","surprise":true}`),
+		"trailing JSON value":    append(append([]byte{}, valid...), []byte(` {}`)...),
+		"wrong entity identity":  []byte(`{"entity_id":"r9","subject":"semdev.park-post.request","timestamp":"2026-08-13T18:30:00Z","source":"rule_engine"}`),
+		"wrong subject identity": []byte(`{"entity_id":"` + postRun + `","subject":"user.response.r9","timestamp":"2026-08-13T18:30:00Z","source":"rule_engine"}`),
+		"wrong source identity":  []byte(`{"entity_id":"` + postRun + `","subject":"semdev.park-post.request","timestamp":"2026-08-13T18:30:00Z","source":"adopter"}`),
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+			p := &parkPoster{channel: nil, fetcher: &fakeFetcher{}, logger: logger}
+			if err := p.handleParkPostRequest(context.Background(), payload); err != nil {
+				t.Fatalf("invalid request must be definitively rejected/acked, got %v", err)
+			}
+			if !strings.Contains(logs.String(), "malformed semdev.park_post_request/v1") {
+				t.Fatalf("no-channel handler bypassed strict decoding; log = %q", logs.String())
+			}
+			if strings.Contains(logs.String(), "no conversation channel") {
+				t.Fatalf("off-contract request reached graph-only adapter branch; log = %q", logs.String())
+			}
+		})
 	}
 }
 
@@ -227,7 +326,7 @@ func TestPostingFaultRedelivers(t *testing.T) {
 		}},
 		logger: slog.Default(),
 	}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postRun+`"}`)); err == nil {
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postRun)); err == nil {
 		t.Fatal("a posting fault must redeliver (bounded), not silently drop the human's notification")
 	}
 }
@@ -243,7 +342,7 @@ func TestParkRacePublishBeforeFactRedelivers(t *testing.T) {
 		}},
 		logger: slog.Default(),
 	}
-	if err := p.handleUserResponse(context.Background(), []byte(`{"entity_id":"`+postRun+`"}`)); err == nil {
+	if err := p.handleParkPostRequest(context.Background(), parkPostPayload(t, postRun)); err == nil {
 		t.Fatal("publish-before-park must redeliver until run.awaiting.human exists")
 	}
 }

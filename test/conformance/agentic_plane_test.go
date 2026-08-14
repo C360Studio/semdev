@@ -35,7 +35,7 @@ var wantAgenticComponents = map[string]string{
 var wantAgenticStreams = map[string][]string{
 	"AGENT": {"agent.>"},
 	"TOOL":  {"tool.execute.>", "tool.result.>"},
-	"USER":  {"user.>"},
+	"USER":  {"user.>", "semdev.park-post.request"},
 }
 
 // TestBootstrapDeclaresAgenticExecutionPlane — the bootstrap config declares all

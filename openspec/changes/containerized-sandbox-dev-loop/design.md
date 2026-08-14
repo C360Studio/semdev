@@ -399,14 +399,16 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   removes `run.awaiting_human`" contract. Unreachable now (resume path unbuilt).
 - **[Park PATH is offline-pinned only, not e2e-exercised]** → the green journey takes the
   READY path; `sandbox/02`'s `run.awaiting_human`=`$entity.triple.sandbox.blocked` on the run
-  entity and the `user.response.$entity.instance` bus post are structurally identical to the
+  entity and the exact `semdev.park-post.request` JetStream request are structurally
+  identical to the
   proven `run-lifecycle/03` shapes (so they resolve), and each half is unit/structurally
   pinned (the tool's six `block()` tests + `TestSandboxParkOnUnprovable`), but the
   tool-blocks→rule-parks INTEGRATION has no end-to-end proof. Add a blocked-fixture park
   journey (docker-absent or a non-buildable declared image) when the resume handler lands.
 - **[The "one logical park writer, N realizations" invariant lives only in prose]** → nothing
   offline stops a future THIRD writer of `run.awaiting_human` that omits the `length_eq 0`
-  fire-once guard (which would re-post to the user bus every re-scan). A naive "every writer
+  fire-once guard (which would re-publish to the semdev park-post request lane every
+  re-scan). A naive "every writer
   must guard" pin false-positives on the intentionally-unguarded decision-driven
   `run-lifecycle/03`, so this needs a targeted pin (guard required unless the trigger is a
   coordinator decision), not a blanket one. Known soft spot.
@@ -467,7 +469,8 @@ semstreams ask filed — never a silent Go reconciler (the B3 disease).
   on budget exhaustion / fail-closed, joining run-lifecycle/03 (ask_human) and sandbox/02 (unprovable sandbox) as
   the single logical park writer realized by three rule files. It fires on the gate LOOP (not the run), so its
   self-extinguish guard MUST be loop-scoped (`dev.routed`), not `run.awaiting_human length_eq 0` — a run-scoped
-  guard would read absent on the loop every rescan and re-post to the user bus. (sandbox/02 fires on the run, so
+  guard would read absent on the loop every rescan and re-publish to the semdev park-post request lane.
+  (sandbox/02 fires on the run, so
   it correctly uses the run-scoped guard; the two are not interchangeable.)
 - **[The retry path is offline-only; station 13 is the advance bridge] (7D carry-forward, semstreams-reviewer MEDIUM)** →
   the live journey proves the gate ADVANCES a clean attempt; retry (re-dispatch → re-measure → re-gate) and escalate

@@ -23,6 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/c360studio/semstreams/message"
 	agentictools "github.com/c360studio/semstreams/processor/agentic-tools"
 
@@ -75,6 +78,13 @@ func TestBridgeProofStationFailureParks(t *testing.T) {
 	runEntityID := requireRunAnchor(ctx, t, taskID)
 	requireChangeAuthored(ctx, t, runEntityID, journeyChangeSlug)
 	requireRunPhase(ctx, t, runEntityID, "awaiting_approval")
+
+	// Hold the real forge POST before the failure is triggered. The recorder logs
+	// request arrival before blocking it, giving the test an explicit barrier at
+	// which the JetStream delivery must still be ACK-pending. Releasing the double
+	// is the only event that can let Channel.Post succeed.
+	releasePost := journeyForgeDouble.HoldNextCreateComment()
+	defer releasePost()
 	approveChange(ctx, t, rt, runEntityID)
 	requireRunPhase(ctx, t, runEntityID, "executing")
 	t.Logf("park station 1: change authored WITHOUT its test in target_files, validated, approved — projection dispatch fires next")
@@ -97,6 +107,43 @@ func TestBridgeProofStationFailureParks(t *testing.T) {
 	requireTriplePresent(ctx, t, runEntityID, "station.park.routed",
 		"the run-fired park rule (run-lifecycle/05) must stamp its one-shot marker alongside the park")
 	t.Logf("park station 2: run parked — run.awaiting.human names projection-station and the includes-test refusal (message %q)", parkMsg)
+
+	// REAL PARK-POST DELIVERY + ACK ORDERING. The exact request has reached the
+	// conversation-channel consumer and the forge POST is deliberately blocked.
+	// The message must remain pending until that side effect succeeds — ACKing at
+	// decode/start would lose the human notification on a crash or transport fault.
+	requireEventually(t, 30*time.Second, func() bool {
+		for _, req := range journeyForgeDouble.Requests() {
+			if req.Kind == "create_comment" {
+				return true
+			}
+		}
+		return false
+	}, "park-post request never reached the real Channel.Post forge adapter")
+	if got := parkPostConsumerAckPending(ctx, t); got < 1 {
+		t.Fatalf("park-post consumer NumAckPending = %d while Channel.Post is blocked, want >=1 — the request ACKed before its external side effect succeeded", got)
+	}
+	for _, comment := range journeyForgeDouble.Comments() {
+		if strings.Contains(comment.Body, "semdev parked this run") {
+			t.Fatalf("forge double recorded the park comment before its explicit release: %q", comment.Body)
+		}
+	}
+
+	releasePost()
+	requireEventually(t, 30*time.Second, func() bool {
+		for _, comment := range journeyForgeDouble.Comments() {
+			if comment.IssueNumber == journeyIssueNumber &&
+				strings.Contains(comment.Body, "semdev parked this run") &&
+				strings.Contains(comment.Body, "projection-station") {
+				return true
+			}
+		}
+		return false
+	}, "the exact durable park-post request did not produce the real thread comment after the forge barrier released")
+	requireEventually(t, 30*time.Second, func() bool {
+		return parkPostConsumerAckPending(ctx, t) == 0
+	}, "park-post request stayed ACK-pending after Channel.Post succeeded")
+	t.Log("park station 2b: exact semdev.park-post.request stayed ACK-pending while the forge POST was blocked, then ACKed after the real comment landed")
 
 	// NO FALSE GREEN (the exhaustion journeys' pattern): the refused projection
 	// stamped nothing, so nothing downstream may exist. requireRunParked already
@@ -121,6 +168,28 @@ func TestBridgeProofStationFailureParks(t *testing.T) {
 	if got := mock.RequestCount(); got != 3 {
 		t.Fatalf("expected exactly 3 model turns (issue_intake decide + create_change decide + create_change), got %d — a projection-refused run must consume nothing further", got)
 	}
+}
+
+func parkPostConsumerAckPending(ctx context.Context, t *testing.T) int {
+	t.Helper()
+	nc, err := nats.Connect(journeyNATSURL())
+	if err != nil {
+		t.Fatalf("connect for park-post consumer info: %v", err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("JetStream context for park-post consumer info: %v", err)
+	}
+	consumer, err := js.Consumer(ctx, "USER", "conversation-channel-park_post_requests")
+	if err != nil {
+		t.Fatalf("lookup durable park-post consumer: %v", err)
+	}
+	info, err := consumer.Info(ctx)
+	if err != nil {
+		t.Fatalf("read durable park-post consumer info: %v", err)
+	}
+	return info.NumAckPending
 }
 
 // TestPinGraphAddTripleAppendsDuplicatePredicate settles the engine add_triple

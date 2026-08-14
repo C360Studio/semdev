@@ -254,8 +254,9 @@ func TestTripwire569TerminalReasonFact(t *testing.T) {
 // its last eval. There is no upstream e2e proving on_recovery fires through the wired
 // path across a real restart. So the restart-recovery park + its docker station (design
 // R10, task 10.4) remain a FOLLOW-UP: build the run-lifecycle recovery-park rule
-// (on_enter empty, on_recovery stamps run.awaiting_human + posts user.response, guarded
-// on phase==executing / pr.ref absent / awaiting_human absent) + its shape pin + the
+// (on_enter empty, on_recovery stamps run.awaiting_human + publishes exactly one
+// semdev.park-post.request, guarded on phase==executing / pr.ref absent /
+// awaiting_human absent) + its shape pin + the
 // sanctioned-park-writer entry, and FIRST prove on a real restart that the recovery fork
 // actually fires past the stale-revision guard.
 //

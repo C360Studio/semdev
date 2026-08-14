@@ -32,7 +32,10 @@
 - [x] 5.1 Vocab (G9): sandbox readiness / attestation predicates (`sandbox.provisioned` rule-owned marker; `sandbox.ready`/`.blocked`/`.attestation.*` harness-owned — split so no predicate has two writers), capability `sandbox`, docs row (G10), G5 writer pin. The in-sandbox `task.attempt` is the existing dev-loop predicate (lands live in g7)
 - [x] 5.2 Provisioning rule (`sandbox/01-provision`): on an approved, projected run, forces provision_sandbox via run_scope=inherit to stand up the sandbox + cold-prove → stamp readiness/attestation; SELF-EXTINGUISHING (fired-once `sandbox.provisioned` marker stamped before the publish + `length_eq 0` absence guard); pinned by `TestSandboxProvisionIsSelfExtinguishing` (SB7)
 - [x] 5.3 Readiness gate: the dev-loop-proceed rule (`dev-from-task/02`) is gated on `sandbox.ready eq true`, so the dev loop proceeds only on a proven sandbox-scope tier; an unprovable sandbox stamps `sandbox.blocked` (never `sandbox.ready`) and parks; pinned by `TestDevRewakeGatedOnSandboxReadiness` (the dedicated dispatch-developer gate moves here at g7); an operator-ci/lab-only claim is deferred toward the operator, never gated in-sandbox (SB5)
-- [x] 5.4 Fail-closed park rule (`sandbox/02-park-unprovable`): absent docker / failed provision / missing secret / deferred-only tier → `sandbox.blocked` → park toward human (`run.awaiting_human` + user-response bus), no lifecycle transition (G2); no `verify.result`/"verified" fact over an unproven sandbox (the readiness gate holds the loop); pinned by `TestSandboxParkOnUnprovable` (SB5)
+- [x] 5.4 Fail-closed park rule (`sandbox/02-park-unprovable`): absent docker / failed provision / missing secret /
+      deferred-only tier → `sandbox.blocked` → park toward human (`run.awaiting_human` + exact
+      `semdev.park-post.request` publish), no lifecycle transition (G2); no `verify.result`/"verified" fact over an
+      unproven sandbox (the readiness gate holds the loop); pinned by `TestSandboxParkOnUnprovable` (SB5)
 
 ## 6. apply_patch (the developer authors)
 

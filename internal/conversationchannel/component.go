@@ -9,7 +9,7 @@
 //     receiver still flattens BOTH event types) drives the change-approval gate.
 //     Each comment is normalized to a neutral Message by the GitHub Channel impl,
 //     so the approval logic never sees a githubwebhook.CommentEvent.
-//   - PARK-POST: a durable consumer on user.response.> (the USER stream) posts a
+//   - PARK-POST: a durable consumer on semdev.park-post.request (the USER stream) posts a
 //     parked run's run.awaiting.human message to its thread via Channel.Post.
 //
 // Both lanes go through the Channel port; issue-intake keeps the code-host issue
@@ -57,7 +57,7 @@ const GithubStreamName = "GITHUB"
 // for the forge client that posts + checks permissions. Secrets travel by ENV NAME
 // only, never by value.
 type ComponentConfig struct {
-	Ports *component.PortConfig `json:"ports,omitempty" schema:"type:ports,description:The github.event.comment consumer (GITHUB stream) and the user.response consumer (USER stream).,category:basic"`
+	Ports *component.PortConfig `json:"ports,omitempty" schema:"type:ports,description:The github.event.comment consumer (GITHUB stream) and exact semdev park-post request consumer (USER stream).,category:basic"`
 
 	// Repo binds the lane to one "owner/name"; comments for any other repo are
 	// skipped before the gate (defense in depth over the webhook's own scoping).
@@ -129,7 +129,7 @@ func (c *ComponentConfig) pollInterval() time.Duration {
 // constitution bars).
 func (c *ComponentConfig) Validate() error {
 	if c.Ports == nil || len(c.Ports.Inputs) == 0 {
-		return errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "Validate", "ports configuration with the comment + user.response inputs is required")
+		return errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "Validate", "ports configuration with the comment + park-post request inputs is required")
 	}
 	// A non-positive or unparseable poll interval must fail LOUD, not silently
 	// become a tight ListComments loop (review M4). applyConfigDefaults has already
@@ -162,11 +162,15 @@ func DefaultPorts() *component.PortConfig {
 				Subjects:   []string{admission.SubjectComment},
 			},
 		}, {
-			Name:        "user_responses",
-			Description: "The park rules' user.response publishes — posted to the thread via the Channel port.",
+			Name:        "park_post_requests",
+			Required:    true,
+			Description: "The park rules' exact product-owned requests — posted to the thread via the Channel port.",
 			Config: component.JetStreamPort{
 				StreamName: "USER",
-				Subjects:   []string{UserResponseSubject},
+				Subjects:   []string{parkPostRequestSubject},
+				Interface: &component.InterfaceContract{
+					Type: parkPostRequestInterfaceType, Version: parkPostRequestInterfaceVersion,
+				},
 			},
 		}, {
 			Name:        "user_notes",
@@ -393,7 +397,7 @@ func (c *Component) Start(ctx context.Context) error {
 // activeConsumerPorts returns the input ports Start wires as durable consumers. In
 // POLL mode it EXCLUDES the webhook comment lane (SubjectComment) — the poller owns
 // inbound comments, so a comment is never double-processed (the XOR, B-1). The
-// park-post lane (user.response) runs in BOTH modes (it is the outbound park lane,
+// park-post request lane runs in BOTH modes (it is the outbound park lane,
 // orthogonal to the inbound comment transport).
 func (c *Component) activeConsumerPorts() []component.PortDefinition {
 	pollMode := c.config.pollEnabled()
@@ -494,8 +498,8 @@ func (c *Component) handleEvent(ctx context.Context, subject string, payload []b
 		return c.approv.handleCommentEvent(ctx, payload)
 	case subject == ApplyDispatchSubject:
 		return c.apply.handleApplyDispatch(ctx, payload)
-	case strings.HasPrefix(subject, "user.response."):
-		return c.parkpost.handleUserResponse(ctx, payload)
+	case subject == parkPostRequestSubject:
+		return c.parkpost.handleParkPostRequest(ctx, payload)
 	case strings.HasPrefix(subject, "user.note."):
 		return c.parkpost.handleUserNote(ctx, payload)
 	default:

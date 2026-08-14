@@ -1,6 +1,6 @@
 {
   "_comment": "semdev bootstrap config (M0). Brings up the shared runtime substrate: the service manager, the graph fact-store (graph-ingest/graph-query), the rule engine (run-lifecycle pack), AND the agentic EXECUTION plane (agentic-tools/agentic-loop/agentic-model/agentic-dispatch over the AGENT/TOOL/USER JetStream streams), with the ExecutorRegistry advertising semdev tools live. The model endpoint is the deterministic mock (model_registry.endpoints.mock) so a boot spends zero paid tokens; the g11 journey overrides its url to point at the in-process internal/mockllm loopback and drives the arc end-to-end. Assembly of the whole plane is health-proven by the boot smoke test (internal/boot/runtime_integration_test.go) and structurally pinned offline (test/conformance/agentic_plane_test.go). The M0 front door is the intake adapter publishing a coordinator agentic.TaskMessage to agent.task.coordinator (arriving in group 5); agentic-dispatch is present for the completion/reply path and semteams parity. The default sim input is disabled (no semdev factory). rules_files are repo-relative (resolved to absolute against this file's dir by boot.resolveRulePackPaths, CWD-independent). VERSION DISCIPLINE: the framework stores this config in a versioned NATS KV and, on boot, IGNORES the file when its version equals the KV version (it syncs from KV) \u2014 so BUMP \"version\" on every content change, or boot against a fresh KV (task nats:reset / test:integration), or your edits silently do not take effect. \u26a0 TWO INVARIANTS, both load-bearing and both pinned by TestShippedConfigVersionsAreParseableSemver. (1) PLAIN SEMVER ONLY (MAJOR.MINOR.PATCH, digits): config.CompareVersions strconv.Atoi's each segment, so a suffixed value fails to parse, the manager treats the error as \"sync from KV\", and this file silently loses every boot. (2) THE MOCK CONFIG'S VERSION MUST STAY STRICTLY GREATER THAN THE LIVE CONFIG'S. Both files share ONE KV entry \u2014 the bucket name (\"semstreams_config\") and key (\"version\") are hardcoded globals, not platform-derived \u2014 and both declare the IDENTICAL platform identity (c360/semdev-bootstrap/development), so the framework's gh#459 cross-app detach guard cannot fire and VERSION ALONE decides which file wins. PushToKV writes model_registry, so if the live config could ever win, a subsequent mock-config boot would adopt gemini endpoints and the free ladder would spend real tokens behind a single WARN line. Keeping mock > live makes every stale-KV race resolve toward the FREE config; the live lane loads via its mandatory `task nats:reset`. A distinct platform.id for the live config is the framework's sanctioned isolation and is the stronger fix, but it changes entity-ID prefixes (the runbook's sidecar queries grep them), so it is a deliberate follow-up. | service-manager http_port: http_port moved OFF the framework default 8080: a co-resident stack publishing 8080 (observed: the semsource docker stack) makes the registry bind fail, and that bind failure correlated with a JetStream consumer-not-active storm wedging e2e runs (adopt-reason-aware-escalate tasks 7.4; causality unproven \u2014 if the wedge ever recurs WITHOUT the bind error, the storm was independent). 1xxxx keeps this machine's remap convention (cf. semsource NATS at 14222/18222). NOTE the framework coerces http_port 0 back to 8080 (ConfigureFromServices), so an ephemeral port is not expressible without an upstream ask.",
-  "version": "0.32.1",
+  "version": "0.33.1",
   "platform": {
     "org": "c360",
     "id": "semdev-bootstrap",
@@ -52,7 +52,8 @@
     },
     "USER": {
       "subjects": [
-        "user.>"
+        "user.>",
+        "semdev.park-post.request"
       ],
       "storage": "file",
       "max_age": "1h",
@@ -197,6 +198,50 @@
       "name": "rule-processor",
       "enabled": true,
       "config": {
+        "ports": {
+          "inputs": [
+            {
+              "name": "entity_states",
+              "required": true,
+              "description": "Watch entity state changes from ENTITY_STATES KV bucket.",
+              "config": {
+                "kind": "kv-watch",
+                "bucket": "ENTITY_STATES"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_mutations",
+              "required": true,
+              "description": "Rule-authored graph fact mutations.",
+              "config": {
+                "kind": "nats-request",
+                "subject": "graph.mutation.>",
+                "interface": {
+                  "type": "semstreams.graph.mutation",
+                  "version": "v1"
+                }
+              }
+            },
+            {
+              "name": "park_post_requests",
+              "required": true,
+              "description": "Exact JetStream request to surface a durable park fact on the bound human thread.",
+              "config": {
+                "kind": "jetstream",
+                "stream_name": "USER",
+                "subjects": [
+                  "semdev.park-post.request"
+                ],
+                "interface": {
+                  "type": "semdev.park_post_request",
+                  "version": "v1"
+                }
+              }
+            }
+          ]
+        },
         "entity_watch_buckets": {
           "ENTITY_STATES": [
             "*.*.*.*.*.*"
@@ -300,7 +345,7 @@
       "name": "conversation-channel",
       "enabled": true,
       "config": {
-        "_comment": "The human conversation lane (conversation-channel-seam): the /semdev approve comment consumer (github.event.comment off the same webhook-fed GITHUB stream) + the park-post consumer (user.response.>). DEFAULT FAIL-CLOSED: no token env => allowlist-only approval (empty allowlist rejects every actor) and park messages stay graph-only (no channel). PAIRED-INVARIANT (review M1): allowlist + repo + opt_in_command MUST match issue-intake's \u2014 the carve split these knobs across two components. If issue-intake admits an actor but this component's allowlist omits them (allowlist-only mode), the run mints, parks at the approval gate, and the human's /semdev approve is rejected here => the run parks FOREVER. Set repo + allowlist (or GITHUB_TOKEN via the dotenv lane) identically on BOTH components.",
+        "_comment": "The human conversation lane (conversation-channel-seam): the /semdev approve comment consumer (github.event.comment off the same webhook-fed GITHUB stream) + the exact JetStream park-post request consumer (semdev.park-post.request). DEFAULT FAIL-CLOSED: no token env => allowlist-only approval (empty allowlist rejects every actor) and park messages stay graph-only (no channel). PAIRED-INVARIANT (review M1): allowlist + repo + opt_in_command MUST match issue-intake's \u2014 the carve split these knobs across two components. If issue-intake admits an actor but this component's allowlist omits them (allowlist-only mode), the run mints, parks at the approval gate, and the human's /semdev approve is rejected here => the run parks FOREVER. Set repo + allowlist (or GITHUB_TOKEN via the dotenv lane) identically on BOTH components.",
         "ports": {
           "inputs": [
             {
@@ -316,14 +361,19 @@
               }
             },
             {
-              "name": "user_responses",
-              "description": "Park-lane publishes posted to the thread via the Channel port (conversation-channel-seam).",
+              "name": "park_post_requests",
+              "required": true,
+              "description": "Exact product-owned park requests posted to the thread via the Channel port (conversation-channel-seam).",
               "config": {
                 "kind": "jetstream",
                 "stream_name": "USER",
                 "subjects": [
-                  "user.response.>"
-                ]
+                  "semdev.park-post.request"
+                ],
+                "interface": {
+                  "type": "semdev.park_post_request",
+                  "version": "v1"
+                }
               }
             },
             {

@@ -104,13 +104,20 @@ Template:
   channel-neutral `Channel` port so a second channel composes without touching
   the arc: it owns the comment-approval consumer (github.event.comment → neutral
   Message → `admission.Authorize` → the stand-in `run.change.decision` fact the
-  resume rule reads) and the park-post consumer (user.response.> → `Channel.Post`).
+  resume rule reads) and the park-post consumer (the exact durable
+  `semdev.park-post.request`, raw `semdev.park_post_request`/`v1` →
+  `Channel.Post`). The request is JetStream because it is one-worker,
+  non-replay-after-ACK, side-effecting work; it is not a fact or a typed
+  `agentic.UserResponse`. The handler ACKs only after the post succeeds (or a
+  declared permanent graph-only outcome), with bounded redelivery on transient
+  faults. This is the fresh-state ADR-093/#952 cut: no `user.response.*` alias,
+  bridge, dual subscription, or union decoder.
   It shares the `admission` decision + resolver core with issue-intake (a pure
   reference, not a second writer — G5), fires no lifecycle transition (G2 — the
   resume rule owns the transition), and stamps only what the human's authorized
   command derived (G3).
 - **Registry entry:** `conversation-channel` (`component`)
-- **Change:** conversation-channel-seam
+- **Change:** conversation-channel-seam; updated by migrate-park-post-contract
 
 ## create-change-author-tool
 
