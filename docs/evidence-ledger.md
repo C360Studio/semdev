@@ -196,6 +196,47 @@ disposable target (`C360Studio/semdev-test`).
 
 ## Framework migrations
 
+### 2026-08-13 — prepare ADR-093 park-post contract cutover   [kind: migration-preflight]
+
+**Status: OFFLINE + FOCUSED REAL-DOCKER E2E GREEN on beta.160; upstream tag
+adoption intentionally pending. No paid tokens.** Semdev's half of SemStreams
+#952 is prepared without changing `go.mod`: all nine park rules now emit exact
+JetStream request `semdev.park-post.request`; both shipped configs declare the
+USER capture, the rule output, and the conversation-channel durable input under
+raw interface `semdev.park_post_request`/`v1`. `user.response.>` is no longer a
+park alias. Fresh-state cut: no bridge, dual publish/subscription, union decoder,
+or retained-message conversion.
+
+| Evidence | Result |
+|---|---|
+| RED-first `go test ./test/conformance ./internal/conversationchannel` | expected failures named both missing ports/stream capture, all nine legacy rule subjects, and the old decoder accepting missing/wrong subject, timestamp, source, and noncanonical IDs |
+| Review correction mutation: temporary tenth `run.awaiting.human` writer on `user.response.$entity.instance` | expected focused conformance failure named the new rule, path, wrong subject, and exact required subject; temporary file removed; source/backup SHA-256 both `ddee80b58996160a6e401757d18a68a0179d4cf38607bb7f0f10255f8a31e165` and `cmp` green |
+| Phase/taxonomy correction mutations | expected focused failures for an `on_enter` writer whose exact publish was moved to `on_exit`, an `update_triple` writer on the legacy subject, and a non-empty `reconcile_predicates` writer on the legacy subject; all three temporary rules removed; source/backup SHA-256 both `eb5aa40b550c19926046cb4dc24d30148524a611970c9734409115b1d1c035c1`, `cmp` green, and no tripwire files remain |
+| Review correction no-channel decoder pins | malformed JSON, unknown fields, trailing JSON values, and wrong entity/subject/source identity are rejected by strict v1 decoding before graph-only ACK |
+| `go test ./test/conformance ./internal/conversationchannel ./internal/boot` | green |
+| `task check` | green: build, vet, gofmt, revive, and the full `go test -race ./...` suite |
+| `openspec validate --all --strict --json` | 16/16 valid |
+| `SEMDEV_NATS_PORT=34222 SEMDEV_NATS_MONITOR_PORT=38222 SEMSTREAMS_NATS_URLS=nats://localhost:34222 go test -race -tags=e2e -run '^TestBridgeProofStationFailureParks$' -count=1 -v ./test/e2e` | **PASS** (12.48s test / 14.006s package) on fresh isolated NATS; default 24222 was deliberately not disturbed because the running SemBoids demo owned it |
+
+The E2E proof uses the protocol-faithful forge double's explicit POST barrier,
+not a sleep: request arrival is observed, the named durable consumer reports
+`NumAckPending >= 1` while `Channel.Post` is blocked, then the barrier releases,
+the real issue comment lands with the projection refusal, and `NumAckPending`
+reaches zero. This directly proves ACK-after-side-effect. The journey client now
+honors the runtime's existing `SEMSTREAMS_NATS_URLS` override so the documented
+coexistence path actually isolates all test-side clients too.
+
+The post-review census no longer encodes a nine-ID allowlist. It evaluates each
+rule phase independently and covers add, update, and non-empty reconcile
+authoring of `run.awaiting.human`; a publish in another phase cannot satisfy the
+contract. Active/future rule and OpenSpec guidance now names the exact semdev
+park-post lane; historical archived evidence remains unchanged.
+
+**Not claimed:** this is not adoption evidence for the breaking ADR-093 tag.
+`go.mod` remains on beta.160 until that tag exists. The final lockstep bump,
+clean-room/full gates, adversarial review, sync, and archive remain open in
+`migrate-park-post-contract`.
+
 ### 2026-08-12 — semstreams beta.159 → beta.160 (ADR-091 ownership removal — the final pre-v1 breaking wave)   [kind: migration]
 
 **Status: OFFLINE + DOCKER GREEN, both reviewers APPROVE 0B/0H. No paid

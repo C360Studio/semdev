@@ -10,7 +10,7 @@ import (
 // TestPollConfigXORsTheWebhookConsumer pins B-1: in poll mode the component wires
 // the POLLER for inbound comments and SKIPS the webhook comment_events consumer (a
 // comment is never double-processed); in webhook mode the comment consumer runs. The
-// park-post consumer (user.response) runs in BOTH modes.
+// exact park-post request consumer runs in BOTH modes.
 func TestPollConfigXORsTheWebhookConsumer(t *testing.T) {
 	hasSubject := func(ports []struct {
 		name, subject string
@@ -37,8 +37,8 @@ func TestPollConfigXORsTheWebhookConsumer(t *testing.T) {
 	if !hasSubject(wPorts, admission.SubjectComment) {
 		t.Errorf("webhook mode must wire the %q comment consumer, got %v", admission.SubjectComment, wPorts)
 	}
-	if !hasSubject(wPorts, UserResponseSubject) {
-		t.Errorf("webhook mode must wire the park-post %q consumer, got %v", UserResponseSubject, wPorts)
+	if !hasSubject(wPorts, parkPostRequestSubject) {
+		t.Errorf("webhook mode must wire the park-post %q consumer, got %v", parkPostRequestSubject, wPorts)
 	}
 
 	// Poll mode: the comment consumer is SKIPPED (the poller owns it), the park
@@ -48,8 +48,8 @@ func TestPollConfigXORsTheWebhookConsumer(t *testing.T) {
 	if hasSubject(pPorts, admission.SubjectComment) {
 		t.Errorf("poll mode must SKIP the webhook %q consumer (XOR); got %v", admission.SubjectComment, pPorts)
 	}
-	if !hasSubject(pPorts, UserResponseSubject) {
-		t.Errorf("poll mode must still wire the park-post %q consumer, got %v", UserResponseSubject, pPorts)
+	if !hasSubject(pPorts, parkPostRequestSubject) {
+		t.Errorf("poll mode must still wire the park-post %q consumer, got %v", parkPostRequestSubject, pPorts)
 	}
 }
 

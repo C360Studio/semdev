@@ -76,8 +76,7 @@ type ruleCondition struct {
 	Required bool   `json:"required"`
 }
 
-// ruleAction is one action in a rule's on_enter/on_exit (union of the fields the
-// pins inspect).
+// ruleAction is one action in any rule phase (union of the fields the pins inspect).
 type ruleAction struct {
 	Type string `json:"type"`
 	// MaxIterations mirrors the engine's per-action firing cap: nil/omitted →
@@ -112,6 +111,8 @@ type ruleFile struct {
 	Logic      string          `json:"logic"`
 	OnEnter    []ruleAction    `json:"on_enter"`
 	OnExit     []ruleAction    `json:"on_exit"`
+	WhileTrue  []ruleAction    `json:"while_true"`
+	OnRecovery []ruleAction    `json:"on_recovery"`
 }
 
 // ruleEntity is the rule's entity-state trigger scope (per-rule entity.pattern,

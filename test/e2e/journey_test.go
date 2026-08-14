@@ -65,7 +65,10 @@ import (
 // journeyIssueRef is the host-neutral issue ref this journey admits. It is
 // distinctive so the mock can key its scripted decide turn on it as a substring
 // of the coordinator prompt (intake.CoordinatorTask always embeds the ref).
-const journeyIssueRef = "c360studio/semdev-journey#1"
+const (
+	journeyIssueRef    = "c360studio/semdev-journey#1"
+	journeyIssueNumber = 1
+)
 
 // journeyDecideAction is the action the mock's scripted decide returns — the
 // terminal a coordinator picks for a newly admitted issue with no run yet.
@@ -1024,8 +1027,9 @@ const (
 
 // injectJourneyForge stands up the per-test delivery target — a forge double
 // (API shapes) + a bare git repository (a REAL push target) — and patches the
-// delivery-station's forge config in the journey bootstrap. The token env is
-// set per-test: the client requires a non-empty token; the double ignores it.
+// delivery-station's forge config and conversation-channel's outbound posting
+// config in the journey bootstrap. The token env is set per-test: the clients
+// require a non-empty token; the double ignores it.
 func injectJourneyForge(t *testing.T, configPath string) string {
 	t.Helper()
 
@@ -1056,6 +1060,9 @@ func injectJourneyForge(t *testing.T, configPath string) string {
 		"api_base":    double.URL(),
 		"token_env":   "SEMDEV_JOURNEY_FORGE_TOKEN",
 	}
+	conversationCfg := mustMap(t, mustMap(t, mustMap(t, cfg, "components"), "conversation-channel"), "config")
+	conversationCfg["api_base"] = double.URL()
+	conversationCfg["token_env"] = "SEMDEV_JOURNEY_FORGE_TOKEN"
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatalf("re-encode journey config: %v", err)
@@ -2004,7 +2011,7 @@ func tripleString(e graph.EntityState, predicate string) string {
 // wake and scanning the fact-store.
 func connectFrontDoor(ctx context.Context, t *testing.T) *natsclient.Client {
 	t.Helper()
-	client, err := natsclient.NewClient("nats://localhost:24222")
+	client, err := natsclient.NewClient(journeyNATSURL())
 	if err != nil {
 		t.Fatalf("NATS client: %v", err)
 	}
@@ -2015,6 +2022,20 @@ func connectFrontDoor(ctx context.Context, t *testing.T) *natsclient.Client {
 		t.Fatalf("NATS wait for connection: %v", err)
 	}
 	return client
+}
+
+// journeyNATSURL mirrors boot's existing SEMSTREAMS_NATS_URLS override for
+// test-side clients. The first URL is sufficient for these single-node docker
+// journeys and lets the documented remap path coexist with another c360 stack.
+func journeyNATSURL() string {
+	raw := strings.TrimSpace(os.Getenv("SEMSTREAMS_NATS_URLS"))
+	if raw == "" {
+		return "nats://localhost:24222"
+	}
+	if i := strings.IndexByte(raw, ','); i >= 0 {
+		raw = raw[:i]
+	}
+	return strings.TrimSpace(raw)
 }
 
 // requireAgenticHealthy polls the component-manager until the agentic-execution

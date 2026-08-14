@@ -1,36 +1,96 @@
 package conversationchannel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/c360studio/semdev/internal/conversationintent"
 	"github.com/c360studio/semdev/internal/forge/conversation"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semstreams/graph"
+	"github.com/c360studio/semstreams/message"
 )
 
 // The PARK-MESSAGE POSTING lane (conversation-channel-seam D8, re-homed from
-// issue-intake): every park rule publishes `user.response.<instance>` on the USER
-// stream — this consumer turns that publish into a thread message VIA THE CHANNEL
+// issue-intake): every park rule publishes one semdev-owned request on the USER
+// stream — this consumer turns that request into a thread message VIA THE CHANNEL
 // PORT (not a GitHub CreateComment call), so a parked run's `run.awaiting.human`
 // message reaches the human where they live, through whatever channel is wired.
 // Posting is DOWNSTREAM of the park: the park fact is already durable, a posting
 // failure is retried bounded (consumer redelivery) and NEVER blocks the park itself.
 
-// UserResponseSubject is the park lane's publish namespace (the USER stream).
-const UserResponseSubject = "user.response.>"
+const (
+	// ParkPostRequestSubject is the exact product-owned request subject. It is
+	// deliberately outside user.response.>, which is reserved for the framework's
+	// typed agentic.user_response.v1 family (gh#952 / ADR-093).
+	parkPostRequestSubject = "semdev.park-post.request"
 
-// parkPoster consumes user.response.* publishes and posts park messages via the
+	// ParkPostRequestInterfaceType and ParkPostRequestInterfaceVersion name the
+	// raw port contract. This is not a SemStreams BaseMessage payload and is not
+	// registered in the polymorphic payload registry.
+	parkPostRequestInterfaceType    = "semdev.park_post_request"
+	parkPostRequestInterfaceVersion = "v1"
+)
+
+// parkPoster consumes exact park-post requests and posts park messages via the
 // Channel port. A nil channel is the no-forge-token deployment (allowlist-only
 // boots, e2e journeys): the park stays graph-only, exactly as before the carve.
 type parkPoster struct {
 	channel conversation.Channel
 	fetcher admission.EntityFetcher
 	logger  *slog.Logger
+}
+
+// parkPostRequest is the raw executePublish envelope carried by the exact
+// semdev.park-post.request lane. The rule engine owns the identity fields;
+// properties and related_id are the only optional fields. It intentionally does
+// not implement message.Payload and must never be decoded as a BaseMessage.
+type parkPostRequest struct {
+	EntityID   string         `json:"entity_id"`
+	Subject    string         `json:"subject"`
+	Timestamp  string         `json:"timestamp"`
+	Source     string         `json:"source"`
+	Properties map[string]any `json:"properties,omitempty"`
+	RelatedID  string         `json:"related_id,omitempty"`
+}
+
+func decodeParkPostRequest(payload []byte) (parkPostRequest, error) {
+	var req parkPostRequest
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		return parkPostRequest{}, fmt.Errorf("decode %s/%s: %w",
+			parkPostRequestInterfaceType, parkPostRequestInterfaceVersion, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		return parkPostRequest{}, fmt.Errorf("decode %s/%s: %w",
+			parkPostRequestInterfaceType, parkPostRequestInterfaceVersion, err)
+	}
+	if _, err := message.ParseEntityID(req.EntityID); err != nil {
+		return parkPostRequest{}, fmt.Errorf("entity_id must be a canonical non-empty entity ID: %w", err)
+	}
+	if req.Subject != parkPostRequestSubject {
+		return parkPostRequest{}, fmt.Errorf("subject = %q, want exact %q", req.Subject, parkPostRequestSubject)
+	}
+	if req.Source != "rule_engine" {
+		return parkPostRequest{}, fmt.Errorf("source = %q, want rule_engine", req.Source)
+	}
+	if req.Timestamp == "" {
+		return parkPostRequest{}, fmt.Errorf("timestamp is required")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, req.Timestamp); err != nil {
+		return parkPostRequest{}, fmt.Errorf("timestamp must be RFC3339: %w", err)
+	}
+	return req, nil
 }
 
 // publishEnvelope is the rule engine's executePublish payload (the station
@@ -53,26 +113,27 @@ func (e publishEnvelope) property(key string) string {
 	return s
 }
 
-// handleUserResponse posts the parked run's message to its thread. nil = definitive
+// handleParkPostRequest posts the parked run's message to its thread. nil = definitive
 // ack (posted, or nothing postable); error = transient (redelivered bounded — a
 // forge blip must not lose the human's notification).
-func (p *parkPoster) handleUserResponse(ctx context.Context, payload []byte) error {
+func (p *parkPoster) handleParkPostRequest(ctx context.Context, payload []byte) error {
+	req, err := decodeParkPostRequest(payload)
+	if err != nil {
+		p.logger.Error("park-post: malformed semdev.park_post_request/v1; skipping", slog.Any("error", err))
+		return nil
+	}
 	if p.channel == nil {
 		// No forge client — a legitimate deployment shape (journeys, allowlist-
-		// only boots). The park is already durable + visible on the graph. This
-		// graph-only degrade is the consumer's decision (grp2-review carry-forward a).
+		// only boots). Contract validation still happens before this graph-only
+		// degrade, so a disabled adapter cannot turn malformed traffic into a
+		// silently accepted request (grp2-review carry-forward a).
 		p.logger.Debug("park-post: no conversation channel; park message stays graph-only")
 		return nil
 	}
-	var env publishEnvelope
-	if err := json.Unmarshal(payload, &env); err != nil || env.EntityID == "" {
-		p.logger.Error("park-post: malformed user.response envelope; skipping", slog.Any("error", err))
-		return nil
-	}
 
-	runEntityID, err := p.resolveRun(ctx, env.EntityID)
+	runEntityID, err := p.resolveRun(ctx, req.EntityID)
 	if err != nil {
-		return fmt.Errorf("park-post: resolve run from %s: %w", env.EntityID, err)
+		return fmt.Errorf("park-post: resolve run from %s: %w", req.EntityID, err)
 	}
 	run, err := p.fetcher.Entity(ctx, runEntityID)
 	if err != nil {

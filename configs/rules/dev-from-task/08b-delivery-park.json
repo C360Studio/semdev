@@ -25,7 +25,7 @@
     },
     {
       "type": "publish",
-      "subject": "user.response.$entity.instance"
+      "subject": "semdev.park-post.request"
     }
   ],
   "on_exit": [],

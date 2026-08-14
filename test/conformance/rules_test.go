@@ -1502,8 +1502,9 @@ func TestNoGoDerivedRoutingTokens(t *testing.T) {
 
 // The fail-closed park (SB5): an unprovable sandbox (provision_sandbox stamped
 // sandbox.blocked) parks the run toward the human — it stamps run.awaiting_human and
-// posts to the user bus, and it does NOT fire a lifecycle transition (G2). Fire-once
-// via the run.awaiting_human absence guard so it does not re-post on every re-scan.
+// publishes to the exact semdev park-post request lane, and it does NOT fire a
+// lifecycle transition (G2). Fire-once via the run.awaiting_human absence guard
+// so it does not re-publish on every re-scan.
 func TestSandboxParkOnUnprovable(t *testing.T) {
 	park, ok := runLifecycleRules(t)["sandbox_park_unprovable"]
 	if !ok {
@@ -1516,15 +1517,18 @@ func TestSandboxParkOnUnprovable(t *testing.T) {
 		t.Error("sandbox park must stamp run.awaiting_human (the park marker the whole system reads)")
 	}
 	if !park.hasAbsenceGuard("run.awaiting.human") {
-		t.Error("sandbox park must guard on run.awaiting_human length_eq 0 (fire once, don't re-post to the user bus each re-scan)")
+		t.Error("sandbox park must guard on run.awaiting.human length_eq 0 " +
+			"(fire once, don't re-publish to the semdev park-post request lane each re-scan)")
 	}
 	if park.firesTransition() {
-		t.Error("sandbox park must fire NO lifecycle transition (G2) — it records a fact and posts to the user bus")
+		t.Error("sandbox park must fire NO lifecycle transition (G2) — it records a fact " +
+			"and publishes to the semdev park-post request lane")
 	}
 }
 
 // 3.6 — the park rule stamps run.awaiting_human (its single writer, G5) on
-// ask_human and posts to the user bus. No Go reconciler advances a parked run.
+// ask_human and publishes to the exact semdev park-post request lane. No Go
+// reconciler advances a parked run.
 func TestParkRuleStampsAwaitingHuman(t *testing.T) {
 	park, ok := runLifecycleRules(t)["run_park_awaiting_human"]
 	if !ok {
