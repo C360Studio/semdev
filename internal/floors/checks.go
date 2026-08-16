@@ -733,6 +733,13 @@ func sortedKeys(m map[string]struct{}) []string {
 // GOCACHE/$HOME, never the module dir. A test that writes a NON-gitignored artifact into
 // the working tree (golden-file regen, an in-tree lockfile update) would false-reject a
 // legitimately-passing attempt. Acceptable for M0-Go; revisit for tree-writing ecosystems.
+//
+// The false-ACCEPT direction is CLOSED (security-forge-containment): a rejected attempt's
+// residue can no longer become the mechanism by which a later attempt reads clean — the
+// patcher commits only the enumerated diff targets and resets the tree to the committed
+// snapshot before each apply, so "clean" always means "the commit contains exactly the
+// authored change", never "the commit absorbed the divergence"
+// (TestPatcherLaunderingClosedAcrossAttempts pins the shape).
 func CleanTree(a Attempt) Finding {
 	if len(a.DirtyPaths) == 0 {
 		return pass(FloorCleanTree, "the working tree matches the committed attempt (git status clean) — floors and cold verify evaluate the same bytes")

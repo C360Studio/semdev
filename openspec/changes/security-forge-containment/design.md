@@ -70,9 +70,16 @@ Behavior notes:
 ## D2 — each apply starts from the committed snapshot (reset-before-apply)
 
 At the top of `Patcher.Apply` (after checkout resolution, before parsing), the
-harness resets the working tree to the last committed attempt:
-`git checkout -- .` then `git clean -fd` (NOT `-x`: gitignored caches survive,
-matching CleanTree's documented assumption that build output is ignored).
+harness resets index AND working tree to the last committed attempt:
+`git reset --hard -q` then `git clean -ffdq` (NOT `-x`: gitignored caches
+survive, matching CleanTree's documented assumption that build output is
+ignored). `reset --hard`, never `checkout -- .` — checkout restores from the
+INDEX, so a hostile `git add`/`git rm` from in-container measurement code would
+survive it and `git commit` commits the whole index (go-review H1, empirically
+verified). `-ff` so a nested repo a measurement step cloned in is removed too —
+exactly the residue class the model cannot remove. Staging additionally pins
+each target as `:(literal)` pathspec so a glob-shaped target stages the exact
+file git apply wrote, never a pattern expansion (go-review M2).
 
 Why both D1 and D2:
 - D1 alone leaves prior-attempt residue untracked forever → CleanTree rejects
@@ -134,6 +141,17 @@ buildable image" (the sandbox delta's scenario). SafeJoin also rejects
 absolute paths — stricter than today's silent re-rooting, and correctly so: an
 absolute declared path is a misdeclaration, parked loudly.
 
+The SYMLINK lane is closed too (groups-2-3 go-review MEDIUM-1): SafeJoin is
+lexical, so a repo-COMMITTED symlink under a string-legal path (a
+`Dockerfile -> /host/file` link, or the devcontainer.json itself) would still
+read host files. `safeBuildPath` therefore follows symlinks
+(`filepath.EvalSymlinks`) and re-checks containment against the resolved
+checkout root; a nonexistent path skips the check (nothing to read — the
+build fails closed downstream, and the fake-root unit shapes stay pure), any
+other resolution failure fails closed. Red-pinned by
+`TestResolveBuildPathsRejectsSymlinkEscape` (both the symlinked-Dockerfile
+and symlinked-devcontainer.json shapes).
+
 Import direction [checked]: `runspace` imports `cleanroom`
 (manifests.go/sandboxes.go), so cleanroom importing runspace would CYCLE.
 SafeJoin therefore lifts move-only into a tiny `internal/pathguard` package;
@@ -156,6 +174,18 @@ implementation (the SafeJoin comment's own rule).
   with a classified error.
 - **P5 (D5)**: unit — a devcontainer declaring `../` dockerfile or context →
   `ErrNoImage`, nothing outside the checkout read; red against raw Join.
+
+## Named follow-up (recorded, not in scope)
+
+`write_change` (openspec-io) writes the rendered OpenSpec change folder into
+the run's workspace "so it can be committed for the PR" — a contract that
+predates commit containment: under D1+D2 those untracked files are never
+committed and the next apply's clean deletes them. NOT live today (boot wires
+a nil resolver that fails loudly; the M0 rail delivers the fix-alone diff),
+but when the production resolver lands, the written change must route through
+the delivery surface or an authorized-targets lane, never working-tree
+residue. Breadcrumb comment added at the package doc
+(semstreams-review MEDIUM).
 
 ## Risks / trade-offs
 
