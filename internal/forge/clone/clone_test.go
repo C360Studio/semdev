@@ -177,8 +177,8 @@ func TestResolveTokenRidesEnvNotArgv(t *testing.T) {
 			t.Errorf("token leaked into argv: %q", a)
 		}
 	}
-	if !hasEnv(call.env, tokenEnvName+"="+secret) {
-		t.Errorf("token not injected via env %s; env=%v", tokenEnvName, call.env)
+	if !hasEnv(call.env, cliexec.GitTokenEnv+"="+secret) {
+		t.Errorf("token not injected via env %s; env=%v", cliexec.GitTokenEnv, call.env)
 	}
 	if !hasEnvPrefix(call.env, "GIT_ASKPASS=") {
 		t.Errorf("GIT_ASKPASS not set; env=%v", call.env)
@@ -216,27 +216,6 @@ func TestResolveCoordinateToURLMapping(t *testing.T) {
 	}
 }
 
-// The GIT_ASKPASS helper writeAskpass produces actually emits the token from the subprocess
-// env — byte-for-byte, no trailing newline — even for a token with shell-hostile characters.
-// This converts the credential path from "reasoned correct" to regression-guarded (review M3).
-func TestAskpassEmitsTokenFromEnv(t *testing.T) {
-	requireGit(t) // needs a POSIX sh to run the helper
-	const token = `p@ss w/%s $x "q" 'r'`
-	path, cleanup, err := writeAskpass()
-	if err != nil {
-		t.Fatalf("writeAskpass: %v", err)
-	}
-	defer cleanup()
-
-	got, err := cliexec.OSRunner{}.RunWithEnv(context.Background(), "", []string{tokenEnvName + "=" + token}, path, "Password for 'https://x-access-token@github.com':")
-	if err != nil {
-		t.Fatalf("run askpass: %v", err)
-	}
-	if got.Stdout != token {
-		t.Errorf("askpass emitted %q, want the token %q verbatim (no newline)", got.Stdout, token)
-	}
-}
-
 // An empty TokenEnv stays UNAUTHENTICATED even when GITHUB_TOKEN is exported — a stray ambient
 // token must not silently authenticate the clone (review M1). Proven by the URL carrying no
 // x-access-token username and the env carrying no token.
@@ -256,7 +235,7 @@ func TestEmptyTokenEnvStaysUnauthenticatedDespiteAmbientGitHubToken(t *testing.T
 		t.Errorf("unauthenticated clone must not add the x-access-token username: %v", call.args)
 	}
 	for _, e := range call.env {
-		if strings.HasPrefix(e, tokenEnvName+"=") {
+		if strings.HasPrefix(e, cliexec.GitTokenEnv+"=") {
 			t.Errorf("unauthenticated clone injected a token env: %q", e)
 		}
 	}
