@@ -253,10 +253,11 @@ func TestContractsClaimTheEntityClassTheirWritersStamp(t *testing.T) {
 
 func representatives() map[string]string {
 	return map[string]string{
-		graphown.RunPattern:       runEntity,
-		graphown.LoopPattern:      loopEntity,
-		graphown.AdmissionPattern: "c360.semdev.forge.intake.event.evt1",
-		graphown.AgentExecPattern: runEntity,
+		graphown.RunPattern:             runEntity,
+		graphown.LoopPattern:            loopEntity,
+		graphown.AdmissionPattern:       "c360.semdev.forge.intake.event.evt1",
+		graphown.AgentExecPattern:       runEntity,
+		graphown.StandardsSourcePattern: "c360.semdev.repo.standards.source.d1g3st",
 	}
 }
 

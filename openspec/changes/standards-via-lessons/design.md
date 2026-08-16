@@ -179,8 +179,10 @@ the reconcile group) — nothing is deleted.
 message type `agentic.agent_lesson.v1`, pattern `*.*.agent.lesson.record.*`,
 the birth-predicate list, and the single reconcile group `lesson-lifecycle`
 (`agent.lesson.status`, `agent.lesson.superseded-by`,
-`agent.lesson.retired-at`), appended in `deriveContracts()` alongside the
-derived semdev contracts. A conformance pin locks the mirror's literal values
+`agent.lesson.retired-at`), exposed as `graphown.LessonRecordMirror()` and
+appended by `AllContracts()` — NOT inside the memoized `Contracts()`
+derivation, which stays the pure vocab census (appending there would poison
+the owner/census pins; go-review R4 records the as-built shape). A conformance pin locks the mirror's literal values
 (name, group, predicate set) with a comment naming the upstream source file,
 and the e2e journey (D9) is the behavioral proof the mirror matches the wire.
 The D2 source-entity contract derives from the normal vocab + entityClass

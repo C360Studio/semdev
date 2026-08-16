@@ -7,31 +7,32 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 1. Vocabulary + contracts foundation (D2, D6)
 
-- [ ] 1.1 RED: conformance pins for the new surface — `repo.standards.digest`
+- [x] 1.1 RED: conformance pins for the new surface — `repo.standards.digest`
       /`.path`/`.repo` in the vocab provenance test (writer `standards-sync`,
       change slug `standards-via-lessons`), the source entity class +
       pattern in the contracts derivation, and the hand-mirrored
       `agentic.lesson-record` contract-literals pin (name, message type,
       pattern, birth predicates, `lesson-lifecycle` group members — comment
       naming the upstream source file). Verify they FAIL before the code.
-- [ ] 1.2 GREEN: `internal/vocab` gains the three predicates;
+- [x] 1.2 GREEN: `internal/vocab` gains the three predicates;
       `internal/graphown` gains the source entity class + pattern const, the
-      lesson-contract mirror appended in `deriveContracts()`, and
+      lesson-contract mirror (`LessonRecordMirror`, carried into the client by
+      `AllContracts` — the memoized census stays pure; go-review R4), and
       `createOwners` += `standards-sync`.
-- [ ] 1.3 Alignment note (`docs/alignment-notes.md`): the standards-sync
+- [x] 1.3 Alignment note (`docs/alignment-notes.md`): the standards-sync
       seam — primitive-first analysis (injection/curator/store are existing
       framework primitives; the ONLY new Go is the deterministic sync step +
       checks lane), the G2 analysis of curator-driven lifecycle (framework
       Lane-1 mandate), and the named auto-promotion policy.
-- [ ] 1.4 `task check` green; adversarial review; commit group 1.
+- [x] 1.4 `task check` green; adversarial review; commit group 1.
 
 ## 2. The standards file parser (D1 — pure)
 
-- [ ] 2.1 RED: table tests for `.semdev/standards.yaml` — valid minimal,
+- [x] 2.1 RED: table tests for `.semdev/standards.yaml` — valid minimal,
       valid full, absent-file (zero standards, no error), and the fail-closed
       set: unknown field, duplicate id, invalid severity, invalid role, empty
       text, bad version, malformed YAML — each rejection naming the defect.
-- [ ] 2.2 GREEN: the pure parser package (strict YAML, typed result:
+- [x] 2.2 GREEN: the pure parser package (strict YAML, typed result:
       standards + checks), including the injection-form renderer
       (`[std:<id>] MUST <text>`) with the 320B pre-birth bound check
       (reject naming the id, never truncate).
@@ -39,7 +40,7 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 3. The sync core: birth → promote → retire (D3, D4, D5)
 
-- [ ] 3.1 RED: pins against fakes of the store/curator/reader seams —
+- [x] 3.1 RED: pins against fakes of the store/curator/reader seams —
       (a) unchanged file re-sync is a no-op (idempotent: same source entity,
       `created=false` births, no lifecycle writes); (b) a new standard
       births with the exact D3 mapping (category/polarity/severity/
@@ -49,7 +50,7 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       retires-old + births-new; (e) cross-repo isolation — a repo-standard
       record whose source resolves to a DIFFERENT repo is never retired;
       (f) a non-file proposed lesson is never promoted.
-- [ ] 3.2 GREEN: the sync core — source-entity strict Create (conflict =
+- [x] 3.2 GREEN: the sync core — source-entity strict Create (conflict =
       duplicate signal), identity derivation (UUIDv5 over the store's four
       identity fields, semdev-standards namespace), birth via
       `agentictools.NewNATSLessonStore`, promotion via
@@ -64,8 +65,16 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       birthing+activating records on a valid one (fakes at the station seam).
 - [ ] 4.2 GREEN: the `Standards` seam on `ProvisionDeps` (after Materialize,
       before ProveBaseline), boot construction (store + curator from the
-      shared graphown mutation client + platform identity), park-on-malformed
-      via the existing block path.
+      shared graphown mutation client + platform identity — REJECT nil
+      surfaces loudly, go-review R2), park-on-malformed via the existing
+      block path.
+- [ ] 4.2b The `RunLaunch` vocab-registration gap (semstreams-review HIGH,
+      PRE-EXISTING): `internal/boot/launch.go` builds the mutation client
+      without `vocab.Register()`, which should fail contract validation —
+      the launch lane dead since beta.159. VERIFY empirically against docker
+      NATS first (the reviewer could not execute it), then fix
+      (`vocab.Register()` at the top of RunLaunch) + pin per what the
+      verification shows.
 - [ ] 4.3 Docker journey (red-first): provision a fixture repo carrying a
       stripped standards file → assert records born `active` in the graph
       with resolving evidence, idempotent on re-provision (D9 items 1).
