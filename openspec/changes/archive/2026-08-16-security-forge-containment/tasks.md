@@ -28,7 +28,7 @@ before each group's commit. Every fix task lands with its red-first pin (G6).
       non-empty-targets precondition doc.
 - [x] 1.5 Extend the `CleanTree` KNOWN-CONSTRAINT comment with the closed
       false-ACCEPT (laundering) direction — floor behavior itself unchanged.
-- [ ] 1.6 Full offline suite + `task e2e -race` green; adversarial review;
+- [x] 1.6 Full offline suite + `task e2e -race` green; adversarial review;
       commit group 1.
 
 ## 2. Credential containment + bounded push (D3 + D4 — forge-io delta)
@@ -56,7 +56,7 @@ before each group's commit. Every fix task lands with its red-first pin (G6).
       through the RunWithEnv path; journeys set a token so the askpass branch
       is exercised harmlessly against file://), plus the tokenless env-shape
       assertions in pin P4.
-- [ ] 2.6 Full offline suite + `task e2e -race` green; adversarial review;
+- [x] 2.6 Full offline suite + `task e2e -race` green; adversarial review;
       commit group 2.
 
 ## 3. Build-path confinement (D5 — sandbox delta)
@@ -76,14 +76,14 @@ before each group's commit. Every fix task lands with its red-first pin (G6).
       build.context, and devcontainer.json positions), explicit IsAbs
       rejections pre-join, absolute-context traversal case, direct
       `pathguard` contract table.
-- [ ] 3.4 Full offline suite + `task e2e -race` green (the cold-proof docker
+- [x] 3.4 Full offline suite + `task e2e -race` green (the cold-proof docker
       journeys exercise the declared-image path); adversarial review; commit
       group 3.
 
 ## 4. Verify + close
 
-- [ ] 4.1 `openspec validate security-forge-containment --strict` green;
+- [x] 4.1 `openspec validate security-forge-containment --strict` green;
       `/opsx:verify` against all three deltas.
-- [ ] 4.2 Evidence: name P1–P5 + the green `task e2e -race` run in the change
+- [x] 4.2 Evidence: name P1–P5 + the green `task e2e -race` run in the change
       (G7); no evidence-ledger entry (no run-level claim is made).
-- [ ] 4.3 Sync deltas (`/opsx:sync`) and archive the change.
+- [x] 4.3 Sync deltas (`/opsx:sync`) and archive the change.

@@ -187,6 +187,30 @@ the delivery surface or an authorized-targets lane, never working-tree
 residue. Breadcrumb comment added at the package doc
 (semstreams-review MEDIUM).
 
+## Evidence (G7 — as landed)
+
+- Pins, each verified RED against the pre-fix shape before its fix: P1
+  `TestPatcherCommitExcludesWorkingTreeResidue` (+ the go-review-H1 variant
+  `TestPatcherCommitExcludesStagedResidueAndRestoresStagedDeletion`), P2
+  `TestPatcherLaunderingClosedAcrossAttempts`, D2's
+  `TestPatcherApplyResetsToCommittedSnapshot`, P3
+  `TestDeliverPushCarriesNoCredentialOnArgv` + P3b
+  `TestDeliverRefusesPushWithTokenOnNonEnvRunner`, P4
+  `TestDeliverPushIsDeadlineBounded`, P5
+  `TestResolveBuildPathsRejectsTraversal` +
+  `TestResolveBuildPathsRejectsSymlinkEscape`. Regression guards born green
+  where noted in-file: `TestPatcherCommitStagesOnlyTargetsIndependentOfReset`,
+  `TestPatcherFailsClosedWhenResetFails`,
+  `TestPatcherStagesNewFileAndDeletionDiffs`, `TestGitCredEnvShapes`,
+  `TestSafeJoin`.
+- Full `task e2e -race` docker journey suite GREEN over the final tree
+  (457.6s, 2026-08-16), plus `task check` (build + lint + unit `-race`).
+- Adversarial review: four passes (semstreams-reviewer + go-reviewer on group
+  1 with post-fold verify passes; both again on groups 2–3), final verdicts
+  all APPROVE, zero blocking/high outstanding. Both group-1 reviewers
+  independently found the same HIGH (index-sourced reset) — fixed + pinned.
+- No evidence-ledger entry: this change makes no run-level claim.
+
 ## Risks / trade-offs
 
 - D2 deletes untracked files between attempts. By construction anything
