@@ -124,7 +124,7 @@
     "metrics": {
       "enabled": true,
       "config": {
-        "port": 9091,
+        "port": 29091,
         "path": "/metrics"
       }
     }
