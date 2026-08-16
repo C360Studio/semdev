@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/harness"
+	"github.com/c360studio/semdev/internal/pathguard"
 )
 
 // buildTimeout bounds a single `docker build`. Image builds (base pull + resolve of the
@@ -146,21 +147,36 @@ func shortDigest(digest string) string {
 // the source); a devcontainer declaration resolves build.dockerfile/build.context
 // relative to the devcontainer's own directory (the devcontainer spec's semantics). It
 // reads the devcontainer.json from disk only to LOCATE the Dockerfile — semdev owns the
-// run (SB2).
+// run (SB2). Every declared path resolves through the shared checkout containment guard
+// (pathguard.SafeJoin, design D5): the devcontainer's build.dockerfile/build.context are
+// repo-AUTHORED strings, and a `..` traversal or absolute path would read host files
+// outside the checkout into the build context. An escaping declaration fails closed as
+// ErrNoImage — the exact same park as a repo with no buildable image.
 func resolveBuildPaths(repoRoot string, decl harness.ImageDecl) (dockerfileAbs, contextAbs string, err error) {
 	if decl.Dockerfile != "" {
-		dockerfileAbs = filepath.Join(repoRoot, decl.Dockerfile)
+		dockerfileAbs, err = safeBuildPath(repoRoot, decl.Dockerfile)
+		if err != nil {
+			return "", "", err
+		}
 		contextRel := decl.Context
 		if contextRel == "" {
 			contextRel = "." // build the checkout root so the image can COPY the source
 		}
-		return dockerfileAbs, filepath.Join(repoRoot, contextRel), nil
+		contextAbs, err = safeBuildPath(repoRoot, contextRel)
+		if err != nil {
+			return "", "", err
+		}
+		return dockerfileAbs, contextAbs, nil
 	}
 
 	// Devcontainer declaration: read its build.dockerfile, resolved relative to the
 	// devcontainer directory.
 	dcDir := filepath.Dir(decl.Devcontainer)
-	raw, err := os.ReadFile(filepath.Join(repoRoot, decl.Devcontainer))
+	dcPath, err := safeBuildPath(repoRoot, decl.Devcontainer)
+	if err != nil {
+		return "", "", err
+	}
+	raw, err := os.ReadFile(dcPath)
 	if err != nil {
 		return "", "", fmt.Errorf("%w: read declared devcontainer %s: %v", ErrNoImage, decl.Devcontainer, err)
 	}
@@ -174,11 +190,67 @@ func resolveBuildPaths(repoRoot string, decl harness.ImageDecl) (dockerfileAbs, 
 	if !found {
 		return "", "", fmt.Errorf("%w: devcontainer %s declares no buildable Dockerfile (a prebuilt image is not built at M0)", ErrNoImage, decl.Devcontainer)
 	}
-	dockerfileAbs = filepath.Join(repoRoot, dcDir, df)
+	// Reject absolute declared paths BEFORE the join — filepath.Join would silently
+	// re-root them under dcDir, masking a misdeclaration the operator should see.
+	if filepath.IsAbs(df) {
+		return "", "", fmt.Errorf("%w: devcontainer build.dockerfile %q is absolute — declare a repo-relative path", ErrNoImage, df)
+	}
 	if buildCtx == "" {
 		buildCtx = "."
 	}
-	return dockerfileAbs, filepath.Join(repoRoot, dcDir, buildCtx), nil
+	if filepath.IsAbs(buildCtx) {
+		return "", "", fmt.Errorf("%w: devcontainer build.context %q is absolute — declare a repo-relative path", ErrNoImage, buildCtx)
+	}
+	dockerfileAbs, err = safeBuildPath(repoRoot, filepath.Join(dcDir, df))
+	if err != nil {
+		return "", "", err
+	}
+	contextAbs, err = safeBuildPath(repoRoot, filepath.Join(dcDir, buildCtx))
+	if err != nil {
+		return "", "", err
+	}
+	return dockerfileAbs, contextAbs, nil
+}
+
+// safeBuildPath resolves a declared repo-relative build path inside repoRoot via the
+// shared containment guard, classifying an escaping or absolute declaration as
+// ErrNoImage so it parks exactly like a repo with no buildable image (design D5).
+func safeBuildPath(repoRoot, rel string) (string, error) {
+	abs, err := pathguard.SafeJoin(repoRoot, rel)
+	if err != nil {
+		return "", fmt.Errorf("%w: declared build path %q does not resolve inside the checkout: %v", ErrNoImage, rel, err)
+	}
+	if err := resolvedWithin(repoRoot, abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// resolvedWithin closes the SYMLINK lane the lexical guard cannot see (go-review
+// MEDIUM-1): a repo-COMMITTED symlink under a string-legal path can point anywhere on
+// the host, and the subsequent read/`docker build -f` would follow it. Follow symlinks
+// (EvalSymlinks) and re-check containment against the resolved checkout root. A
+// NONEXISTENT path skips the check — there is nothing to read, and the build fails
+// closed on it downstream (the fake-root unit shapes stay pure path computation). Any
+// other resolution failure fails closed: a path that cannot be resolved is a path whose
+// containment cannot be trusted.
+func resolvedWithin(repoRoot, abs string) error {
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("%w: resolve declared build path %q: %v", ErrNoImage, abs, err)
+	}
+	rootResolved, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return fmt.Errorf("%w: resolve checkout root %q: %v", ErrNoImage, repoRoot, err)
+	}
+	within, err := filepath.Rel(rootResolved, resolved)
+	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: declared build path %q resolves outside the checkout (symlink escape)", ErrNoImage, abs)
+	}
+	return nil
 }
 
 // buildImageArgs assembles the `docker build` args: the iidfile that captures the

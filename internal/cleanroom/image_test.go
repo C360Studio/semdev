@@ -58,6 +58,97 @@ func TestResolveBuildPathsDevcontainer(t *testing.T) {
 	}
 }
 
+// RED-FIRST PIN P5 (security-forge-containment 3.2): repo-authored build paths must
+// resolve INSIDE the checkout. A devcontainer's build.dockerfile / build.context are
+// attacker-authored strings; `..` traversal would read host files outside the checkout
+// into the docker build context (host-file exfiltration into an image whose tests the
+// repo also authors). Traversal fails closed into the SAME ErrNoImage park as a repo
+// with no buildable image — and nothing outside the checkout is read.
+func TestResolveBuildPathsRejectsTraversal(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+	}{
+		{"dockerfile traversal", `{"build":{"dockerfile":"../../outside/Dockerfile"}}`},
+		{"context traversal", `{"build":{"dockerfile":"Dockerfile","context":"../../outside"}}`},
+		{"absolute dockerfile", `{"build":{"dockerfile":"/etc/evil/Dockerfile"}}`},
+		{"absolute context", `{"build":{"dockerfile":"Dockerfile","context":"/etc"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			mustWrite(t, filepath.Join(root, ".devcontainer/devcontainer.json"), c.json)
+			mustWrite(t, filepath.Join(root, ".devcontainer/Dockerfile"), "FROM scratch\n")
+			_, _, err := resolveBuildPaths(root, harness.ImageDecl{Devcontainer: ".devcontainer/devcontainer.json"})
+			if !errors.Is(err, ErrNoImage) {
+				t.Errorf("declared escape must fail closed as ErrNoImage (the uniform no-image park); got %v", err)
+			}
+		})
+	}
+
+	// The Dockerfile-branch inputs get the same guard (uniformity, design D5).
+	if _, _, err := resolveBuildPaths(t.TempDir(), harness.ImageDecl{Dockerfile: "../outside/Dockerfile"}); !errors.Is(err, ErrNoImage) {
+		t.Errorf("Dockerfile-branch traversal must fail closed as ErrNoImage; got %v", err)
+	}
+	if _, _, err := resolveBuildPaths(t.TempDir(), harness.ImageDecl{Dockerfile: "Dockerfile", Context: "../.."}); !errors.Is(err, ErrNoImage) {
+		t.Errorf("Dockerfile-branch context traversal must fail closed as ErrNoImage; got %v", err)
+	}
+}
+
+// RED-FIRST PIN (groups-2-3 go-review MEDIUM-1): the SYMLINK lane. pathguard.SafeJoin is
+// lexical — a repo-COMMITTED symlink (`Dockerfile -> /host/file`, or the devcontainer.json
+// itself) passes the string guard and achieves exactly the host-file read D5 closes for
+// `..` strings, from the same repo-authored threat actor. Resolution must follow symlinks
+// and re-check containment, failing closed as the same ErrNoImage park.
+func TestResolveBuildPathsRejectsSymlinkEscape(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "host-secret")
+	mustWrite(t, outside, "FROM scratch\n# host file\n")
+
+	t.Run("symlinked Dockerfile", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, ".devcontainer/devcontainer.json"), `{"build":{"dockerfile":"Dockerfile"}}`)
+		if err := os.Symlink(outside, filepath.Join(root, ".devcontainer/Dockerfile")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveBuildPaths(root, harness.ImageDecl{Devcontainer: ".devcontainer/devcontainer.json"}); !errors.Is(err, ErrNoImage) {
+			t.Errorf("symlinked Dockerfile escaping the checkout must fail closed as ErrNoImage; got %v", err)
+		}
+	})
+
+	t.Run("symlinked build.context", func(t *testing.T) {
+		// The highest-value exfiltration channel: a context symlink makes docker tar a
+		// host DIRECTORY into a build whose repo-authored Dockerfile/tests read it
+		// (semstreams-review MEDIUM — pinned so a context-join refactor cannot
+		// silently reopen it).
+		root := t.TempDir()
+		outsideDir := t.TempDir()
+		mustWrite(t, filepath.Join(outsideDir, "host-data"), "sensitive\n")
+		mustWrite(t, filepath.Join(root, ".devcontainer/devcontainer.json"), `{"build":{"dockerfile":"Dockerfile","context":"data"}}`)
+		mustWrite(t, filepath.Join(root, ".devcontainer/Dockerfile"), "FROM scratch\n")
+		if err := os.Symlink(outsideDir, filepath.Join(root, ".devcontainer/data")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveBuildPaths(root, harness.ImageDecl{Devcontainer: ".devcontainer/devcontainer.json"}); !errors.Is(err, ErrNoImage) {
+			t.Errorf("symlinked build.context escaping the checkout must fail closed as ErrNoImage; got %v", err)
+		}
+	})
+
+	t.Run("symlinked devcontainer.json", func(t *testing.T) {
+		root := t.TempDir()
+		dcOutside := filepath.Join(t.TempDir(), "devcontainer.json")
+		mustWrite(t, dcOutside, `{"build":{"dockerfile":"Dockerfile"}}`)
+		if err := os.MkdirAll(filepath.Join(root, ".devcontainer"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(dcOutside, filepath.Join(root, ".devcontainer/devcontainer.json")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveBuildPaths(root, harness.ImageDecl{Devcontainer: ".devcontainer/devcontainer.json"}); !errors.Is(err, ErrNoImage) {
+			t.Errorf("symlinked devcontainer.json escaping the checkout must fail closed as ErrNoImage; got %v", err)
+		}
+	})
+}
+
 // A devcontainer that declares only a prebuilt image (no build) fails closed — M0 builds
 // a Dockerfile, it does not pull a prebuilt image (SB2).
 func TestResolveBuildPathsPrebuiltImageFailsClosed(t *testing.T) {
