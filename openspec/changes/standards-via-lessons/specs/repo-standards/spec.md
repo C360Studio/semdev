@@ -30,9 +30,16 @@ file that is present but malformed SHALL fail closed toward the operator
 - **AND** the run proceeds with no operator intervention
 
 #### Scenario: No standards file, no change in behavior
-- **WHEN** a run provisions a target repo with no standards file
+- **WHEN** a run provisions a target repo that never declared standards
 - **THEN** the run proceeds exactly as before this capability existed
 - **AND** no standard records are born and nothing parks or warns
+
+#### Scenario: Deleting the standards file retires the repo's standards
+- **WHEN** a run provisions a repo whose standards file was previously declared
+  and is now absent
+- **THEN** the repo's previously-declared standard records are retired (the
+  file is the law; no file, no law)
+- **AND** no new records are born and nothing parks
 
 #### Scenario: A malformed standards file parks toward the operator
 - **WHEN** the standards file is present but unparseable or declares an invalid

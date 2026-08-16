@@ -36,7 +36,7 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       standards + checks), including the injection-form renderer
       (`[std:<id>] MUST <text>`) with the 320B pre-birth bound check
       (reject naming the id, never truncate).
-- [ ] 2.3 `task check` green; adversarial review; commit group 2.
+- [x] 2.3 `task check` green; adversarial review; commit group 2.
 
 ## 3. The sync core: birth → promote → retire (D3, D4, D5)
 
@@ -56,7 +56,7 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       `agentictools.NewNATSLessonStore`, promotion via
       `LessonCurator.Promote` scoped to just-ensured records, retirement per
       D5, the K-exceeded authoring warning.
-- [ ] 3.3 `task check` green; adversarial review; commit group 3.
+- [x] 3.3 `task check` green; adversarial review; commit group 3.
 
 ## 4. Provision wiring (D2/D4 boot + the provision journey)
 

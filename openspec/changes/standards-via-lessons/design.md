@@ -249,6 +249,33 @@ immunity, contract-mirror literals) and the G8 scan extension: the
 fixture-vocabulary conformance walk gains `.yaml`/`.yml` so standards
 fixtures cannot smuggle coaching (B10).
 
+## Upstream asks (semstreams — first-consumer findings, to file as issues)
+
+Consolidated from the adversarial reviews; semdev is among the first products
+on the lesson substrate (user directive: file bugs AND improvements).
+
+- **U1 — export the content-identity derivation** (`canonicalLessonContent` /
+  the UUIDv5 mint are unexported, forcing a byte-for-byte mirror with no
+  compile-time drift detection) and document as CONTRACT that the store's
+  conflict verification is field-based, never namespace-based.
+- **U2 — export the constants consumers must hardcode**: the 320B
+  injection-form bound, the status enum (proposed/active/retired/superseded),
+  severity/polarity enums.
+- **U3 — writer gates bypassable on the store path**: all ADR-080 arg gates
+  (incl. control-byte hygiene) live in the emit_lesson TOOL layer;
+  `NATSLessonStore.CreateLesson` accepts arbitrary triples while the curator
+  doc invites direct product policies — semdev re-implemented the 320B gate
+  and initially MISSED the control-byte gate (both reviews' H1). Ask: a
+  `ValidateLessonTriples` at the store layer.
+- **U4 — `NewNATSLessonStore` swallows the client-construction error**
+  (per-call failure instead of boot-time).
+- **U5 — repo/entity-scoped injection**: `Scope.EntityIDs` is dead at
+  beta.160 and TaskMessage carries no entity scope — a multi-target product
+  cannot keep repo A's standards out of repo B's briefs (see the risk below).
+- **U6 — document `Promote`'s unconditional-reconcile semantics** (it
+  resurrects retired lessons and clears retired-at; semdev's file-revert path
+  DEPENDS on this — it must not be "fixed" out from under consumers).
+
 ## Sequencing / merge notes
 
 - Independent of PR #7 at the code level (disjoint files). At SPEC-SYNC
@@ -280,3 +307,18 @@ fixtures cannot smuggle coaching (B10).
 - **Contract-mirror drift**: an upstream rename of the contract/group breaks
   Promote loudly (contract lookup fails — fail-closed, not silent); the
   bump-time re-verify covers it.
+- **Cross-repo injection bleed (multi-target, semstreams-review M6/U5)**:
+  injection scope is role tags ONLY at beta.160, so in a multi-target
+  deployment one repo's active standards inject into every repo's
+  same-role briefs and share the K=10 budget. Retirement is repo-isolated
+  (the repo-scoped source digest, D2-as-built); injection is not — upstream
+  ask U5 is the fix path. Single-target dogfood is unaffected.
+- **Source digest covers repo + content (D2 as-built, semstreams-review
+  M2)**: byte-identical template files across repos get per-repo source
+  entities and per-repo record identities — clean retirement isolation at
+  the cost of duplicate brief lines if multiple targets ever share one
+  deployment.
+- **Absent-file semantics (semstreams-review L4)**: deleting a previously
+  declared standards file RETIRES the repo's records (spec amended); the
+  group-4 seam runs retirement-only on absent file — no source entity is
+  minted for an absent file.
