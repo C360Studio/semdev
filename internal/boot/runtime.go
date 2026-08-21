@@ -591,9 +591,9 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 	// registered: one contract-validating mutation client carrying every derived
 	// contract (ADR-091 — contracts validate local intent, nothing registers or
 	// leases). Construction is purely local, so a failure here is a contract bug.
-	graphClients, err := graphown.NewClients(natsClient)
+	graphClients, err := declaredGraphClients(natsClient)
 	if err != nil {
-		return nil, fmt.Errorf("build graph mutation client: %w", err)
+		return nil, err
 	}
 
 	componentReg := component.NewRegistry()

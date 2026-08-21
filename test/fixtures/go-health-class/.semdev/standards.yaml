@@ -1,0 +1,27 @@
+# Engineering standards for this repository. Every entry applies to code
+# authored here, and the checks run against the whole module.
+version: 1
+
+standards:
+  - id: eng-error-context
+    text: "Wrap a returned error with %w and name the operation that failed."
+    severity: must
+    roles: [developer]
+
+  - id: eng-exported-doc-comments
+    text: "Every exported identifier carries a doc comment starting with its own name."
+    severity: must
+    roles: [reviewer]
+
+  - id: eng-table-driven-tests
+    text: "Prefer table-driven tests once a behaviour has more than two cases."
+    severity: may
+
+checks:
+  - name: go-vet
+    command: go vet ./...
+    required: true
+
+  - name: gofmt
+    command: test -z "$(gofmt -l .)"
+    required: false

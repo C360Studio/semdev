@@ -391,6 +391,21 @@ U4 → #980, U5 → #981, U6 → #982.
   harness-gated (measurement, floors, clean-room verify are immune to brief
   content; a hostile standard can waste a run, not forge evidence). Noted in
   the alignment note; a lexical deny-list would be theater and is omitted.
+- **Retired records accumulate against the page bound**: evidence is an
+  identity input, so every EDIT to the standards file re-mints all N records and
+  retires the N previous ones. Retirement is history-preserving and the listing
+  has no server-side status filter, so edit history consumes the retirement
+  scan's page budget at ~N records per edit. 16 pages is far off (~10k records
+  once the server's per-page byte trim is accounted for), but it is a monotonic
+  accumulator with a hard-error ceiling rather than a truncating one — by
+  design (a truncated list under-retires), so it will announce itself rather
+  than degrade.
+- **Provisioning now requires `run.issue.ref`**: a run with no target
+  coordinate cannot scope repo standards, so the sync blocks it. Ordering is
+  safe today (`coordinator/04-stamp-issue-ref` fires at mint, long before the
+  provision gate), but this is a NEW global precondition on provisioning
+  introduced by a standards feature — a future mint path without a forge
+  coordinate would park with a message about standards scoping.
 - **K=10 ceiling**: >10 standards per role and the lowest-severity tail drops
   silently at injection (deterministically). The sync WARNS at birth when a
   role's active set exceeds K — loud at authoring time, not at injection.
@@ -402,6 +417,18 @@ U4 → #980, U5 → #981, U6 → #982.
 - **Contract-mirror drift**: an upstream rename of the contract/group breaks
   Promote loudly (contract lookup fails — fail-closed, not silent); the
   bump-time re-verify covers it.
+- **Concurrent runs on ONE repo at different base revisions (group-4 finding)**:
+  every provision re-syncs, and retirement retires this repo's records that are
+  not in the freshly-parsed expected set. Two in-flight runs whose checkouts
+  carry DIFFERENT standards-file bytes therefore retire each other's records
+  (different digest → different source → different record identity → each looks
+  "withdrawn" to the other). The loser's already-dispatched spawns keep the
+  brief they were assembled with, so nothing mis-executes; the effect is a
+  later spawn missing a standard, and the next provision of either run restores
+  its own set (Promote resurrects retired records, D4). Accepted for v1 on the
+  same grounds as the injection bleed: the dogfood deployment is single-target
+  and serial. The fix, if it ever bites, is to scope retirement by
+  provision recency rather than by set membership alone.
 - **Cross-repo injection bleed (multi-target, semstreams-review M6/U5)**:
   injection scope is role tags ONLY at beta.160, so in a multi-target
   deployment one repo's active standards inject into every repo's

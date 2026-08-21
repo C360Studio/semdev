@@ -49,6 +49,7 @@ import (
 	"log/slog"
 
 	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/standards"
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/pkg/errs"
@@ -145,6 +146,26 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	if err != nil {
 		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build run source")
 	}
+	// The repo-standards sync (standards-via-lessons D4). Built HERE rather than captured at
+	// Register because it needs the live NATS client, and failing loud here is the point: the
+	// framework's curator and lesson store both accept a broken surface set and fail later,
+	// per-call, without naming the wiring bug. Provision blocks on a nil seam, so an unwired
+	// standards sync could otherwise turn every run into an opaque park.
+	standardsSync, err := standards.NewProvisionSync(standards.Wiring{
+		NATS:    deps.NATSClient,
+		Clients: clients,
+		Reader:  factReader,
+		// component.Dependencies already carries the platform identity the framework
+		// resolved — the same source every other semdev factory reads. Threading a second
+		// copy through Register/RegisterAll would give the census a zero PlatformMeta that
+		// looks like a valid identity.
+		Org:      deps.Platform.Org,
+		Platform: deps.Platform.Platform,
+		Logger:   logger,
+	})
+	if err != nil {
+		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build repo-standards sync")
+	}
 	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
 	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
 	// it hosts, so it resolves separately (station-harness, G5).
@@ -155,6 +176,7 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 			Sources:     sources,   // StaticSource (fixture) or the forge-clone Source (real target)
 			Checkouts:   checkouts, // *runspace.Checkouts implements Materialize (provision Checkouts)
 			Manifests:   runspace.Manifests{},
+			Standards:   standardsSync,
 			Warmers:     sandboxes, // *runspace.Sandboxes implements Provision (provision Warmers)
 			Prover:      provisionsandbox.DefaultProver(),
 			Store:       nil, // M0: no governed secrets (SB2c)

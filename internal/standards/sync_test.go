@@ -87,9 +87,15 @@ func (f *fakeLister) ListLessonRecords(context.Context) ([]CandidateRecord, erro
 	return f.records, nil
 }
 
-type fakeResolver struct{ repos map[string]string } // sourceEntityID -> repo
+type fakeResolver struct {
+	repos map[string]string // sourceEntityID -> repo
+	err   error             // when set, every resolution fails (a substrate fault)
+}
 
 func (f *fakeResolver) SourceRepo(_ context.Context, id string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
 	r, ok := f.repos[id]
 	return r, ok, nil
 }
@@ -413,5 +419,38 @@ func TestSyncNeverPromotesForeignLessons(t *testing.T) {
 		if id == "c360.semdev.agent.lesson.record.agent-emitted" {
 			t.Fatal("the sync promoted a lesson it did not birth from the file — the auto-promotion policy leaked")
 		}
+	}
+}
+
+// TestSyncFailsWhenEvidenceResolutionFaults pins the fail-CLOSED half of retirement.
+// A read fault is not "this record is not ours": if a transport blip on one evidence
+// read were skipped, a standard the repo withdrew would stay ACTIVE while the sync
+// returned success, and the only trace would be a WARN. That is fail-open on the exact
+// outcome retirement exists to produce, so the fault must reach the caller (the station
+// retries, and exhausted, parks toward the human).
+func TestSyncFailsWhenEvidenceResolutionFaults(t *testing.T) {
+	store, cur, cr := newFakeStore(), &fakeCurator{}, &fakeCreator{}
+	lister := &fakeLister{records: []CandidateRecord{{
+		EntityID: "org.plat.agent.lesson.record.stale",
+		Category: standardCategory,
+		Status:   "active",
+		Evidence: []string{"org.plat.repo.standards.source.deadbeef"},
+	}}}
+	s := newSyncer(store, cur, cr, lister, &fakeResolver{err: errors.New("graph query timed out")})
+
+	_, err := s.Sync(context.Background(), validYAML, syncRepo)
+	if err == nil {
+		t.Fatal("a fault resolving a candidate's evidence must fail the sync — skipping it leaves a " +
+			"withdrawn standard active and reports success")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("the error must carry the underlying fault; got %v", err)
+	}
+	if IsDeclaration(err) {
+		t.Error("a substrate fault must NOT be classified as the repo's declaration defect — that parks " +
+			"permanently on a transient fault instead of retrying")
+	}
+	if len(cur.retired) != 0 {
+		t.Errorf("records were retired despite an incomplete evidence scan: %v", cur.retired)
 	}
 }

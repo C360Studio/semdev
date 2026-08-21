@@ -60,26 +60,43 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 4. Provision wiring (D2/D4 boot + the provision journey)
 
-- [ ] 4.1 RED: a provision-level pin — provisioning a fixture with a
+- [x] 4.1 RED: a provision-level pin — provisioning a fixture with a
       standards file blocks/parks on a malformed file, and succeeds
       birthing+activating records on a valid one (fakes at the station seam).
-- [ ] 4.2 GREEN: the `Standards` seam on `ProvisionDeps` (after Materialize,
+- [x] 4.2 GREEN: the `Standards` seam on `ProvisionDeps` (after Materialize,
       before ProveBaseline), boot construction (store + curator from the
       shared graphown mutation client + platform identity — REJECT nil
       surfaces loudly, go-review R2), park-on-malformed via the existing
       block path.
-- [ ] 4.2b The `RunLaunch` vocab-registration gap (semstreams-review HIGH,
-      PRE-EXISTING): `internal/boot/launch.go` builds the mutation client
-      without `vocab.Register()`, which should fail contract validation —
-      the launch lane dead since beta.159. VERIFY empirically against docker
-      NATS first (the reviewer could not execute it), then fix
-      (`vocab.Register()` at the top of RunLaunch) + pin per what the
-      verification shows.
-- [ ] 4.3 Docker journey (red-first): provision a fixture repo carrying a
+- [x] 4.2b The `RunLaunch` vocab-registration gap (semstreams-review HIGH,
+      PRE-EXISTING) — CONFIRMED and fixed. Verification needed no docker after
+      all: `projection.Contract.Validate` calls
+      `vocabulary.RequireDeclaredPredicate`, and ADR-091 made contract
+      validation purely LOCAL, so `graphown.NewClients` on a cleared registry
+      fails at construction with `predicate "intake.actor.admitted" is
+      canonical but not declared in the vocabulary registry` — reproduced
+      offline. Every `semdev launch` has failed at its first real step since
+      beta.159. Fixed by funnelling BOTH boot entry points through
+      `declaredGraphClients` (declares, then builds), pinned two ways: a
+      behavioral pin on the framework coupling (`internal/boot`,
+      negative-control-proven) and a structural conformance pin that the
+      helper is the package's only construction site — the runtime lane
+      survived by coincidence, and one helper makes the ordering a property.
+- [x] 4.3 Docker journey (red-first): provision a fixture repo carrying a
       stripped standards file → assert records born `active` in the graph
       with resolving evidence, idempotent on re-provision (D9 items 1).
-- [ ] 4.4 Full offline suite + `task e2e -race` green; adversarial review;
-      commit group 4.
+- [x] 4.4 Full offline suite + `task e2e -race` green; adversarial review;
+      commit group 4. Both reviewers returned CHANGES REQUESTED and were right:
+      the Lstat-only standards-path guard was bypassable by a committed
+      `.semdev` DIRECTORY symlink (proven by execution — the leaf reported
+      IsRegular and outside bytes were read), and `wiring_test.go` was
+      coverage-proven vacuous for 5 of its 6 guards. Both fixed + pinned, along
+      with the evidence-resolution fail-open, the curator-refusal
+      misclassification, repo case-folding (an identity input), the hand-rolled
+      record prefix, a mid-provision panic path, and the redundant
+      `PlatformMeta` threading. DEFERRED: extracting the paginated
+      prefix-query loop now duplicated 4× across `admission` + `standards`
+      (a separate refactor of another package).
 
 ## 5. The checks lane (D7)
 

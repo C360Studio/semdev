@@ -88,6 +88,25 @@ type Manifests interface {
 	Resolve(ctx context.Context, checkoutRoot string) (harness.Manifest, error)
 }
 
+// Standards syncs the provisioned checkout's repo-declared standards file onto the
+// lesson substrate, so the run's later developer/reviewer spawns receive the target
+// repo's own law at brief assembly. Narrow seam for the same reason Manifests is one:
+// the tool holds no file or graph logic.
+//
+// The two-valued return is the seam's whole contract, and it is a CLASSIFICATION the
+// caller cannot make for itself. A non-empty blockReason is a DECLARATION fault — the
+// repo's standards file is malformed or invalid — which parks toward the human with the
+// parser's exact defect, because no amount of retrying fixes a typo. A returned error is
+// a fault in semdev's OWN substrate (a graph write, a transport timeout), which the
+// station retries and, exhausted, parks via station.dispatch.failed. Collapsing the two
+// would either spin forever on a typo or park permanently on a NATS hiccup.
+//
+// nil is NOT "no standards": see Provision, which blocks. A run that never read the
+// repo's declared musts has not satisfied them (SB5).
+type Standards interface {
+	Sync(ctx context.Context, runEntityID, checkoutRoot string) (blockReason string, err error)
+}
+
 // Warmers stands up the run's WARM dev sandbox container — the one the bounded
 // loop's measure_task (and, later, check_floors) Exec into across
 // apply→measure→retry iterations (design SB4). provision_sandbox stands it up ONCE,
@@ -139,6 +158,7 @@ type ProvisionDeps struct {
 	Sources   Sources
 	Checkouts Checkouts
 	Manifests Manifests
+	Standards Standards
 	Warmers   Warmers
 	Prover    Prover
 	Store     secrets.Store
@@ -161,16 +181,20 @@ type ProvisionDeps struct {
 //   - ProvisionResult{Ready:true,...}, nil — proven cold + warm container up (readiness stamped)
 //   - ProvisionResult{Ready:false, Reason}, nil — a BLOCK is stamped (a park rule routes it), NOT an error
 //   - ProvisionResult{NoOp:true, Ready:true}, nil — already provisioned (no re-materialize)
-//   - (_, error) — ONLY a graph-WRITE fault (the block/ready fact could not be stamped) — retryable
+//   - (_, error) — a SUBSTRATE fault the caller should retry: a graph-WRITE fault (the
+//     block/ready fact could not be stamped), or a standards-sync fault in semdev's own
+//     substrate (never the target repo's declaration, which blocks instead)
 //
 // A blocked run (docker absent, unresolvable source, unbuildable image, non-cold baseline,
 // warm-Up fault) is a stamped sandbox.blocked, never an error — the readiness is
 // harness-DERIVED from the cold proof, never model-supplied (G3). Fires no lifecycle
 // transition (G2).
 //
-// CONTRACT: Sources/Checkouts/Manifests/Warmers/Reader/Writer must be non-nil — the caller
-// (the provision station factory) constructs them and fails loud on a nil seam. Nil
-// Prover/DockerCheck/Logger are defaulted.
+// CONTRACT: Sources/Checkouts/Manifests/Standards/Warmers/Reader/Writer must be non-nil — the
+// caller (the provision station factory) constructs them and fails loud on a nil seam. Nil
+// Prover/DockerCheck/Logger are defaulted. A nil Standards additionally BLOCKS here rather
+// than skipping the sync, so a wiring regression cannot quietly provision runs that never
+// read the target repo's declared standards.
 func Provision(ctx context.Context, deps ProvisionDeps, runEntityID string) (ProvisionResult, error) {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
@@ -207,6 +231,24 @@ func Provision(ctx context.Context, deps ProvisionDeps, runEntityID string) (Pro
 	if err != nil {
 		return block(ctx, deps, runEntityID, fmt.Sprintf("materialize checkout: %v", err))
 	}
+	// The repo's declared standards, synced onto the lesson substrate with the checkout in
+	// hand and BEFORE the cold proof: a malformed declaration parks without first paying for
+	// a docker image build, and every later spawn's brief assembly finds the records already
+	// active. An unwired seam blocks rather than skipping — a run that never read the repo's
+	// musts has not satisfied them, and silence about that is exactly the SB5 shape.
+	if deps.Standards == nil {
+		return block(ctx, deps, runEntityID,
+			"no standards seam is wired, so the target repo's declared standards were never read — "+
+				"refusing to provision a run that cannot receive the repo's own law (wiring fault; park toward the operator)")
+	}
+	if blockReason, err := deps.Standards.Sync(ctx, runEntityID, checkoutRoot); err != nil {
+		// A substrate fault, not the repo's mistake: return it so the station's bounded retry
+		// re-attempts. Blocking here would park the run permanently on a transient fault.
+		return ProvisionResult{}, fmt.Errorf("sync repo standards for %s: %w", runEntityID, err)
+	} else if blockReason != "" {
+		return block(ctx, deps, runEntityID, fmt.Sprintf("repo standards: %s", blockReason))
+	}
+
 	manifest, err := deps.Manifests.Resolve(ctx, checkoutRoot)
 	if err != nil {
 		return block(ctx, deps, runEntityID, fmt.Sprintf("resolve declared image/manifest: %v", err))

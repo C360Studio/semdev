@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -59,6 +60,44 @@ type RecordLister interface {
 // (repo.standards.repo), with found=false for an absent entity.
 type EvidenceResolver interface {
 	SourceRepo(ctx context.Context, sourceEntityID string) (repo string, found bool, err error)
+}
+
+// DeclarationError marks a fault in what the TARGET REPO declared — a malformed
+// standards file, an over-bound injection form — as opposed to a fault in
+// semdev's own substrate (a graph write, a transport timeout). Provisioning
+// needs the distinction and cannot make it for itself: a declaration fault
+// parks toward the human with the exact defect, because no amount of retrying
+// fixes a typo, while a substrate fault must retry or a NATS hiccup parks the
+// run permanently.
+type DeclarationError struct{ Err error }
+
+func (e *DeclarationError) Error() string {
+	if e == nil || e.Err == nil {
+		// Exported type with an exported field: &DeclarationError{} compiles, and a nil
+		// deref here would panic inside a provision handler while REPORTING another fault.
+		return "standards: unspecified declaration fault"
+	}
+	return e.Err.Error()
+}
+func (e *DeclarationError) Unwrap() error { return e.Err }
+
+// promotionRefusalMarker is how the framework's curator words a REFUSAL as opposed to a
+// fault (lesson_promotion.go:82,99). Matched on the substring because the framework
+// returns a plain error with no sentinel — filed upstream as part of the consumer-surface
+// hardening ask. A miss here is safe in the conservative direction: the fault falls
+// through to the retry path, which is where it sits today.
+const promotionRefusalMarker = "refused —"
+
+// isPromotionRefusal reports whether the curator declined to activate on the record's own
+// state (unresolvable or absent evidence) rather than failing to reach the graph.
+func isPromotionRefusal(err error) bool {
+	return err != nil && strings.Contains(err.Error(), promotionRefusalMarker)
+}
+
+// IsDeclaration reports whether err is a repo-declaration fault.
+func IsDeclaration(err error) bool {
+	var d *DeclarationError
+	return errors.As(err, &d)
 }
 
 // Result summarizes one sync pass. Promoted counts promotion CALLS issued this
@@ -120,7 +159,7 @@ func (s *Syncer) Sync(ctx context.Context, raw []byte, repo string) (Result, err
 	}
 	file, err := Parse(raw)
 	if err != nil {
-		return Result{}, err
+		return Result{}, &DeclarationError{Err: err}
 	}
 
 	// The digest covers repo + content (semstreams-review M2): byte-identical
@@ -156,7 +195,10 @@ func (s *Syncer) Sync(ctx context.Context, raw []byte, repo string) (Result, err
 	for _, std := range file.Standards {
 		entityID, triples, err := s.recordFor(std, sourceID, now)
 		if err != nil {
-			return Result{}, err
+			// recordFor's only fault is the injection-form bound — repo-authored text
+			// that is too long to inject. The repo's mistake, so it parks like a parse
+			// defect rather than retrying forever.
+			return Result{}, &DeclarationError{Err: err}
 		}
 		expected[entityID] = true
 		created, err := s.Store.CreateLesson(ctx, entityID, agentic.AgentLessonMessageType(), triples)
@@ -183,6 +225,18 @@ func (s *Syncer) Sync(ctx context.Context, raw []byte, repo string) (Result, err
 			continue
 		}
 		if err := s.Curator.Promote(ctx, entityID); err != nil {
+			// The curator REFUSES (rather than faults) when a record's cited evidence does
+			// not resolve. That is a durable state defect, not a transient one: retrying it
+			// burns the station's whole budget and then parks with a message naming the
+			// station instead of the problem. Classify it as a declaration fault so the run
+			// parks immediately, carrying the curator's own words.
+			//
+			// The reachable path is a source-entity ID collision: our strict Create conflicts
+			// with a pre-existing entity that is NOT our source, IsConflict reads that as the
+			// idempotent duplicate signal, and Promote then cannot resolve the evidence.
+			if isPromotionRefusal(err) {
+				return Result{}, &DeclarationError{Err: fmt.Errorf("standards: cannot activate %q (%s): %w", std.ID, entityID, err)}
+			}
 			return Result{}, fmt.Errorf("standards: promote %q (%s): %w", std.ID, entityID, err)
 		}
 		res.Promoted++
@@ -273,13 +327,27 @@ func (s *Syncer) validate() error {
 
 // retireRemoved retires THIS repo's repo-standard records that the current file
 // no longer declares (D5). Cross-repo isolation: a candidate retires only when
-// its evidence resolves to a source entity whose declared repo matches;
-// unresolvable evidence is skipped loudly, never retired.
+// its evidence resolves to a source entity whose declared repo matches; a
+// candidate whose evidence genuinely does not exist is skipped loudly, never
+// retired.
+//
+// A READ FAULT is not a skip. Collapsing "this evidence entity is absent" into
+// "this read failed" would make a NATS blip on one evidence read leave a
+// withdrawn standard active while the sync returned success — fail-OPEN on the
+// one outcome retirement exists to produce, visible only as a WARN. So a real
+// fault propagates as a substrate error: the station retries and, exhausted,
+// parks toward the human (the same posture as maxRecordPages refusing to
+// truncate a listing).
 func (s *Syncer) retireRemoved(ctx context.Context, repo string, expected map[string]bool, res *Result) error {
 	candidates, err := s.Lister.ListLessonRecords(ctx)
 	if err != nil {
 		return fmt.Errorf("standards: list records for retirement: %w", err)
 	}
+	// One read per DISTINCT source entity, not per candidate. Every record from one file
+	// cites the same source, and foreign repos' records re-cite theirs on every pass, so
+	// without this a deployment with R repos × N standards does R×N serial 5s-bounded
+	// reads on the critical path of every provision to learn R answers.
+	seen := map[string]sourceLookup{}
 	for _, c := range candidates {
 		if c.Category != standardCategory || expected[c.EntityID] {
 			continue
@@ -287,7 +355,11 @@ func (s *Syncer) retireRemoved(ctx context.Context, repo string, expected map[st
 		if c.Status != "active" && c.Status != "proposed" {
 			continue
 		}
-		if !s.evidenceMatchesRepo(ctx, c, repo) {
+		matches, err := s.evidenceMatchesRepo(ctx, c, repo, seen)
+		if err != nil {
+			return fmt.Errorf("standards: resolve evidence of candidate %s: %w", c.EntityID, err)
+		}
+		if !matches {
 			continue
 		}
 		if err := s.Curator.Retire(ctx, c.EntityID); err != nil {
@@ -298,21 +370,44 @@ func (s *Syncer) retireRemoved(ctx context.Context, repo string, expected map[st
 	return nil
 }
 
-func (s *Syncer) evidenceMatchesRepo(ctx context.Context, c CandidateRecord, repo string) bool {
+// sourceLookup is one memoized evidence resolution. Faults are deliberately NOT cached:
+// they abort the pass, so there is never a second question to answer.
+type sourceLookup struct {
+	repo  string
+	found bool
+}
+
+// evidenceMatchesRepo reports whether any of the candidate's cited evidence resolves to
+// a source entity declaring repo, resolving each distinct evidence entity at most once
+// per pass via seen. An error means the resolution could not be COMPLETED — the caller
+// must not read that as "not ours" (see retireRemoved).
+func (s *Syncer) evidenceMatchesRepo(ctx context.Context, c CandidateRecord, repo string, seen map[string]sourceLookup) (bool, error) {
 	for _, ev := range c.Evidence {
-		r, found, err := s.Resolver.SourceRepo(ctx, ev)
-		if err != nil || !found {
+		hit, cached := seen[ev]
+		if !cached {
+			r, found, err := s.Resolver.SourceRepo(ctx, ev)
+			if err != nil {
+				return false, fmt.Errorf("read source repo of evidence %s: %w", ev, err)
+			}
+			hit = sourceLookup{repo: r, found: found}
+			seen[ev] = hit
+		}
+		r, found := hit.repo, hit.found
+		if !found {
+			// Genuinely absent (or carrying no repo): out of scope, and the resolver has
+			// already distinguished this from a fault. Skipping is right here — a foreign
+			// writer's record must not enter this repo's retirement set.
 			if s.Logger != nil {
-				s.Logger.Warn("standards: candidate record's evidence did not resolve to a source repo — refusing to retire it",
-					slog.String("record", c.EntityID), slog.String("evidence", ev), slog.Any("error", err))
+				s.Logger.Warn("standards: candidate record's evidence names no source repo — treating it as out of scope",
+					slog.String("record", c.EntityID), slog.String("evidence", ev))
 			}
 			continue
 		}
 		if r == repo {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // warnOnKBound warns when a role's declared set exceeds the substrate's
