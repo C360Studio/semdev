@@ -85,6 +85,7 @@ checks:
   - name: go-vet
     command: go vet ./...
     required: true                   # required gates; optional surfaces
+    proof: go vet ./testdata/badvet  # optional negative control; MUST exit non-zero
 ```
 
 Strict parse, fail-closed (the spec's malformed-parks scenario): unknown
@@ -93,6 +94,32 @@ all reject with the exact defect named; the parser is a pure function with
 red-first table tests. Roles are validated against the two injectable roles
 (`developer`, `reviewer`) — a standard scoped to anything else is a parse
 error (fail-closed beats silently-never-injected).
+
+**Check-command validity (the DR-0001 fold).** A check command is a GATE, and a
+gate that cannot fail is worse than no gate — it reads green forever while the
+thing it claims to guard rots. `validateCheck` therefore rejects the commands
+that cannot fail *by construction*, each naming its defect:
+
+- **Suppression**: the command contains `|| true`, `|| :`, a trailing `; true`,
+  `2>/dev/null`, or `2>&-` — constructs whose only effect is to discard the
+  status or the diagnostics of the check itself.
+- **Vacuity**: the command is exactly `true`, `:`, or a bare `echo …` — it runs,
+  exits 0, and measures nothing. (Precedent in-tree: `harness.Command`'s
+  `UnmarshalJSON` already refuses to normalize a blank string into
+  `sh -c "   "` for this exact reason.)
+- **Laundered status, `required` only**: an unquoted top-level pipeline. In
+  `sh -c` a pipeline's status is the LAST command's, so
+  `go test -cover ./... | tail -1` prints a number and exits 0 — the canonical
+  fail-open gate. The escape hatch is the right one anyway: put the pipeline in
+  a repo-committed script (`command: ./scripts/coverage.sh`) whose own
+  `set -euo pipefail` owns the status. Non-required checks warn rather than
+  reject (they gate nothing). The scanner skips quoted segments and must not
+  mistake `||` for a pipe.
+
+These rules are a DENYLIST over the fail-open shapes we can name, not a proof of
+gate soundness — D7a is what carries the positive claim. The rules land with
+group 5 (checks are inert until the lane exists), red-first, extending the
+group-2 parser rather than amending its commit.
 
 ## D2 — the source entity: honest evidence, 3 new predicates (G9)
 
@@ -206,13 +233,68 @@ tables (new entity class + pattern const).
   findings writer — floor name `repo-check:<name>`, the command's real exit
   status in the detail (G3; the harness ran it, the harness stamps it).
   `required: true` + non-zero exit = a rejecting finding (routes exactly like
-  a built-in floor); non-required failures stamp non-rejecting findings.
+  a built-in floor); non-required failures stamp non-rejecting findings. Every
+  finding also carries the check's gate status — `proven` | `unproven` |
+  `not-run` — per D7a, so the evidence never reads a never-demonstrated gate as
+  a clean pass.
 - The floors station's "no model turn" property is untouched — checks are
   deterministic subprocess runs.
 - Parse errors of the base-ref file at floors time fail the floors turn
   loudly (the malformed file would already have parked at provision for the
   HEAD copy; the base-ref copy differing malformed is a pathological state
   that must not silently pass).
+
+## D7a — gate honesty: a repo-authored check is an unproven checker
+
+The DR-0001 fold's positive half. D7 makes a repo's command load-bearing: a
+failing `required` check rejects the attempt exactly like a built-in floor. But
+semdev's own floors earn that authority by being **red-first pinned** (G6) — we
+have watched each of them fail. A repo-authored command has no such history.
+It arrives as a gate we have never seen reject anything, and the dangerous
+failure of a checker is fail-OPEN: nothing crashes, the layer prints pass.
+
+D1's denylist removes the shapes we can name. Three mechanisms carry the rest:
+
+**1. The optional `proof` negative control.** A check may declare `proof`, a
+second command run in the SAME container with the same bounds, immediately
+before its check. The contract is inverted: **the proof MUST exit non-zero.**
+
+| `proof` | proof exit | Result |
+|---|---|---|
+| declared | non-zero | the check is `proven` — it demonstrably reaches its failure path; run the check normally |
+| declared | **zero** | the control did not fail, so the gate is not demonstrably able to fail: stamp `repo-check:<name>` naming the un-failing control. Rejecting iff the check is `required` |
+| absent | — | run the check and gate as declared, but the finding carries `unproven` |
+
+`required` stays the SOLE rejection axis — a non-required check never rejects,
+whatever its proof did. This is old-coder's *"prove it can fail before trusting
+its pass"* rendered as a harness-executed, harness-stamped fact (G3): the
+harness runs the control and stamps the real exit status; no model ever asserts
+that a gate works.
+
+**2. `unproven` is never rendered as a clean pass.** The status rides the
+finding and travels to the evidence surface. A check with no negative control
+still gates — ergonomics are a hard requirement and demanding a control for
+every check would kill them — but the evidence never claims more than was
+demonstrated. This is the G7 half, and it is the hook DR-0001's O7 (the
+`N-A` / `UNAVAILABLE` / `SUBSTITUTED` split) plugs into when it lands.
+
+**3. Could-not-run is neither pass nor reject-on-the-merits.** `runner.Exec`
+returns a run error when the container could not execute the command at all (a
+dead container, a missing binary, a cancelled deadline). `measure_task` already
+holds this contract — the seam's exit-vs-transport rule *"keeps a dead container
+from false-greening"* (`measuretask.go:153-158`) — and the checks stage adopts
+it verbatim: a check that could not be RUN is stamped `not-run` and is NEVER a
+pass; for a `required` check it rejects (fail-closed, routing exactly like any
+floor rejection), and the finding text distinguishes could-not-run from ran-and-
+failed so the evidence stays honest about which instrument reported.
+
+**The bound, stated so we do not overclaim.** A negative control proves that ONE
+known-bad case reaches the checker's failure path. It does NOT prove the checker
+recognizes every violation of the rule it serves — a grep gate can fail closed
+perfectly and still guard a spelling rather than a behavior. `proven` therefore
+means "demonstrated able to fail", never "sound". Where a check's coverage is
+narrower than the standard it serves, that belongs in the standard's text, not
+in an implied promise from its status.
 
 ## D8 — personas: the judgment lane
 
@@ -245,7 +327,11 @@ check, one non-required check) →
 
 Plus unit/integration pins per group (parser tables, idempotent re-sync,
 oversize rejection, retirement + cross-repo isolation, base-ref check
-immunity, contract-mirror literals) and the G8 scan extension: the
+immunity, contract-mirror literals), the D7a gate-honesty pins (each denied
+fail-open construct rejects at parse naming its defect; a `proof` that exits
+zero rejects a required check; an absent `proof` gates but stamps `unproven`;
+a could-not-run check stamps `not-run` and never passes — the last red-first
+against a deliberately dead container) and the G8 scan extension: the
 fixture-vocabulary conformance walk gains `.yaml`/`.yml` so standards
 fixtures cannot smuggle coaching (B10).
 
@@ -253,6 +339,8 @@ fixtures cannot smuggle coaching (B10).
 
 Consolidated from the adversarial reviews; semdev is among the first products
 on the lesson substrate (user directive: file bugs AND improvements).
+**FILED 2026-08-16**: U1+U2+U3 → semstreams#979 (consumer-surface hardening),
+U4 → #980, U5 → #981, U6 → #982.
 
 - **U1 — export the content-identity derivation** (`canonicalLessonContent` /
   the UUIDv5 mint are unexported, forcing a byte-for-byte mirror with no
@@ -290,6 +378,13 @@ on the lesson substrate (user directive: file bugs AND improvements).
 
 ## Risks / trade-offs
 
+- **The fail-open denylist is a denylist (D1/D7a)**: it removes the
+  fail-open shapes we can name, and a determined author can still write a gate
+  that cannot fail — a `grep` whose rc-1/rc-2 cases are inverted, a script that
+  swallows its own status. The `proof` control is the positive claim, and it is
+  optional by design (authoring ergonomics are a hard requirement), so
+  `unproven` is the honest default rather than a rejection. What the design
+  refuses to do is let an unproven gate render as a clean pass.
 - **Prompt-injection surface**: standards text is repo-authored and enters
   agent briefs verbatim. Bounded by: the 320B/record + 4KB/brief caps, strict
   parse, and — the real backstop — every consequential outcome staying

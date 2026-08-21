@@ -83,16 +83,35 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 5. The checks lane (D7)
 
-- [ ] 5.1 RED: floors-level pins — (a) a required check whose command exits
+- [ ] 5.1 RED: parser table extension (D1 fold, DR-0001) — each denied
+      fail-open construct rejects naming its defect: suppression
+      (`|| true`, `|| :`, trailing `; true`, `2>/dev/null`, `2>&-`), vacuity
+      (`true`, `:`, bare `echo …`), and an unquoted top-level pipeline on a
+      `required` check (non-required warns). Pins the scanner's two traps:
+      `||` is not a pipe, and a pipe inside quotes is not top-level. Plus the
+      `proof` field's parse (optional, non-empty when present, same denials).
+- [ ] 5.2 GREEN: extend `validateCheck`/`Check` in `internal/standards` for
+      5.1. Extends the group-2 parser; does not amend its commit.
+- [ ] 5.3 RED: floors-level pins — (a) a required check whose command exits
       non-zero stamps a rejecting `repo-check:<name>` finding and the rail
       does not advance; (b) a non-required failure stamps non-rejecting;
       (c) zero-checks file/absent file leaves floors byte-identical;
       (d) the base-ref read — an attempt-modified standards file does NOT
       change the executed checks (the refs/semdev/base copy governs).
-- [ ] 5.2 GREEN: `checkfloors.RunFloors` checks stage — base-ref file read,
-      in-container `runner.Exec` per check, findings stamped via the
-      existing writer; the two new narrow deps wired at the floors station.
-- [ ] 5.3 Full offline suite + `task e2e -race` green; adversarial review;
+- [ ] 5.4 RED: gate-honesty pins (D7a) — (a) a declared `proof` exiting
+      non-zero marks the check `proven` and the check then runs normally;
+      (b) a `proof` exiting ZERO stamps the un-failing-gate finding, rejecting
+      iff `required` (a non-required check with a passing control never
+      rejects); (c) an absent `proof` gates as declared and stamps `unproven`;
+      (d) a check the runner could not execute stamps `not-run`, is never a
+      pass, and is distinguishable in the finding text from ran-and-failed —
+      red-first against a deliberately dead container, the measure_task
+      exit-vs-transport contract reused.
+- [ ] 5.5 GREEN: `checkfloors.RunFloors` checks stage — base-ref file read,
+      in-container `runner.Exec` per check (control first when declared),
+      findings stamped via the existing writer carrying the gate status; the
+      two new narrow deps wired at the floors station.
+- [ ] 5.6 Full offline suite + `task e2e -race` green; adversarial review;
       commit group 5.
 
 ## 6. The judgment lane + the full bridge proof (D8, D9)
