@@ -1,6 +1,6 @@
 # Port Manifest
 
-What semdev takes from its two donors, in what form, and what is **banned**
+What semdev takes from its donors, in what form, and what is **banned**
 from crossing. Nothing enters semdev except through this manifest; every port
 lands with the constitution pin that makes it safe. "Port as pattern" means
 re-derive in semdev's terms reading the donor for reference; "port as code"
@@ -62,6 +62,36 @@ exists; none of them crosses, and reviews cite this table by number:
 | B8 | Retry-fidelity vocabulary matching (reviewvocab-class machinery) | Unnecessary once specs are immutable by construction (T2); the whole #299 family dissolves |
 | B9 | Streak/state JSON blobs in triples | Violated semspec's own standards within weeks |
 | B10 | Fixture coaching in orchestration vocabulary | G8; measured "can it follow planted instructions," not capability |
+
+## From old-coder — the gauntlet coverage list (third donor, evaluated 2026-08-20)
+
+[`amazingang/old-coder`](https://github.com/amazingang/old-coder) is an external agent-assurance skill
+(SPEC → RED → GREEN → REFACTOR → GAUNTLET → EVIDENCE) whose thesis is semdev's thesis. It is a **pattern
+and data donor only** — no code crosses, because its mechanisms are prompt instructions to the agent being
+graded, and semdev's equivalents are schema and harness properties. Full evaluation, including what is
+rejected and why, is `docs/decisions/0001-old-coder-gauntlet-evaluation.md` (DR-0001). Rows marked
+CANDIDATE are decided but unscheduled work with a tracking issue; nothing lands without its own change.
+
+| # | Asset | Source | Port as | Status / required pin |
+|---|-------|--------|---------|-----------------------|
+| O1 | Home-grown checkers fail closed and must be **proven able to fail** before their pass is trusted | `SKILL.md` "Checker note"; `references/gauntlet.md` "Gauntlet entry point" | pattern | ACCEPTED — folded into `standards-via-lessons` D1/D7 for repo-authored checks (fail-open construct rejection, the optional `proof` negative control, `unproven` status). Their own demo's fail-open mutation runner is the cautionary case. Pins: G3, G7. |
+| O2 | Red-first is evidence, not etiquette: a test never observed failing proves nothing | `SKILL.md` §2 RED | pattern | CANDIDATE — the base-ref evidence bundle. Must land harness-executed and harness-stamped (G3), never as persona coaching. Their caveat travels: a compile failure is a weaker RED than an assertion failure. Issue [#8](https://github.com/C360Studio/semdev/issues/8). |
+| O3 | Changed-line coverage as the constraint; global % is vanity | `SKILL.md` gauntlet table | pattern | CANDIDATE — same bundle; keys off `refs/semdev/base`. Carries O1's rule: the layer must exit non-zero when its threshold is missed. Issue [#9](https://github.com/C360Studio/semdev/issues/9). |
+| O4 | Baseline discipline — record pre-existing failures verbatim, hold at zero NEW failures | `SKILL.md` "Baseline note" | pattern | CANDIDATE — same bundle. Unblocks M2 dogfood and every M3 sibling on repos with a red suite. Issue [#10](https://github.com/C360Studio/semdev/issues/10). |
+| O5 | Suite health — randomized order, repeat suspected flakes; every number rests on determinism | `SKILL.md` gauntlet table | pattern | CANDIDATE — same bundle. A flaky suite can produce a false GREEN. Issue [#11](https://github.com/C360Studio/semdev/issues/11). |
+| O6 | Supply chain, secret scan, and **capability diff** on the agent's own change | `references/gauntlet.md` extended layer menu | pattern | CANDIDATE — security follow-on. Distinct axis from `internal/forbidden` (build-time downloads) and `internal/secrets` (redacting operator secrets). Its SPEC half — new dependencies declared and justified in the approved artifact, harness-rejected if undeclared — is the load-bearing part. Issue [#12](https://github.com/C360Studio/semdev/issues/12). |
+| O7 | Evidence honesty: `N-A` / `UNAVAILABLE` / `SUBSTITUTED` split; `SUBSTITUTED` is never a pass; dismissals carry a citing line; name the structural blind spot | `references/templates.md` EVIDENCE template | data + pattern | CANDIDATE — includes a live defect: `Delivery.factString` renders "absent" and "read failed" identically. Pin: G7. Issue [#13](https://github.com/C360Studio/semdev/issues/13). |
+| O8 | `## Must NOT` as a first-class spec block, every clause mapped in evidence or explicitly skipped-with-reason | `references/templates.md` SPEC template | pattern | CANDIDATE — per-change invariants; distinct from repo-wide standards. Issue [#14](https://github.com/C360Studio/semdev/issues/14). |
+| O9 | Risk tiers scale **which layers run**; Tier 3 opens with an explicit failure model | `SKILL.md` "Calibration" | pattern | DEFERRED — needs the checks lane first; the natural carrier is a `when:` path-glob on standards checks. Issue [#15](https://github.com/C360Studio/semdev/issues/15). |
+
+**NOT taken from old-coder**: the round-capped prose verifier protocol (`references/verifier.md`) — Quinn
+is structurally fresh-context and clean-room verify is executable rather than prose, so a graded prose
+round spends tokens on a surface we already have; **mutation testing** for now (their own table admits Go
+has no mature tool, and their manual runner is the fail-open cautionary tale — revisit if a credible Go
+tool lands); the **markdown SPEC/EVIDENCE artifacts** as file formats (ours are graph facts and a
+fact-derived PR body — a document can drift from the run, a fact cannot; we take the content discipline,
+not the format); and the **`old-coder-api` skill** as a port (it is target-repo domain policy, which is
+exactly what `.semdev/standards.yaml` is for).
 
 ## Framework
 
