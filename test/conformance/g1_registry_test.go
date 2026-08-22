@@ -29,7 +29,7 @@ func frameworkFactories(t *testing.T) map[string]bool {
 func semdevFactories(t *testing.T) map[string]bool {
 	t.Helper()
 	reg := component.NewRegistry()
-	if err := boot.RegisterAll(reg, nil, nil, provision.SourceSpec{}, nil); err != nil {
+	if err := boot.RegisterAll(reg, nil, nil, provision.SourceSpec{}, nil, nil); err != nil {
 		t.Fatalf("boot.RegisterAll: %v", err)
 	}
 	return factoryNameSet(reg)

@@ -62,6 +62,13 @@ type Finding struct {
 	Floor  string
 	Passed bool
 	Detail string
+	// Advisory marks a finding that is REPORTED but does not gate — the repo-declared
+	// non-required checks (standards-via-lessons D7). It exists so a failure never has to
+	// be laundered into Passed=true to avoid rejecting: AnyRejected skips advisory
+	// findings, while FormatDetail still renders them as failures. Collapsing the two
+	// would put "passed" in the human-readable evidence for a check that failed, which is
+	// exactly the kind of quiet dishonesty the floors exist to prevent (G7).
+	Advisory bool
 }
 
 // pass builds a passing finding for floor with an explanatory note.
@@ -92,7 +99,7 @@ func CheckAll(a Attempt) []Finding {
 // AnyRejected reports whether any finding rejects — the loop's gate predicate.
 func AnyRejected(findings []Finding) bool {
 	for _, f := range findings {
-		if !f.Passed {
+		if !f.Passed && !f.Advisory {
 			return true
 		}
 	}

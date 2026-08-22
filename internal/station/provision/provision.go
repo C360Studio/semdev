@@ -121,7 +121,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 // shared checkout, or stand up into the shared warm-container registry measure_task reads, must
 // not start (never a silent no-op). A fixture-mode EMPTY dir is NOT a fail-loud: it makes the
 // source resolve fail closed → block → park (SB5), matching the tool.
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, clients *graphown.Clients) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, snapshots *standards.Snapshots, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -161,7 +161,10 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 		// looks like a valid identity.
 		Org:      deps.Platform.Org,
 		Platform: deps.Platform.Platform,
-		Logger:   logger,
+		// The SHARED capture store the floors-time checks lane reads. Provisioning is the
+		// only point at which the repo's declared law is known to be untouched by the run.
+		Snapshots: snapshots,
+		Logger:    logger,
 	})
 	if err != nil {
 		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build repo-standards sync")
@@ -194,11 +197,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // the run's SOURCE spec. Called from boot.RegisterAll with the live instances; the conformance
 // census passes nil/zero (the factory registers but fails loud if ever constructed, which the
 // census never does — it only inspects the registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, clients *graphown.Clients) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, snapshots *standards.Snapshots, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts, sandboxes, spec, clients)
+			return newProcessor(raw, deps, checkouts, sandboxes, spec, snapshots, clients)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

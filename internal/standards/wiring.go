@@ -22,7 +22,10 @@ type Wiring struct {
 	Reader   changefacts.Reader
 	Org      string
 	Platform string
-	Logger   *slog.Logger
+	// Snapshots is the SHARED provision-time capture store the floors-time checks lane
+	// reads. The same instance must reach both stations, or the lane faults every run.
+	Snapshots *Snapshots
+	Logger    *slog.Logger
 }
 
 // NewProvisionSync builds the production standards sync, rejecting a partially-wired
@@ -90,7 +93,11 @@ func NewProvisionSync(w Wiring) (*ProvisionSync, error) {
 		Logger:     logger,
 		Now:        time.Now,
 	}
-	return &ProvisionSync{Syncer: syncer, Repos: NewRepoResolver(w.Reader), Logger: logger}, nil
+	if w.Snapshots == nil {
+		return nil, fmt.Errorf("standards: the shared provision-time snapshot store is required — without it the " +
+			"floors-time checks lane has no captured law and faults every run")
+	}
+	return &ProvisionSync{Syncer: syncer, Repos: NewRepoResolver(w.Reader), Snapshots: w.Snapshots, Logger: logger}, nil
 }
 
 // validateIdentityParts rejects an org/platform that cannot form an entity ID, by asking

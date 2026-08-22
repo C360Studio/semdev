@@ -24,12 +24,13 @@ func fullWiring(t *testing.T) Wiring {
 		t.Fatalf("build graph clients for the wiring fixture: %v", err)
 	}
 	return Wiring{
-		NATS:     &natsclient.Client{},
-		Clients:  clients,
-		Reader:   stubReader{},
-		Org:      "org",
-		Platform: "plat",
-		Logger:   slog.Default(),
+		NATS:      &natsclient.Client{},
+		Clients:   clients,
+		Reader:    stubReader{},
+		Org:       "org",
+		Platform:  "plat",
+		Snapshots: NewSnapshots(),
+		Logger:    slog.Default(),
 	}
 }
 
@@ -70,6 +71,9 @@ func TestNewProvisionSyncRejectsNilSurfacesLoudly(t *testing.T) {
 		{"empty org", func(w *Wiring) { w.Org = "" }, "platform identity"},
 		{"empty platform", func(w *Wiring) { w.Platform = "" }, "platform identity"},
 		{"dotted org breaks the entity ID", func(w *Wiring) { w.Org = "acme.corp" }, "cannot form a lesson-record entity ID"},
+		// Without the shared capture store the floors-time checks lane has nothing to gate
+		// on and faults every run — a boot-time error, not a per-run surprise.
+		{"nil snapshot store", func(w *Wiring) { w.Snapshots = nil }, "snapshot store"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

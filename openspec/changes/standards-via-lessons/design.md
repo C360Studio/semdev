@@ -100,24 +100,40 @@ gate that cannot fail is worse than no gate — it reads green forever while the
 thing it claims to guard rots. `validateCheck` therefore rejects the commands
 that cannot fail *by construction*, each naming its defect:
 
-- **Suppression**: the command contains `|| true`, `|| :`, a trailing `; true`,
-  `2>/dev/null`, or `2>&-` — constructs whose only effect is to discard the
-  status or the diagnostics of the check itself.
-- **Vacuity**: the command is exactly `true`, `:`, or a bare `echo …` — it runs,
-  exits 0, and measures nothing. (Precedent in-tree: `harness.Command`'s
-  `UnmarshalJSON` already refuses to normalize a blank string into
-  `sh -c "   "` for this exact reason.)
-- **Laundered status, `required` only**: an unquoted top-level pipeline. In
-  `sh -c` a pipeline's status is the LAST command's, so
-  `go test -cover ./... | tail -1` prints a number and exits 0 — the canonical
-  fail-open gate. The escape hatch is the right one anyway: put the pipeline in
-  a repo-committed script (`command: ./scripts/coverage.sh`) whose own
-  `set -euo pipefail` owns the status. Non-required checks warn rather than
-  reject (they gate nothing). The scanner skips quoted segments and must not
-  mistake `||` for a pipe.
+- **The status must be the gate's own (`required` only)**: the command must be
+  ONE top-level command. A top-level `;`, newline, `|`, or `||` all mean the
+  status belongs to something else — `go vet ./...; true`,
+  `go vet ./... || true`, and `go test -cover ./... | tail -1` are the same bug
+  in three costumes. `&&` is allowed (`a && b` is non-zero when either is), and
+  anything inside quotes, `$( )`, or backticks is data. Escape hatch: put the
+  sequence in a repo-committed script whose `set -euo pipefail` owns the status.
+  REVISED at group 5: the first draft matched literal spellings (`"|| true"`)
+  and both reviewers defeated it by deleting a space — `||true`, `;true`,
+  `; echo done` all sailed through. Matching the SEPARATOR is what makes the
+  rule hold; matching spellings only ever documents the author's imagination.
+- **Vacuity**: the last effective line resolves to a basename that cannot fail
+  (`true`, `:`, `echo`, `printf`, `/bin/true`, an explicit `exit 0`). Basename
+  matching, not string equality, and comments are stripped first so
+  `true # go vet ./...` is seen for the no-op it is. (Precedent in-tree:
+  `harness.Command` refuses to normalize a blank string into `sh -c "   "` for
+  this exact reason.)
+- **Diagnostic suppression warns rather than rejecting**: `2>/dev/null` and
+  `2>&-` discard OUTPUT, not status — the gate still works, but nobody can read
+  why it fired. Warnings are carried on the parsed file and logged at provision;
+  the earlier draft documented "warns" with no channel to warn on.
+
+A declared `proof` is held to the same rules, plus the mirror-image one: a
+control that is exactly `false` / `! true` / `exit 1` fails on its own WITHOUT
+invoking the checker, so it certifies the gate while demonstrating nothing —
+strictly worse than declaring no control, because an absent control stamps
+`unproven` and an always-failing one reads `proven`.
 
 These rules are a DENYLIST over the fail-open shapes we can name, not a proof of
-gate soundness — D7a is what carries the positive claim. The rules land with
+gate soundness — D7a is what carries the positive claim. And the parser cannot
+verify that a control exercises the SAME checker as its check: `proof: go vet
+./testdata/badvet` paired with `command: staticcheck ./...` passes every rule
+and demonstrates nothing. That is the honest bound `proven` is allowed to
+assert. The rules land with
 group 5 (checks are inert until the lane exists), red-first, extending the
 group-2 parser rather than amending its commit.
 
@@ -220,12 +236,24 @@ tables (new entity class + pattern const).
 `checkfloors.RunFloors` gains a repo-checks stage with two new narrow deps
 (the warm-sandbox resolver + container runner — the measuretask shape):
 
-- **Where checks come from**: the standards file at the run's base revision —
-  `git show refs/semdev/base:.semdev/standards.yaml` in the checkout. Reading
-  the base ref (which provisioning already maintains as the diff anchor)
-  makes the checks the repo's law AS PROVISIONED: an attempt cannot weaken or
-  drop a required check even if a human approved the standards file into
-  `target_files`. Absent file at base = zero checks, floors unchanged.
+- **Where checks come from** (REVISED at group 5 — the base ref is not safe):
+  the PROVISION-TIME snapshot. The draft read
+  `git show refs/semdev/base:.semdev/standards.yaml`, on the reasoning that the
+  base ref is the law as provisioned. Both group-5 reviewers broke it
+  independently: the run's checkout is bind-mounted read-WRITE into the sandbox
+  (`cleanroom.buildRunArgs` mounts the checkout root at `/work` with no
+  `readonly`), `.git` rides along inside it, and model-authored code executes in
+  that container as normal operation — `measure_task` runs the repo's own test
+  command. A `TestMain` (or a `test_command`) containing
+  `git update-ref refs/semdev/base <other-commit>` moves the ref the gate reads,
+  and every required check silently disappears. A ref is an address the attempt
+  can reach.
+  So the bytes are captured at provision, BEFORE any model turn for the run, and
+  held in a shared in-memory store (`standards.Snapshots`) the container has no
+  address for. A run with no capture FAILS CLOSED (lane fault → park), never
+  "declared no checks" — after a restart its warm sandbox is gone too, so it
+  cannot honestly be measured anyway. Absent file at provision = zero checks,
+  floors unchanged.
 - **Execution**: per check, `runner.Exec(sb, ["sh","-c", command])` in the
   run's warm sandbox (SB2 — repo-authored commands only ever run
   in-container), bounded by the existing measure-exec timeout discipline.
@@ -277,6 +305,14 @@ still gates — ergonomics are a hard requirement and demanding a control for
 every check would kill them — but the evidence never claims more than was
 demonstrated. This is the G7 half, and it is the hook DR-0001's O7 (the
 `N-A` / `UNAVAILABLE` / `SUBSTITUTED` split) plugs into when it lands.
+
+**2b. An un-failing control PARKS; it does not reject the attempt.** A control that
+exits 0 is a defect in the REPO's declaration and it is deterministic — it will pass
+again on every retry. Routing it as an attempt rejection re-dispatches the developer
+against a fault she cannot reach (the standards file is not in `target_files`), burns
+the whole attempt budget on real model turns, and escalates with a reason that reads as
+her work failing. It faults the lane instead, which parks toward the human — the same
+posture provisioning takes for a malformed standards file.
 
 **3. Could-not-run is neither pass nor reject-on-the-merits.** `runner.Exec`
 returns a run error when the container could not execute the command at all (a
@@ -378,6 +414,20 @@ U4 → #980, U5 → #981, U6 → #982.
 
 ## Risks / trade-offs
 
+- **Repo checks run AFTER the built-in floors have judged the tree (group-5
+  review)**: `RunFloors` computes `CheckAll` — including the clean-tree floor —
+  and only then executes repo-authored shell. A check like
+  `go mod tidy && git diff --exit-code` or a build that writes `bin/` dirties
+  the tree after clean-tree certified it clean, and nothing re-checks. Blast
+  radius is bounded (the cold verify clones the commit, not the tree), but the
+  findings are stamped against a clean-tree pass that no longer describes the
+  tree. Reordering would put repo-authored shell before every structural floor,
+  which is worse; documented rather than fixed.
+- **The lane widens the in-container exec surface**: from one human-approved
+  `test_command` to N repo-file commands. The isolation posture is unchanged
+  (the warm sandbox carries no governed secrets — `NewSandboxes` passes an empty
+  secretEnv — and the commands only ever run in-container), but the surface is
+  wider and belongs in the threat model rather than only in the diff.
 - **The fail-open denylist is a denylist (D1/D7a)**: it removes the
   fail-open shapes we can name, and a determined author can still write a gate
   that cannot fail — a `grep` whose rc-1/rc-2 cases are inverted, a script that

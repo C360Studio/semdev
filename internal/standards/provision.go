@@ -32,7 +32,12 @@ type RepoResolver interface {
 type ProvisionSync struct {
 	Syncer syncCore
 	Repos  RepoResolver
-	Logger *slog.Logger
+	// Snapshots captures what this run was provisioned with, for the floors-time checks
+	// lane. Captured HERE because this is the last point before any model turn — the
+	// bytes the gate later runs are the bytes provisioning validated, held outside the
+	// container the attempt executes in.
+	Snapshots *Snapshots
+	Logger    *slog.Logger
 }
 
 // Sync reads the checkout's standards file and projects it onto the lesson
@@ -80,6 +85,7 @@ func (p *ProvisionSync) Sync(ctx context.Context, runEntityID, checkoutRoot stri
 	case errors.Is(err, fs.ErrNotExist):
 		// No file, no law: retirement-only. Deleting the file is how a repo withdraws its
 		// standards, so skipping the sync entirely would leave them active forever (D5/L4).
+		p.Snapshots.Capture(runEntityID, nil) // provisioned, declared nothing
 		res, err := p.Syncer.SyncAbsent(ctx, repo)
 		if err != nil {
 			return classify(err, fmt.Sprintf("retire withdrawn standards for %s", repo))
@@ -119,6 +125,9 @@ func (p *ProvisionSync) Sync(ctx context.Context, runEntityID, checkoutRoot stri
 	if err != nil {
 		return "", fmt.Errorf("standards: read %s: %w", path, err)
 	}
+	// Capture BEFORE the sync: the snapshot is what the checks lane gates on, and a sync
+	// fault must not leave the run with no captured law while provisioning retries.
+	p.Snapshots.Capture(runEntityID, raw)
 	res, err := p.Syncer.Sync(ctx, raw, repo)
 	if err != nil {
 		return classify(err, fmt.Sprintf("sync standards for %s", repo))

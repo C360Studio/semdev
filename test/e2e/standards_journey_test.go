@@ -185,6 +185,10 @@ func resyncStandards(ctx context.Context, t *testing.T, runEntityID string) {
 		Reader:   changefacts.NewNATSReader(client),
 		Org:      "c360",
 		Platform: "semdev-001",
+		// A throwaway capture store: this re-sync is an idempotency probe over the graph,
+		// not a provision, so nothing downstream gates on what it captures. The live
+		// lane's store is boot's shared instance.
+		Snapshots: standards.NewSnapshots(),
 	})
 	if err != nil {
 		t.Fatalf("build the production standards sync: %v", err)

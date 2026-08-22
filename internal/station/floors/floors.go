@@ -41,6 +41,7 @@ import (
 	"strconv"
 
 	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/standards"
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/pkg/errs"
@@ -65,11 +66,12 @@ const (
 
 // handler runs the floors over a developer attempt and mirrors the route onto L_n.
 type handler struct {
-	attempts checkfloors.Attempts
-	reader   changefacts.Reader
-	writer   *graphown.Writer
-	mirror   *graphown.Writer
-	logger   *slog.Logger
+	attempts   checkfloors.Attempts
+	repoChecks checkfloors.RepoChecks
+	reader     changefacts.Reader
+	writer     *graphown.Writer
+	mirror     *graphown.Writer
+	logger     *slog.Logger
 }
 
 // Handle runs the deterministic floors and stamps floor.finding on the run + the route.*
@@ -84,7 +86,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 	}
 	idx := parseTaskIndex(req.Prop(TaskIndexProperty))
 	// req.EntityID is the developer loop L_n — the entity the route rules fire on.
-	res, err := checkfloors.RunFloors(ctx, h.attempts, h.reader, h.writer, h.mirror, h.logger, runEntityID, req.EntityID, idx)
+	res, err := checkfloors.RunFloors(ctx, h.attempts, h.repoChecks, h.reader, h.writer, h.mirror, h.logger, runEntityID, req.EntityID, idx)
 	if err != nil {
 		return fmt.Errorf("floors-station: run floors for task %d on %s: %w", idx, runEntityID, err)
 	}
@@ -112,7 +114,7 @@ func parseTaskIndex(s string) int {
 // checkouts (captured by Register). It fails loud if the checkouts seam is nil — a floors
 // component that cannot read the run's authored attempt must not start (never a silent
 // no-op), matching the dev-loop tools' fail-closed posture.
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, clients *graphown.Clients) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, snapshots *standards.Snapshots, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -128,6 +130,12 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	if checkouts == nil {
 		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "shared run checkouts required (the floors read the authored attempt off the run's checkout)")
 	}
+	if sandboxes == nil {
+		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "shared warm-sandbox registry required (repo-declared checks execute only in the run's container, never on the host)")
+	}
+	if snapshots == nil {
+		return nil, errs.WrapInvalid(errs.ErrInvalidConfig, ComponentName, "NewProcessor", "shared standards-snapshot store required (the checks lane gates on what provisioning captured, not on anything reachable from the sandbox)")
+	}
 	logger := deps.GetLoggerWithComponent(ComponentName)
 	factReader := changefacts.NewNATSReader(deps.NATSClient)
 	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
@@ -138,10 +146,18 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	cfg.FactWriter = clients.Writer(station.DispatchFailedSource)
 	h := &handler{
 		attempts: runspace.NewAttempts(factReader, checkouts),
-		reader:   factReader,
-		writer:   writer,
-		mirror:   mirrorWriter,
-		logger:   logger,
+		// The repo-declared checks lane (D7): commands read at the run's BASE revision and
+		// executed only in its warm container. Both seams are the SAME shared instances
+		// measure_task uses, so the checks run against the bytes the attempt measured.
+		repoChecks: &standards.Checks{
+			Provisioned: snapshots,
+			Sandboxes:   sandboxes,
+			Logger:      logger,
+		},
+		reader: factReader,
+		writer: writer,
+		mirror: mirrorWriter,
+		logger: logger,
 	}
 	return station.New(ComponentName, cfg, h, deps.NATSClient, logger)
 }
@@ -151,11 +167,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // with the live instance; the conformance census passes nil (the factory registers but
 // fails loud if ever constructed, which the census never does — it only inspects the
 // registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts, clients *graphown.Clients) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, snapshots *standards.Snapshots, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts, clients)
+			return newProcessor(raw, deps, checkouts, sandboxes, snapshots, clients)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

@@ -56,3 +56,15 @@ func TestFloorNamesAreDotFree(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltInFloorsAreNeverAdvisory makes "a built-in floor always gates" a guarantee
+// rather than an observation. Advisory exists for repo-declared checks only; a built-in
+// floor constructed advisory would stop gating silently, and AnyRejected would keep
+// returning false while the finding still read as a failure in the detail.
+func TestBuiltInFloorsAreNeverAdvisory(t *testing.T) {
+	for _, f := range CheckAll(Attempt{}) {
+		if f.Advisory {
+			t.Errorf("built-in floor %q is advisory — it would be reported but never gate", f.Floor)
+		}
+	}
+}

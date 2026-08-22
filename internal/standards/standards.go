@@ -1,9 +1,16 @@
-// Package standards parses a target repo's committed `.semdev/standards.yaml` —
-// the repo-declared standards + checks file (standards-via-lessons D1). The
-// parser is PURE and STRICT: unknown fields, duplicate ids, invalid severities
-// or roles, empty text, or a bad version all reject naming the exact defect —
-// a malformed file must park toward the operator, never half-parse (the
-// repo-standards spec's fail-closed requirement).
+// Package standards owns a target repo's committed `.semdev/standards.yaml` — the
+// repo-declared standards + checks file (standards-via-lessons D1) — from parse through
+// to execution.
+//
+// The PARSER is pure and strict: unknown fields, duplicate ids, invalid severities or
+// roles, empty text, a bad version, or a check command that cannot fail all reject naming
+// the exact defect — a malformed file must park toward the operator, never half-parse
+// (the repo-standards spec's fail-closed requirement).
+//
+// The package also carries the runtime halves the file implies: the provision-time sync
+// onto the lesson substrate (sync.go, provision.go), the snapshot of what a run was
+// provisioned with (snapshot.go), and the checks lane that executes the repo's declared
+// commands in the run's sandbox container (checks.go). Only the parser is pure.
 package standards
 
 import (
@@ -29,6 +36,11 @@ const fileVersion = 1
 // reader's page cap silently truncates candidate coverage platform-wide past
 // ~16k records. 100 is generous against the K=10-per-role injection ceiling.
 const maxStandardsPerFile = 100
+
+// maxChecksPerFile bounds the declared checks. Each one is up to two container execs, run
+// serially on EVERY attempt inside the floors station, so an unbounded list is an
+// unbounded hold on the station — the byte bound alone admits thousands.
+const maxChecksPerFile = 50
 
 // maxFileBytes bounds the raw input before any parse work (M4) — a standards
 // file is a page of human-authored law, never megabytes.
@@ -69,12 +81,32 @@ type Check struct {
 	Name     string
 	Command  string
 	Required bool
+	// Proof is the OPTIONAL negative control (D7a): a command that MUST exit non-zero,
+	// run in the same container immediately before the check. It is how a repo
+	// demonstrates its gate can reach its failure path at all. Empty means undeclared,
+	// which still gates but is stamped `unproven` and never renders as a clean pass.
+	Proof string
+	// Warnings are non-fatal concerns about this check's declaration — things that do not
+	// break the gate but that the operator should see (a suppressed diagnostic stream).
+	// They exist because "warn rather than reject" was documented before there was any
+	// channel to warn on, which made the doc a claim the code could not keep.
+	Warnings []string
 }
 
 // File is a parsed standards file.
 type File struct {
 	Standards []Standard
 	Checks    []Check
+}
+
+// Warnings collects every non-fatal declaration concern in the file, so one caller can
+// log them all.
+func (f File) Warnings() []string {
+	var out []string
+	for _, c := range f.Checks {
+		out = append(out, c.Warnings...)
+	}
+	return out
 }
 
 // yamlFile is the strict on-disk schema. KnownFields(true) makes any unknown
@@ -96,6 +128,7 @@ type yamlCheck struct {
 	Name     string `yaml:"name"`
 	Command  string `yaml:"command"`
 	Required bool   `yaml:"required"`
+	Proof    string `yaml:"proof"`
 }
 
 // kebabToken validates ids and check names: lower-kebab, no leading/trailing
@@ -157,6 +190,10 @@ func Parse(data []byte) (File, error) {
 		out.Standards = append(out.Standards, std)
 	}
 	seenChecks := map[string]bool{}
+	if len(raw.Checks) > maxChecksPerFile {
+		return File{}, fmt.Errorf("standards: the file declares %d checks, over the %d bound (each runs in the "+
+			"sandbox on every attempt)", len(raw.Checks), maxChecksPerFile)
+	}
 	for i, c := range raw.Checks {
 		chk, err := validateCheck(i, c, seenChecks)
 		if err != nil {
@@ -234,7 +271,40 @@ func validateCheck(i int, c yamlCheck, seen map[string]bool) (Check, error) {
 	if strings.TrimSpace(c.Command) == "" {
 		return Check{}, fmt.Errorf("standards: check %q has no command", c.Name)
 	}
-	return Check{Name: c.Name, Command: c.Command, Required: c.Required}, nil
+	// The command text is quoted verbatim into floor.finding.detail, a newline-separated
+	// scalar a retry prompt feeds back to the developer model. A control byte there forges
+	// structure in the record — the same reason Standard.Text rejects them.
+	if err := rejectControlBytes(c.Name, "command", c.Command); err != nil {
+		return Check{}, err
+	}
+	if c.Proof != "" {
+		if err := rejectControlBytes(c.Name, "proof", c.Proof); err != nil {
+			return Check{}, err
+		}
+	}
+	defect, warnings := checkDefect(c.Command, c.Required)
+	if defect != "" {
+		return Check{}, fmt.Errorf("standards: check %q %s", c.Name, defect)
+	}
+	// The negative control is held to the SAME standard as the check: a control that
+	// cannot fail certifies the gate while proving nothing, which is strictly worse than
+	// declaring no control at all (the check would at least be stamped `unproven`).
+	if c.Proof != "" {
+		if strings.TrimSpace(c.Proof) == "" {
+			return Check{}, fmt.Errorf("standards: check %q declares an empty proof; omit the field or give it a command", c.Name)
+		}
+		proofDef, proofWarnings := proofDefect(c.Proof)
+		if proofDef != "" {
+			return Check{}, fmt.Errorf("standards: check %q proof %s", c.Name, proofDef)
+		}
+		for _, w := range proofWarnings {
+			warnings = append(warnings, "proof "+w)
+		}
+	}
+	for i, w := range warnings {
+		warnings[i] = fmt.Sprintf("check %q %s", c.Name, w)
+	}
+	return Check{Name: c.Name, Command: c.Command, Required: c.Required, Proof: c.Proof, Warnings: warnings}, nil
 }
 
 func validRole(r string) bool {
@@ -281,4 +351,19 @@ func InjectionForm(s Standard) (string, error) {
 			s.ID, n, maxInjectionFormBytes)
 	}
 	return form, nil
+}
+
+// rejectControlBytes refuses control characters other than the newline and tab a YAML
+// block scalar legitimately produces.
+func rejectControlBytes(name, field, value string) error {
+	for _, r := range value {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("standards: check %q %s carries a control character (%q) — the text is quoted "+
+				"verbatim into the run's finding record, where a control byte forges structure", name, field, r)
+		}
+	}
+	return nil
 }

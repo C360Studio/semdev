@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/standards"
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/config"
@@ -582,6 +583,11 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		return nil, fmt.Errorf("create run checkouts: %w", err)
 	}
 	sandboxes := runspace.NewSandboxes()
+	// The provision-time standards capture, shared by the provision station (which fills
+	// it) and the floors station (which gates on it). One instance, like checkouts and
+	// sandboxes: the checks lane must read what provisioning validated, not anything
+	// reachable from the container the attempt runs in.
+	standardsSnapshots := standards.NewSnapshots()
 
 	spec, err := sourceSpec(opts)
 	if err != nil {
@@ -610,7 +616,7 @@ func buildRuntimeRegistries(ctx context.Context, natsClient *natsclient.Client, 
 		return nil, err
 	}
 
-	if err := RegisterAll(componentReg, checkouts, sandboxes, spec, graphClients); err != nil {
+	if err := RegisterAll(componentReg, checkouts, sandboxes, spec, standardsSnapshots, graphClients); err != nil {
 		return nil, fmt.Errorf("register components: %w", err)
 	}
 

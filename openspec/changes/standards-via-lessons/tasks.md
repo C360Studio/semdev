@@ -100,22 +100,25 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 5. The checks lane (D7)
 
-- [ ] 5.1 RED: parser table extension (D1 fold, DR-0001) — each denied
+- [x] 5.1 RED: parser table extension (D1 fold, DR-0001) — each denied
       fail-open construct rejects naming its defect: suppression
       (`|| true`, `|| :`, trailing `; true`, `2>/dev/null`, `2>&-`), vacuity
       (`true`, `:`, bare `echo …`), and an unquoted top-level pipeline on a
       `required` check (non-required warns). Pins the scanner's two traps:
       `||` is not a pipe, and a pipe inside quotes is not top-level. Plus the
       `proof` field's parse (optional, non-empty when present, same denials).
-- [ ] 5.2 GREEN: extend `validateCheck`/`Check` in `internal/standards` for
-      5.1. Extends the group-2 parser; does not amend its commit.
-- [ ] 5.3 RED: floors-level pins — (a) a required check whose command exits
+- [x] 5.2 GREEN: extend `validateCheck`/`Check` in `internal/standards` for
+      5.1 (new `internal/standards/gates.go`). Extends the group-2 parser; does
+      not amend its commit. ADDED beyond the plan: a proof that is exactly
+      `false`/`! true`/`exit 1` is rejected too — the mirror-image hole, where a
+      control that cannot PASS certifies a gate it never invoked.
+- [x] 5.3 RED: floors-level pins — (a) a required check whose command exits
       non-zero stamps a rejecting `repo-check:<name>` finding and the rail
       does not advance; (b) a non-required failure stamps non-rejecting;
       (c) zero-checks file/absent file leaves floors byte-identical;
       (d) the base-ref read — an attempt-modified standards file does NOT
       change the executed checks (the refs/semdev/base copy governs).
-- [ ] 5.4 RED: gate-honesty pins (D7a) — (a) a declared `proof` exiting
+- [x] 5.4 RED: gate-honesty pins (D7a) — (a) a declared `proof` exiting
       non-zero marks the check `proven` and the check then runs normally;
       (b) a `proof` exiting ZERO stamps the un-failing-gate finding, rejecting
       iff `required` (a non-required check with a passing control never
@@ -124,12 +127,34 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       pass, and is distinguishable in the finding text from ran-and-failed —
       red-first against a deliberately dead container, the measure_task
       exit-vs-transport contract reused.
-- [ ] 5.5 GREEN: `checkfloors.RunFloors` checks stage — base-ref file read,
-      in-container `runner.Exec` per check (control first when declared),
-      findings stamped via the existing writer carrying the gate status; the
-      two new narrow deps wired at the floors station.
-- [ ] 5.6 Full offline suite + `task e2e -race` green; adversarial review;
-      commit group 5.
+- [x] 5.5 GREEN: `checkfloors.RunFloors` checks stage — `internal/standards.Checks`
+      behind ONE narrow `RepoChecks` seam (the base reader + sandbox resolver live
+      inside it rather than as two more positional params on an already 10-arg
+      function); the law comes from the PROVISION-TIME snapshot, not a git ref —
+      both group-5 reviewers proved the base ref is writable from inside the
+      sandbox, so `FileAtBase` was written, reviewed, and deleted within the same
+      group; the control runs before the check it certifies. Repo findings APPEND to the built-in floor set, so a required
+      failure routes through the existing aggregate with no second gate to keep
+      in sync. `floors.Finding` gained `Advisory`: a non-required failure is
+      reported and rendered as FAILED without gating, so a failure never has to
+      be laundered into `Passed=true` to avoid rejecting (G7).
+- [x] 5.6 Full offline suite + `task e2e -race` green; adversarial review;
+      commit group 5. BOTH reviewers returned CHANGES REQUESTED on the same two
+      blocking defects, and both were right. (1) The base-ref read the lane rested
+      on is FORGEABLE: the checkout is bind-mounted read-WRITE with `.git` inside
+      it and model-authored code runs in that container, so a `TestMain` doing
+      `git update-ref refs/semdev/base <other>` deletes every required check —
+      replaced by a provision-time snapshot the container has no address for, and
+      `FileAtBase` deleted. (2) The command denylist matched literal SPELLINGS and
+      both reviewers defeated it by deleting a space (`||true`, `;true`,
+      `; echo done`, `exit 0`, `/bin/true`, `true # go vet`) — replaced by a
+      structural rule (a required gate is ONE top-level command), which also fixed
+      the false REJECTS on `$( )`, backticks, and escaped quotes. Also applied: an
+      un-failing control PARKS instead of burning the attempt budget; control-byte
+      sanitizing on command text and runtime output; a check-count bound; a
+      nil-lane WARN; the missing RunFloors/advisory tests; a pin that built-in
+      floors can never be advisory. NOT applied (recorded in design hazards):
+      repo checks run after the clean-tree floor.
 
 ## 6. The judgment lane + the full bridge proof (D8, D9)
 
