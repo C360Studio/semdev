@@ -93,6 +93,41 @@ fact-derived PR body — a document can drift from the run, a fact cannot; we ta
 not the format); and the **`old-coder-api` skill** as a port (it is target-repo domain policy, which is
 exactly what `.semdev/standards.yaml` is for).
 
+## From disciplined-agentic-engineering — the tier rule and the panel (fourth donor, evaluated 2026-08-22)
+
+[`swingerman/disciplined-agentic-engineering`](https://github.com/swingerman/disciplined-agentic-engineering)
+(DAE) @ `1adbf3c` is a methodology kit — an eight-checkpoint pipeline, 21 stdlib-only Python validators,
+explicit model classes, a host-capability seam. **Pattern and data donor only; no code crosses.** Its
+deterministic checks are real, but its spine gate is self-attested (`dae_handoff.py:102` reads a `met:`
+boolean the graded agent wrote) and its gates are invoked by SKILL.md prose, so the mechanisms stay out.
+Full evaluation is `docs/decisions/0002-disciplined-agentic-engineering-evaluation.md` (DR-0002), which
+also carries the **tier rule** governing every future checker: Tier 1 harness-deterministic on
+bytes/paths/counts, Tier 2 repo-supplied command, Tier 3 small-LLM advisory or ratchet-only. Rows marked
+CANDIDATE are decided but unscheduled work with a tracking issue; nothing lands without its own change.
+(Letter `E` rather than `D` — `D` is design-decision numbering in this repo, `A` reads as ADR.)
+
+| # | Asset | Source | Port as | Status / required pin |
+|---|-------|--------|---------|-----------------------|
+| E1 | Gap analysis after every failure: **which phase leaked**, from a closed vocabulary, with an always-blocking category and a mandatory explicit `none` | `engineer/skills/fix/references/gap-analysis-categories.md` | pattern + data | CANDIDATE — the taxonomy the ops/debrief agent classifies into; pin it before semstreams' lessons + reporting primitives land. Tier 3 classifier: routes, never grades; records born `proposed`, curator Lane 1 only. Pins: G3, G9. Issue [#17](https://github.com/C360Studio/semdev/issues/17). |
+| E2 | Model **classes** (`economy`/`inherit`/`frontier`) assigned per dispatch from the shape of the charge; never a product name in a skill | `engineer/references/model-classes.md` | pattern | CANDIDATE — the seam already exists (`model_registry.capabilities`), unused: four roles, one endpoint. "Never put `frontier` in an agentic harness." Their cost numbers are Claude-Code-shaped — measure ours against `docs/evidence-ledger.md`. ⚠ `coordinator` also owns `create_change`. Issue [#18](https://github.com/C360Studio/semdev/issues/18). |
+| E3 | **No-progress** stop: two consecutive rounds on the same failure means stop and surface, not burn the budget | `engineer/references/gauntlet.md` | pattern | CANDIDATE — Tier 3 ratchet-only (a wrong "same" parks early; a wrong "different" costs today's price). Pin: G3. Issue [#19](https://github.com/C360Studio/semdev/issues/19). |
+| E4 | **Regression** stop: a round that breaks a previously-green stream is reverted — the behaviour contract outranks the bar | `engineer/references/gauntlet.md` | pattern | CANDIDATE — needs the baseline ([#10](https://github.com/C360Studio/semdev/issues/10)). Tier 3 extractor-with-verification: the model extracts test names, the harness confirms each verbatim in the captured bytes. Pin: G3. Issue [#19](https://github.com/C360Studio/semdev/issues/19). |
+| E5 | Declarative architecture fitness — forbidden patterns, naming, file size — computed by the harness, diff-scoped by default | `engineer/scripts/dae_arch.py` (`check_forbidden`, `check_naming`, `check_file_size`) | pattern | CANDIDATE — a check kind with no exit status to launder, so `standards-via-lessons` D1's fail-open construct rejection is moot for it. **Layering and cycles excluded** — per-language resolver, belongs in `command:`. Pins: G3, G7. Issue [#20](https://github.com/C360Studio/semdev/issues/20). |
+| E6 | Changed-line coverage scoped to the functions a **diff** touches; global % is vanity | `crap-analyzer/skills/crap-analyzer/scripts/compute_crap.py` | pattern | CANDIDATE — take the diff-scoping, **not** the CRAP score (heuristic token-count complexity, by its own docstring). Tier 1: `git diff --unified=0` × a coverage profile, a set join with no parser. Coverage command is repo-declared and harness-run; unknown formats stamp `unsupported`, never `pass`. Folded into issue [#9](https://github.com/C360Studio/semdev/issues/9). |
+| E7 | Vacuous-test pre-filter: a test whose pass/fail cannot depend on the SUT (`no-assertion`, `conditional-assertion`) | `engineer/scripts/dae_introvert.py` | pattern | CANDIDATE — Tier 3 **advisory** over changed test functions only; the deterministic confirmation is the red-first proof, not mutation testing. Advisory-only is also injection-resistant: silence must never read as a pass. Pins: G3, G7. Folded into issue [#8](https://github.com/C360Studio/semdev/issues/8). |
+| E8 | Fixture parity fails in **two** directions — false RED cliffs *and* masked real defects — and a RED may not be blamed on the fixture without evidence | `engineer/references/fixture-parity.md` | data + pattern | CANDIDATE — corroborates G8/B10 and the suite-health work; the gate itself is already the `checks:` lane. The durable fix is generate-from-schema, not a gate on a hand-maintained fixture. Folded into issue [#11](https://github.com/C360Studio/semdev/issues/11). |
+| E9 | Review panel: adviser + advocate, blind to each other — and **recording a rejected finding is not optional** (role, severity, claim, location, accepted, disposition) | `engineer/references/review-panel.md` | pattern | CANDIDATE — Phase 3 design input: a review surface is where a rejected finding either becomes a record or evaporates into scrollback. Settle before, not during. Folded into issue [#16](https://github.com/C360Studio/semdev/issues/16). |
+
+**NOT taken from DAE**: the **handoff / exit-criteria contract** (its `met:` boolean is written by the
+graded agent — importing the artifact would import the defect); **test impact analysis**
+(`dae_impact.py` — the clean room must run everything, so diff-scoped test selection there is fail-open,
+by their own "a false skip is a missed regression" reasoning); **mutation testing** (DR-0001's rejection
+stands; only `dae_mutmap.py`'s manifest-as-result-cache shape is reusable if we revisit); the
+**Gherkin/IR pipeline and markdown artifact formats** (ours are graph facts and OpenSpec, whose strict
+validation already enforces their `closure` constraint); **`compute_crap.py`'s complexity score**; and
+**per-language AST analysis in any form**, which is the tier rule's whole point — DAE did not solve it
+either (`dae_arch.py` handles Python and JS only; `dae_introvert.py` defers to a backend it does not ship).
+
 ## Framework
 
 Start on current semstreams (`v1.0.0-beta.134`+). Where semdev hits an engine
