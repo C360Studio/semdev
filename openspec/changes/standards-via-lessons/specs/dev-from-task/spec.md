@@ -10,15 +10,20 @@ anti-mock, tests-must-exist, and post-measure working-tree cleanliness) that
 emit findings as facts (`floor.finding`). Floors SHALL evaluate the attempt's
 committed snapshot and SHALL run deterministically with no model turn. The
 rail SHALL route on those facts via rules and SHALL NOT advance to semantic
-review while a rejecting floor finding stands. When the provisioned repo's
-standards file declares deterministic checks, each declared check command
-SHALL additionally run in the run's sandbox container (never on the host —
-repo-authored commands execute only in-container), with its result stamped by
-the executing harness as a floor finding (G3 — the command's real exit status,
-never a model claim): a failing check marked `required` SHALL reject the
-attempt exactly like a built-in floor; a failing non-required check SHALL
-surface as a non-rejecting finding. A repo declaring no checks leaves the
-floors exactly as they are.
+review while a rejecting floor finding stands. The cleanliness floor SHALL
+fail closed in both directions: a tree that differs from the commit rejects,
+and committing unauthorized content SHALL never be the mechanism by which a
+later attempt's tree becomes clean — residue that caused one attempt's
+rejection SHALL NOT appear inside a subsequent attempt's committed snapshot.
+
+When the provisioned repo's standards file declares deterministic checks,
+each declared check command SHALL additionally run in the run's sandbox
+container (never on the host — repo-authored commands execute only
+in-container), with its result stamped by the executing harness as a floor
+finding (G3 — the command's real exit status, never a model claim): a failing
+check marked `required` SHALL reject the attempt exactly like a built-in
+floor; a failing non-required check SHALL surface as a non-rejecting finding.
+A repo declaring no checks leaves the floors exactly as they are.
 
 A repo-declared check is a gate semdev has not itself proven, so the parser
 SHALL reject check commands that cannot fail by construction, naming the
@@ -38,6 +43,13 @@ all SHALL be stamped `not-run` and SHALL NOT be read as a pass.
 #### Scenario: Test-time mutation of the artifact is rejected
 - **WHEN** the working tree differs from the attempt's commit after measurement runs
 - **THEN** a deterministic floor emits a rejecting `floor.finding`
+
+#### Scenario: Prior-attempt residue cannot launder into a later commit
+- **WHEN** an attempt is rejected for working-tree residue and the loop retries
+- **THEN** the retry attempt's committed snapshot does not contain the prior
+  attempt's residue
+- **AND** the delivered `attempt.commit.sha` can never carry content that a
+  cleanliness rejection previously flagged
 
 #### Scenario: Floors run without a model turn
 - **WHEN** floors evaluate an attempt
