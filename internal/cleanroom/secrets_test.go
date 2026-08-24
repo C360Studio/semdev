@@ -1,8 +1,6 @@
 package cleanroom
 
 import (
-	"context"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -28,40 +26,5 @@ func TestExecArgsInjectsSecretsByNameNotValue(t *testing.T) {
 	plain := NewContainerRunner("img").execArgs(Sandbox{WorkDir: "/work", Handle: "abc"})
 	if slices.Contains(plain, "TOKEN") {
 		t.Errorf("a no-secret runner leaked a secret flag: %v", plain)
-	}
-}
-
-// Docker-gated: a secret injected via NewContainerRunnerWithSecrets is present in the
-// container at exec time, but is NOT baked into the container's persistent config (it
-// rides `docker exec -e`, never `docker run -e`) — so `docker inspect` never carries it
-// (SB2c). Skips when docker is absent.
-func TestContainerRunnerInjectsSecretExecOnly(t *testing.T) {
-	ctx := context.Background()
-	if err := DockerAvailable(ctx, "docker"); err != nil {
-		t.Skipf("docker unavailable: %v", err)
-	}
-	c := NewContainerRunnerWithSecrets("busybox:latest", map[string]string{"TOKEN": "sekret-value-xyz"})
-	sb, err := c.Up(ctx, t.TempDir(), []string{"CACHE"})
-	if err != nil {
-		t.Fatalf("Up: %v", err)
-	}
-	defer func() { _ = c.Down(ctx, sb) }()
-
-	// The secret is visible to a command run in the sandbox.
-	res, err := c.Exec(ctx, sb, []string{"sh", "-c", "echo $TOKEN"})
-	if err != nil {
-		t.Fatalf("Exec: %v", err)
-	}
-	if !strings.Contains(res.Stdout, "sekret-value-xyz") {
-		t.Errorf("secret not injected into the exec env; stdout = %q", res.Stdout)
-	}
-
-	// ...but it is NOT in the container's persistent config (exec-only, not `docker run -e`).
-	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.Config.Env}}", sb.Handle).Output()
-	if err != nil {
-		t.Fatalf("inspect: %v", err)
-	}
-	if strings.Contains(string(out), "sekret-value-xyz") {
-		t.Errorf("secret leaked into the container's persistent config: %s", out)
 	}
 }

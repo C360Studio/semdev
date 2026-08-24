@@ -84,43 +84,48 @@ jobs:
       - name: Install task
         run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 
-      # CORRECTION (this comment previously claimed the suite needs no docker):
-      # `task test` is `go test -race ./...`, which excludes ./test/e2e (build tag
-      # `e2e`) and spends no tokens — but it is NOT docker-free. 17 tests across
-      # internal/{cleanroom,coldproof,tools/provisionsandbox} are docker-GATED:
-      # they skip when the daemon is absent and RUN when it is present. On a dev
-      # laptop with docker down they skip, which is how the wrong claim survived
-      # local verification; on ubuntu-latest docker exists, so they run, build
-      # real ~1.29GB sandbox images, and `go test ./...` runs those packages in
-      # parallel.
+      # `task test` is `go test -race ./...` — genuinely unit now, and mechanically
+      # kept that way. It excludes ./test/e2e (build tag `e2e`) and every
+      # infrastructure-gated test (build tag `integration`), so it needs neither a
+      # docker daemon nor a live NATS, and spends no tokens.
       #
-      # The first main build failed here with `docker run: no space left on
-      # device`, then `cannot connect to the docker daemon`. Host disk was the
-      # obvious theory and it was WRONG — measured, not assumed: the run below
-      # reports ~108G free both before and after the suite, with under 2GB of
-      # images. Do not re-add a disk-reclaim step on that theory; the first
-      # attempt at one deleted $AGENT_TOOLSDIRECTORY, which is where
-      # actions/setup-go installs Go, and broke the job outright.
-      #
-      # ENOSPC from docker is not only "the disk is full" — it is also what the
-      # kernel returns when inotify watches or instances are exhausted, which is
-      # a far better fit for parallel packages each standing up containers. The
-      # steps below exist to keep that measurable rather than theorised.
+      # It did NOT used to be true. Eleven docker-backed tests sat untagged in
+      # internal/{cleanroom,coldproof,tools/provisionsandbox} and rode in this job,
+      # where `go test ./...` ran them in parallel until a per-user kernel resource
+      # ran out. test/conformance's TestInfraGatedTestsCarryTheIntegrationTag now
+      # fails the build if an infra-gated test reappears here, so this comment cannot
+      # quietly become false again.
       - name: Unit and conformance suite (race)
         run: task test
 
-      # Visibility, because the first failure was diagnosed by inference rather
-      # than measurement. If disk is the cause it shows here; if it is not, this
-      # rules it out instead of leaving it a standing theory.
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install task
+        run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+
+      # The infrastructure-gated tests: real docker containers, real NATS. `task
+      # test:integration` resets NATS first, runs with -p 1 so container-spawning
+      # packages do not compete, and reaps sandbox images on the way out even if the
+      # run fails.
+      - name: Infrastructure-gated tests (docker + NATS)
+        run: task test:integration
+
       - name: Disk and docker state after
         if: always()
         run: |
           df -h / | tail -1
           docker system df || true
-
-      - name: Reap sandbox images this job built
-        if: always()
-        run: task clean:docker || true
 
   build:
     name: Build
@@ -166,7 +171,7 @@ jobs:
   status-check:
     name: CI Status Check
     runs-on: ubuntu-latest
-    needs: [lint, test, build, openspec]
+    needs: [lint, test, build, openspec, integration]
     if: always()
     steps:
       # ONE required check to protect the branch with. Without this aggregator,
@@ -179,6 +184,7 @@ jobs:
           [[ "${{ needs.test.result }}"     == "success" ]] || failed="$failed test"
           [[ "${{ needs.build.result }}"    == "success" ]] || failed="$failed build"
           [[ "${{ needs.openspec.result }}" == "success" ]] || failed="$failed openspec"
+          [[ "${{ needs.integration.result }}" == "success" ]] || failed="$failed integration"
           if [ -n "$failed" ]; then
             echo "FAILED jobs:$failed"
             exit 1

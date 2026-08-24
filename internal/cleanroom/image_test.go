@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/harness"
@@ -184,47 +183,6 @@ func TestBuildImageUndeclaredFailsClosed(t *testing.T) {
 	}
 }
 
-// Docker-gated: BuildImage builds a real tiny image and returns its digest-pinned
-// sha256 ref (the pin). Skips when docker is absent (unit tests need no daemon).
-func TestBuildImageReal(t *testing.T) {
-	ctx := context.Background()
-	if err := DockerAvailable(ctx, "docker"); err != nil {
-		t.Skipf("docker unavailable: %v", err)
-	}
-	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "Dockerfile"), "FROM busybox:latest\nRUN true\n")
-
-	decl, err := LocateImageInDir(root)
-	if err != nil {
-		t.Fatalf("locate: %v", err)
-	}
-	img, err := BuildImage(ctx, "docker", root, decl)
-	if err != nil {
-		t.Fatalf("BuildImage: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec2(ctx, "docker", "image", "rm", "-f", img.Ref)
-		_ = exec2(ctx, "docker", "image", "rm", "-f", img.Digest)
-	})
-
-	// Digest is the immutable sha256 pin; Ref is a non-dangling semdev-scoped tag.
-	if !strings.HasPrefix(img.Digest, "sha256:") {
-		t.Errorf("built digest = %q, want a sha256: pin", img.Digest)
-	}
-	if !strings.HasPrefix(img.Ref, imageTagRepo+":") {
-		t.Errorf("built ref = %q, want a %s: tag (non-dangling)", img.Ref, imageTagRepo)
-	}
-	// Both the pin and the tag resolve to a real, runnable image.
-	if err := exec2(ctx, "docker", "image", "inspect", img.Ref); err != nil {
-		t.Errorf("built image ref %q not inspectable: %v", img.Ref, err)
-	}
-	if err := exec2(ctx, "docker", "image", "inspect", img.Digest); err != nil {
-		t.Errorf("built image digest %q not inspectable: %v", img.Digest, err)
-	}
-}
-
-// A declared-but-absent Dockerfile fails closed (ErrNoImage) BEFORE any docker call —
-// the operator committed a broken declaration, provable offline (no docker gate).
 func TestBuildImageMissingDockerfileFailsClosed(t *testing.T) {
 	root := t.TempDir() // no Dockerfile written
 	if _, err := BuildImage(context.Background(), "docker", root, harness.ImageDecl{Dockerfile: "Dockerfile"}); !errors.Is(err, ErrNoImage) {
