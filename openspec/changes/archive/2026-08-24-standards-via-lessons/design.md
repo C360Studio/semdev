@@ -1,0 +1,507 @@
+# standards-via-lessons — design
+
+## Context (verified against the code, 2026-08-16)
+
+Two exploration passes ground this design — semdev seams and the beta.160
+substrate mechanics. Load-bearing facts:
+
+- **Injection is already live and needs ZERO semdev code.** `agentic-loop`
+  wires `SetLessonReader` unconditionally when NATS is present
+  (framework `component.go:290-296`, no config knob); per dispatch the scope
+  is exactly `tag:<TaskMessage.Role>` (`lessons.go:157-163`) and semdev's
+  spawn roles are `coordinator|developer|reviewer|conversation`
+  (rule files under `configs/rules/`). `Scope.EntityIDs` is unused at
+  beta.160 — role tags are the ONLY scoping axis. Matcher bounds: K=10
+  (max 25), 4KB byte budget, severity DESC → created-at DESC ordering;
+  active-only. Rendered block: `[Lessons — …]` + one line per lesson with its
+  entity ID, joined into the system prompt once per loop start.
+- **Birth is importable and idempotent.** `agentictools.NewNATSLessonStore`
+  (exported) creates `{org}.{platform}.agent.lesson.record.{uuid}` entities
+  via strict `graph.mutation.entity.create`; on EntityExists it verifies the
+  four identity fields (category, applies_to, summary, evidence) and returns
+  `created=false` — idempotent re-birth for free. Birth is NOT contract-bound
+  (CreateEntityRequest has no contract field); only lifecycle reconcile is.
+  Injection-form bound = 320 bytes, reject-never-truncate; evidence ≥1 valid
+  6-part entity ID; applies-to grammar `tag:<token>` | `id:<≥3 segments>`.
+- **Promotion is Lane 1 only.** `agentictools.LessonCurator` (exported;
+  `NewLessonCurator(writer, reader, logger)` where one
+  `*projection.MutationClient` satisfies both interfaces) refuses to promote
+  unless EVERY cited evidence entity resolves; Retire/Supersede reconcile the
+  full `lesson-lifecycle` group (status, superseded-by, retired-at) so
+  sibling lifecycle predicates cannot survive a transition. The reference
+  rule pack is optional Lane-2 mechanics only — the framework README states
+  promotion MUST route through the curator (no evidence check exists in the
+  rule lane), and ships no promote tool.
+- **The contract must be MIRRORED.** The lesson projection contract is
+  `builtinprojection.LessonRecordContractName = "agentic.lesson-record"`
+  (message type `agentic.agent_lesson.v1`, pattern
+  `*.*.agent.lesson.record.*`, birth-predicates list + one reconcile group
+  `lesson-lifecycle` = status/superseded-by/retired-at) — in an INTERNAL
+  framework package semdev cannot import. semdev hand-mirrors it in
+  `internal/graphown` (the CLAUDE.md-recorded precondition; precedent: the
+  `write_todos` builtin-skip note in `boot/runtime.go:625-644`).
+- **Provision pipeline slot**: `provisionsandbox.Provision()` steps are
+  alreadyReady → dockerCheck → Sources.Resolve → Checkouts.Materialize →
+  Manifests.Resolve → ProveBaseline → warm → ready. The sync step slots
+  after Materialize (checkout root in hand) and before ProveBaseline, as a
+  new narrow seam on `ProvisionDeps` (`runspace/manifests.go` is the shape
+  precedent). Provision writes via `graphown.Clients.Writer(owner)`;
+  strict-birth `Create` is gated by `graphown.createOwners` (today only
+  `admission-check`).
+- **Floors are pure/structural** (`internal/floors` reads source, never runs
+  it), evaluated by the floors station via `checkfloors.RunFloors`; the
+  existing run-a-command-in-the-sandbox-and-stamp shape is
+  `measuretask.go` (`sandboxes.Resolve` → `runner.Exec(sh -c)` →
+  `writer.Replace`).
+- **Quinn's brief** = persona fragment (`reviewer/00-identity.md`) ∥ injected
+  lessons ∥ the spawn prompt; the verdict is DERIVED (`submit_review` schema
+  has no outcome field): approved ⇔ measurement pass AND zero findings. So a
+  must-standard violation blocks approval simply by BEING a finding — no
+  verdict mechanics change at all.
+
+## Goals / Non-goals
+
+Goals: the five repo-standards requirements + the two modified capabilities,
+with human authoring trivial, zero new injection plumbing, and the lesson
+substrate adopted through its validated paths only.
+
+Non-goals: AGENTS.md free-text ingestion; the debrief/review-pattern
+promotion loop; `emit_lesson` advertisement to any loop; any `id:`-scoped
+lessons (roles are the v1 axis); K/byte-budget tuning (framework-fixed).
+
+## D1 — the standards file: `.semdev/standards.yaml`, strict parse
+
+One conventional path. YAML (comments + multiline for humans; JSON stays a
+non-goal). Shape:
+
+```yaml
+version: 1
+standards:
+  - id: eng-test-traceability        # kebab token, unique in file
+    text: "Every new test must reference the scenario it verifies."
+    severity: must                   # must | should | may
+    roles: [developer, reviewer]     # optional; default = both
+checks:
+  - name: go-vet
+    command: go vet ./...
+    required: true                   # required gates; optional surfaces
+    proof: go vet ./testdata/badvet  # optional negative control; MUST exit non-zero
+```
+
+Strict parse, fail-closed (the spec's malformed-parks scenario): unknown
+fields, duplicate ids, invalid severity/roles, empty text, or a non-1 version
+all reject with the exact defect named; the parser is a pure function with
+red-first table tests. Roles are validated against the two injectable roles
+(`developer`, `reviewer`) — a standard scoped to anything else is a parse
+error (fail-closed beats silently-never-injected).
+
+**Check-command validity (the DR-0001 fold).** A check command is a GATE, and a
+gate that cannot fail is worse than no gate — it reads green forever while the
+thing it claims to guard rots. `validateCheck` therefore rejects the commands
+that cannot fail *by construction*, each naming its defect:
+
+- **The status must be the gate's own (`required` only)**: the command must be
+  ONE top-level command. A top-level `;`, newline, `|`, or `||` all mean the
+  status belongs to something else — `go vet ./...; true`,
+  `go vet ./... || true`, and `go test -cover ./... | tail -1` are the same bug
+  in three costumes. `&&` is allowed (`a && b` is non-zero when either is), and
+  anything inside quotes, `$( )`, or backticks is data. Escape hatch: put the
+  sequence in a repo-committed script whose `set -euo pipefail` owns the status.
+  REVISED at group 5: the first draft matched literal spellings (`"|| true"`)
+  and both reviewers defeated it by deleting a space — `||true`, `;true`,
+  `; echo done` all sailed through. Matching the SEPARATOR is what makes the
+  rule hold; matching spellings only ever documents the author's imagination.
+- **Vacuity**: the last effective line resolves to a basename that cannot fail
+  (`true`, `:`, `echo`, `printf`, `/bin/true`, an explicit `exit 0`). Basename
+  matching, not string equality, and comments are stripped first so
+  `true # go vet ./...` is seen for the no-op it is. (Precedent in-tree:
+  `harness.Command` refuses to normalize a blank string into `sh -c "   "` for
+  this exact reason.)
+- **Diagnostic suppression warns rather than rejecting**: `2>/dev/null` and
+  `2>&-` discard OUTPUT, not status — the gate still works, but nobody can read
+  why it fired. Warnings are carried on the parsed file and logged at provision;
+  the earlier draft documented "warns" with no channel to warn on.
+
+A declared `proof` is held to the same rules, plus the mirror-image one: a
+control that is exactly `false` / `! true` / `exit 1` fails on its own WITHOUT
+invoking the checker, so it certifies the gate while demonstrating nothing —
+strictly worse than declaring no control, because an absent control stamps
+`unproven` and an always-failing one reads `proven`.
+
+These rules are a DENYLIST over the fail-open shapes we can name, not a proof of
+gate soundness — D7a is what carries the positive claim. And the parser cannot
+verify that a control exercises the SAME checker as its check: `proof: go vet
+./testdata/badvet` paired with `command: staticcheck ./...` passes every rule
+and demonstrates nothing. That is the honest bound `proven` is allowed to
+assert. The rules land with
+group 5 (checks are inert until the lane exists), red-first, extending the
+group-2 parser rather than amending its commit.
+
+## D2 — the source entity: honest evidence, 3 new predicates (G9)
+
+Evidence must cite a graph entity that exists before Promote resolves it, and
+provenance must be honest — the standard derives from the FILE, not the run.
+The sync step therefore births one source entity per provisioned
+standards-file content:
+
+- Entity: `{org}.{platform}.repo.standards.source.{digest12}` (content
+  digest — same file bytes ⇒ same entity, cross-run idempotent).
+- Predicates (the change's entire G9 cost, single writer `standards-sync`):
+  `repo.standards.digest` (full sha256), `repo.standards.path`
+  (repo-relative path), `repo.standards.repo` (owner/repo — the retirement
+  scope key, D5).
+- Birth is strict `Create` via the existing graphown `Creator` lane
+  (`createOwners` += `standards-sync`); EntityExists = the idempotent
+  duplicate signal, exactly the admission-record pattern.
+
+Rejected alternative: citing the RUN entity (zero new vocab but dishonest
+provenance, and retirement scoping would have nothing to key on).
+
+## D3 — birth via the framework store, mapped deterministically
+
+The sync step reuses `agentictools.NewNATSLessonStore` (exported, idempotent,
+identity-checked) rather than re-deriving birth mechanics. Mapping per
+standard:
+
+| lesson field | value |
+|---|---|
+| category | `repo-standard` (open taxonomy, rule-matchable) |
+| polarity | `best_practice` |
+| severity | must→`critical`, should→`warning`, may→`info` |
+| summary | the standard's normative text |
+| detail | `<id> — declared in <path> @ <digest12> of <owner/repo>` |
+| injection-form | `[std:<id>] MUST/SHOULD/MAY <text>` (≤320B enforced pre-birth, reject naming the id) |
+| evidence | the D2 source entity ID |
+| applies-to | `tag:developer` / `tag:reviewer` per roles (default both) |
+| status | born `proposed` (the store's invariant) |
+
+Identity: UUIDv5 over the same four fields the store's conflict check reads
+(category, sorted applies-to, summary, sorted evidence), under a
+semdev-standards namespace UUID — so the store's EntityExists verification
+holds and re-sync of an unchanged file is a no-op. Because summary, applies-to
+and evidence (the source digest) are identity inputs: editing a standard's
+text, roles, or the file at all births a NEW record and retires the old
+(D5) — records are immutable snapshots, never edited in place.
+
+## D4 — promotion: the explicit policy, curator Lane 1, in the sync step
+
+After birth the sync step calls `LessonCurator.Promote` for every
+file-derived record still `proposed`. The policy is named in code and in the
+alignment note: *repo-file-derived standards auto-promote because the git
+commit / PR review of the standards file is the human gate* (the curator doc
+explicitly sanctions a product auto-promotion policy). Scope guard: the sync
+promotes ONLY records it just ensured exist from the file it just parsed —
+it never lists-and-promotes, so no other proposed lesson can ride the policy
+(the spec's non-file-lesson scenario).
+
+G2 analysis: lesson lifecycle transitions here are Go-driven BY FRAMEWORK
+DESIGN — the rule lane cannot resolve evidence and the framework ships the
+curator as the validated path (its README mandates Lane 1 for promotion).
+This is not a product reconciler compensating for an engine gap; it is the
+engine's own sanctioned surface. Recorded in the framework-alignment note.
+
+The curator is constructed once at boot from the shared graphown mutation
+client — which requires D6's contract mirror in the client's contract set.
+
+## D5 — retirement: removed standards retire, scoped to the repo
+
+After promote, the sync lists `agent.lesson.record` entities (the same
+prefix query the injector uses), filters `category == repo-standard`, and
+resolves each candidate's evidence → source entity → `repo.standards.repo`.
+For candidates whose repo matches the provisioned repo and whose entity ID is
+NOT in the file's freshly-computed expected set and whose status is `active`
+or `proposed`: `LessonCurator.Retire`. Cross-repo isolation is the
+`repo.standards.repo` comparison (a multi-target deployment never
+cross-retires); volume is bounded by the substrate's expectations (well under
+one page). Retirement is history-preserving (status flip + retired-at, per
+the reconcile group) — nothing is deleted.
+
+## D6 — the contract mirror + bootstrap (the CLAUDE.md precondition)
+
+`internal/graphown` gains the hand-mirrored `agentic.lesson-record` contract:
+message type `agentic.agent_lesson.v1`, pattern `*.*.agent.lesson.record.*`,
+the birth-predicate list, and the single reconcile group `lesson-lifecycle`
+(`agent.lesson.status`, `agent.lesson.superseded-by`,
+`agent.lesson.retired-at`), exposed as `graphown.LessonRecordMirror()` and
+appended by `AllContracts()` — NOT inside the memoized `Contracts()`
+derivation, which stays the pure vocab census (appending there would poison
+the owner/census pins; go-review R4 records the as-built shape). A conformance pin locks the mirror's literal values
+(name, group, predicate set) with a comment naming the upstream source file,
+and the e2e journey (D9) is the behavioral proof the mirror matches the wire.
+The D2 source-entity contract derives from the normal vocab + entityClass
+tables (new entity class + pattern const).
+
+## D7 — the checks lane: floors extension, base-ref read, in-container exec
+
+`checkfloors.RunFloors` gains a repo-checks stage with two new narrow deps
+(the warm-sandbox resolver + container runner — the measuretask shape):
+
+- **Where checks come from** (REVISED at group 5 — the base ref is not safe):
+  the PROVISION-TIME snapshot. The draft read
+  `git show refs/semdev/base:.semdev/standards.yaml`, on the reasoning that the
+  base ref is the law as provisioned. Both group-5 reviewers broke it
+  independently: the run's checkout is bind-mounted read-WRITE into the sandbox
+  (`cleanroom.buildRunArgs` mounts the checkout root at `/work` with no
+  `readonly`), `.git` rides along inside it, and model-authored code executes in
+  that container as normal operation — `measure_task` runs the repo's own test
+  command. A `TestMain` (or a `test_command`) containing
+  `git update-ref refs/semdev/base <other-commit>` moves the ref the gate reads,
+  and every required check silently disappears. A ref is an address the attempt
+  can reach.
+  So the bytes are captured at provision, BEFORE any model turn for the run, and
+  held in a shared in-memory store (`standards.Snapshots`) the container has no
+  address for. A run with no capture FAILS CLOSED (lane fault → park), never
+  "declared no checks" — after a restart its warm sandbox is gone too, so it
+  cannot honestly be measured anyway. Absent file at provision = zero checks,
+  floors unchanged.
+- **Execution**: per check, `runner.Exec(sb, ["sh","-c", command])` in the
+  run's warm sandbox (SB2 — repo-authored commands only ever run
+  in-container), bounded by the existing measure-exec timeout discipline.
+- **Stamping**: each check appends a `floor.finding` via the existing
+  findings writer — floor name `repo-check:<name>`, the command's real exit
+  status in the detail (G3; the harness ran it, the harness stamps it).
+  `required: true` + non-zero exit = a rejecting finding (routes exactly like
+  a built-in floor); non-required failures stamp non-rejecting findings. Every
+  finding also carries the check's gate status — `proven` | `unproven` |
+  `not-run` — per D7a, so the evidence never reads a never-demonstrated gate as
+  a clean pass.
+- The floors station's "no model turn" property is untouched — checks are
+  deterministic subprocess runs.
+- Parse errors of the base-ref file at floors time fail the floors turn
+  loudly (the malformed file would already have parked at provision for the
+  HEAD copy; the base-ref copy differing malformed is a pathological state
+  that must not silently pass).
+
+## D7a — gate honesty: a repo-authored check is an unproven checker
+
+The DR-0001 fold's positive half. D7 makes a repo's command load-bearing: a
+failing `required` check rejects the attempt exactly like a built-in floor. But
+semdev's own floors earn that authority by being **red-first pinned** (G6) — we
+have watched each of them fail. A repo-authored command has no such history.
+It arrives as a gate we have never seen reject anything, and the dangerous
+failure of a checker is fail-OPEN: nothing crashes, the layer prints pass.
+
+D1's denylist removes the shapes we can name. Three mechanisms carry the rest:
+
+**1. The optional `proof` negative control.** A check may declare `proof`, a
+second command run in the SAME container with the same bounds, immediately
+before its check. The contract is inverted: **the proof MUST exit non-zero.**
+
+| `proof` | proof exit | Result |
+|---|---|---|
+| declared | non-zero | the check is `proven` — it demonstrably reaches its failure path; run the check normally |
+| declared | **zero** | the control did not fail, so the gate is not demonstrably able to fail: stamp `repo-check:<name>` naming the un-failing control. Rejecting iff the check is `required` |
+| absent | — | run the check and gate as declared, but the finding carries `unproven` |
+
+`required` stays the SOLE rejection axis — a non-required check never rejects,
+whatever its proof did. This is old-coder's *"prove it can fail before trusting
+its pass"* rendered as a harness-executed, harness-stamped fact (G3): the
+harness runs the control and stamps the real exit status; no model ever asserts
+that a gate works.
+
+**2. `unproven` is never rendered as a clean pass.** The status rides the
+finding and travels to the evidence surface. A check with no negative control
+still gates — ergonomics are a hard requirement and demanding a control for
+every check would kill them — but the evidence never claims more than was
+demonstrated. This is the G7 half, and it is the hook DR-0001's O7 (the
+`N-A` / `UNAVAILABLE` / `SUBSTITUTED` split) plugs into when it lands.
+
+**2b. An un-failing control PARKS; it does not reject the attempt.** A control that
+exits 0 is a defect in the REPO's declaration and it is deterministic — it will pass
+again on every retry. Routing it as an attempt rejection re-dispatches the developer
+against a fault she cannot reach (the standards file is not in `target_files`), burns
+the whole attempt budget on real model turns, and escalates with a reason that reads as
+her work failing. It faults the lane instead, which parks toward the human — the same
+posture provisioning takes for a malformed standards file.
+
+**3. Could-not-run is neither pass nor reject-on-the-merits.** `runner.Exec`
+returns a run error when the container could not execute the command at all (a
+dead container, a missing binary, a cancelled deadline). `measure_task` already
+holds this contract — the seam's exit-vs-transport rule *"keeps a dead container
+from false-greening"* (`measuretask.go:153-158`) — and the checks stage adopts
+it verbatim: a check that could not be RUN is stamped `not-run` and is NEVER a
+pass; for a `required` check it rejects (fail-closed, routing exactly like any
+floor rejection), and the finding text distinguishes could-not-run from ran-and-
+failed so the evidence stays honest about which instrument reported.
+
+**The bound, stated so we do not overclaim.** A negative control proves that ONE
+known-bad case reaches the checker's failure path. It does NOT prove the checker
+recognizes every violation of the rule it serves — a grep gate can fail closed
+perfectly and still guard a spelling rather than a behavior. `proven` therefore
+means "demonstrated able to fail", never "sound". Where a check's coverage is
+narrower than the standard it serves, that belongs in the standard's text, not
+in an implied promise from its status.
+
+## D8 — personas: the judgment lane
+
+- `configs/personas/fragments/reviewer/10-standards-contract.md` (new): when
+  `[std:<id>]` entries appear in the brief, review the attempt against each;
+  a violated MUST is a finding and the finding text MUST cite the `std:<id>`;
+  standards tighten, never weaken, the task spec or the measurement floor.
+- `configs/personas/fragments/developer/10-standards.md` (new): `[std:<id>]`
+  entries are the target repo's law for this work; MUST entries are
+  non-negotiable constraints on authored code.
+- No verdict mechanics change: `submit_review` already derives
+  `changes_requested` from any finding's existence — a must-citing finding
+  blocks approval with zero schema/tool change (G3 intact).
+
+## D9 — evidence plan (the bridge proof)
+
+New journey `TestBridgeProofRepoStandardsReachBriefsAndGate` (red-first per
+group where the shape allows): a fixture repo carrying a stripped
+standards file (one developer must, one reviewer must, one may, one required
+check, one non-required check) →
+
+1. provision births + activates exactly the declared records (graph asserts:
+   status active, evidence resolves, idempotent on re-run);
+2. the developer spawn's captured mock prompt contains the developer
+   `[std:]` lines and NOT the reviewer-only one; the reviewer's contains the
+   reviewer set (the mock-LLM harness captures prompts);
+3. the required check runs in-container and its finding gates exactly like a
+   floor (a fixture where the check fails → floors reject → no review);
+4. the arc completes green when standards are satisfied.
+
+Plus unit/integration pins per group (parser tables, idempotent re-sync,
+oversize rejection, retirement + cross-repo isolation, base-ref check
+immunity, contract-mirror literals), the D7a gate-honesty pins (each denied
+fail-open construct rejects at parse naming its defect; a `proof` that exits
+zero rejects a required check; an absent `proof` gates but stamps `unproven`;
+a could-not-run check stamps `not-run` and never passes — the last red-first
+against a deliberately dead container) and the G8 scan extension: the
+fixture-vocabulary conformance walk reaches the standards file so standards
+fixtures cannot smuggle coaching (B10).
+
+Scoped at implementation to `internal/standards.Path` itself, NOT to all
+`.yaml`/`.yml` as first drafted. The product reads standards from that one
+fixed path with no override, so no other YAML can be a standards file, and
+the wider scan is a build-breaking false positive on config a realistic
+fixture ships — a `.golangci.yml` enabling godox declares
+`keywords: [TODO, FIXME, HACK, BUG]`, which is the repo configuring the very
+linter that bans coaching. This lint fails the build, so a false positive
+blocks a legitimately realistic fixture: the opposite of G8's intent. The
+walk's coverage is one declarative table each pin derives from, so a kind
+cannot be declared without a specimen proving the walk reaches it.
+
+## Upstream asks (semstreams — first-consumer findings, to file as issues)
+
+Consolidated from the adversarial reviews; semdev is among the first products
+on the lesson substrate (user directive: file bugs AND improvements).
+**FILED 2026-08-16**: U1+U2+U3 → semstreams#979 (consumer-surface hardening),
+U4 → #980, U5 → #981, U6 → #982.
+
+- **U1 — export the content-identity derivation** (`canonicalLessonContent` /
+  the UUIDv5 mint are unexported, forcing a byte-for-byte mirror with no
+  compile-time drift detection) and document as CONTRACT that the store's
+  conflict verification is field-based, never namespace-based.
+- **U2 — export the constants consumers must hardcode**: the 320B
+  injection-form bound, the status enum (proposed/active/retired/superseded),
+  severity/polarity enums.
+- **U3 — writer gates bypassable on the store path**: all ADR-080 arg gates
+  (incl. control-byte hygiene) live in the emit_lesson TOOL layer;
+  `NATSLessonStore.CreateLesson` accepts arbitrary triples while the curator
+  doc invites direct product policies — semdev re-implemented the 320B gate
+  and initially MISSED the control-byte gate (both reviews' H1). Ask: a
+  `ValidateLessonTriples` at the store layer.
+- **U4 — `NewNATSLessonStore` swallows the client-construction error**
+  (per-call failure instead of boot-time).
+- **U5 — repo/entity-scoped injection**: `Scope.EntityIDs` is dead at
+  beta.160 and TaskMessage carries no entity scope — a multi-target product
+  cannot keep repo A's standards out of repo B's briefs (see the risk below).
+- **U6 — document `Promote`'s unconditional-reconcile semantics** (it
+  resurrects retired lessons and clears retired-at; semdev's file-revert path
+  DEPENDS on this — it must not be "fixed" out from under consumers).
+
+## Sequencing / merge notes
+
+- Independent of PR #7 at the code level (disjoint files). At SPEC-SYNC
+  level both changes modify `dev-from-task`'s floors requirement — whichever
+  archives second re-merges the requirement text over the other's synced
+  form. Recorded here so the second archive expects the conflict.
+- semstreams stays at beta.160; if the beta.161 bump lands first, re-verify
+  the four upstream anchors (store, curator, contract literals, scope
+  derivation) against the new module cache before group 3.
+- The B10 posture hardens the fixture side only; live repos may write
+  anything — injection bounds and strict parse are the containment.
+
+## Risks / trade-offs
+
+- **Repo checks run AFTER the built-in floors have judged the tree (group-5
+  review)**: `RunFloors` computes `CheckAll` — including the clean-tree floor —
+  and only then executes repo-authored shell. A check like
+  `go mod tidy && git diff --exit-code` or a build that writes `bin/` dirties
+  the tree after clean-tree certified it clean, and nothing re-checks. Blast
+  radius is bounded (the cold verify clones the commit, not the tree), but the
+  findings are stamped against a clean-tree pass that no longer describes the
+  tree. Reordering would put repo-authored shell before every structural floor,
+  which is worse; documented rather than fixed.
+- **The lane widens the in-container exec surface**: from one human-approved
+  `test_command` to N repo-file commands. The isolation posture is unchanged
+  (the warm sandbox carries no governed secrets — `NewSandboxes` passes an empty
+  secretEnv — and the commands only ever run in-container), but the surface is
+  wider and belongs in the threat model rather than only in the diff.
+- **The fail-open denylist is a denylist (D1/D7a)**: it removes the
+  fail-open shapes we can name, and a determined author can still write a gate
+  that cannot fail — a `grep` whose rc-1/rc-2 cases are inverted, a script that
+  swallows its own status. The `proof` control is the positive claim, and it is
+  optional by design (authoring ergonomics are a hard requirement), so
+  `unproven` is the honest default rather than a rejection. What the design
+  refuses to do is let an unproven gate render as a clean pass.
+- **Prompt-injection surface**: standards text is repo-authored and enters
+  agent briefs verbatim. Bounded by: the 320B/record + 4KB/brief caps, strict
+  parse, and — the real backstop — every consequential outcome staying
+  harness-gated (measurement, floors, clean-room verify are immune to brief
+  content; a hostile standard can waste a run, not forge evidence). Noted in
+  the alignment note; a lexical deny-list would be theater and is omitted.
+- **Retired records accumulate against the page bound**: evidence is an
+  identity input, so every EDIT to the standards file re-mints all N records and
+  retires the N previous ones. Retirement is history-preserving and the listing
+  has no server-side status filter, so edit history consumes the retirement
+  scan's page budget at ~N records per edit. 16 pages is far off (~10k records
+  once the server's per-page byte trim is accounted for), but it is a monotonic
+  accumulator with a hard-error ceiling rather than a truncating one — by
+  design (a truncated list under-retires), so it will announce itself rather
+  than degrade.
+- **Provisioning now requires `run.issue.ref`**: a run with no target
+  coordinate cannot scope repo standards, so the sync blocks it. Ordering is
+  safe today (`coordinator/04-stamp-issue-ref` fires at mint, long before the
+  provision gate), but this is a NEW global precondition on provisioning
+  introduced by a standards feature — a future mint path without a forge
+  coordinate would park with a message about standards scoping.
+- **K=10 ceiling**: >10 standards per role and the lowest-severity tail drops
+  silently at injection (deterministically). The sync WARNS at birth when a
+  role's active set exceeds K — loud at authoring time, not at injection.
+- **Category collision**: `repo-standard` is an open shared taxonomy; a
+  future non-semdev writer using the same category would enter D5's candidate
+  set — the repo-scope evidence check is the isolation, and the retirement
+  filter refuses candidates whose evidence lacks a resolvable
+  `repo.standards.repo`.
+- **Contract-mirror drift**: an upstream rename of the contract/group breaks
+  Promote loudly (contract lookup fails — fail-closed, not silent); the
+  bump-time re-verify covers it.
+- **Concurrent runs on ONE repo at different base revisions (group-4 finding)**:
+  every provision re-syncs, and retirement retires this repo's records that are
+  not in the freshly-parsed expected set. Two in-flight runs whose checkouts
+  carry DIFFERENT standards-file bytes therefore retire each other's records
+  (different digest → different source → different record identity → each looks
+  "withdrawn" to the other). The loser's already-dispatched spawns keep the
+  brief they were assembled with, so nothing mis-executes; the effect is a
+  later spawn missing a standard, and the next provision of either run restores
+  its own set (Promote resurrects retired records, D4). Accepted for v1 on the
+  same grounds as the injection bleed: the dogfood deployment is single-target
+  and serial. The fix, if it ever bites, is to scope retirement by
+  provision recency rather than by set membership alone.
+- **Cross-repo injection bleed (multi-target, semstreams-review M6/U5)**:
+  injection scope is role tags ONLY at beta.160, so in a multi-target
+  deployment one repo's active standards inject into every repo's
+  same-role briefs and share the K=10 budget. Retirement is repo-isolated
+  (the repo-scoped source digest, D2-as-built); injection is not — upstream
+  ask U5 is the fix path. Single-target dogfood is unaffected.
+- **Source digest covers repo + content (D2 as-built, semstreams-review
+  M2)**: byte-identical template files across repos get per-repo source
+  entities and per-repo record identities — clean retirement isolation at
+  the cost of duplicate brief lines if multiple targets ever share one
+  deployment.
+- **Absent-file semantics (semstreams-review L4)**: deleting a previously
+  declared standards file RETIRES the repo's records (spec amended); the
+  group-4 seam runs retirement-only on absent file — no source entity is
+  minted for an absent file.

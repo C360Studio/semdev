@@ -153,6 +153,7 @@ func newDeps(sources Sources, checkouts Checkouts, manifests Manifests, prover P
 		Sources:     sources,
 		Checkouts:   checkouts,
 		Manifests:   manifests,
+		Standards:   cleanStandards{},
 		Warmers:     warmers,
 		Prover:      prover,
 		Reader:      reader,
@@ -263,6 +264,7 @@ func TestWarmProvisionFailureBlocks(t *testing.T) {
 		Sources:     fakeSources{dir: "/src"},
 		Checkouts:   &fakeCheckouts{root: "/checkout"},
 		Manifests:   fakeManifests{m: harness.GoProfile()},
+		Standards:   cleanStandards{},
 		Warmers:     warmers,
 		Prover:      &fakeProver{baseline: readyBaseline("sha256:x")},
 		Reader:      fakeReader{},
@@ -391,6 +393,7 @@ func TestDockerAbsentBlocks(t *testing.T) {
 		Sources:   fakeSources{dir: "/src"},
 		Checkouts: checkouts,
 		Manifests: fakeManifests{m: harness.GoProfile()},
+		Standards: cleanStandards{},
 		Warmers:   &fakeWarmers{},
 		Prover:    prover,
 		Reader:    fakeReader{},
@@ -453,6 +456,7 @@ func TestAlreadyReadyIsNoOp(t *testing.T) {
 	}
 }
 
+// fixtureDir returns the absolute path to the committed go-health-class fixture.
 func fixtureDir(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

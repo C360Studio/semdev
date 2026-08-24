@@ -86,6 +86,9 @@ capability that owns it. Mirrors `internal/vocab.Predicates`.
 | `conversation.classifier.attempted` | conversation-spawn-rule | conversation-channel |
 | `conversation.budget.noted` | conversation-budget-rule | conversation-channel |
 | `conversation.classifier.recorded` | conversation-classifier | conversation-channel |
+| `repo.standards.digest` | standards-sync | repo-standards |
+| `repo.standards.path` | standards-sync | repo-standards |
+| `repo.standards.repo` | standards-sync | repo-standards |
 
 ## Components
 

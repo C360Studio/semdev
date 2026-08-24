@@ -639,3 +639,37 @@ Alignment posture:
 - **Fail-loud** — a nil-client execution and any upstream fault return an
   explicit tool errResult (trajectory-visible, D4); never an empty success,
   never a silent fallback.
+
+## standards-sync-step
+
+Introduced by `standards-via-lessons`. The deterministic provision-pipeline
+step (a narrow seam on `ProvisionDeps`, the `Manifests.Resolve` shape — NOT a
+new component or registered tool) that reads the target repo's committed
+`.semdev/standards.yaml` and projects it onto the lesson substrate.
+
+Primitive-first proof (G1): every consequential mechanism already exists in
+the framework — birth via the exported `agentictools.NewNATSLessonStore`
+(idempotent content-derived identity), lifecycle via
+`agentictools.LessonCurator` (Lane 1, evidence-existence-gated), delivery via
+`agentic-loop`'s unconditionally-wired role-scoped brief injection
+(`lessonmatch`). semdev adds ONLY: the strict parser, the mapping, the
+source-entity birth (3 predicates — the change's whole G9 cost), and the
+hand-mirrored `agentic.lesson-record` contract
+(`graphown.LessonRecordMirror`; the framework's copy is internal —
+`builtinprojection`, the `write_todos`-skip class).
+
+G2 posture — curator-driven lifecycle from Go is the FRAMEWORK's sanctioned
+design, not a product reconciler: the rule lane cannot resolve evidence, the
+framework README mandates Lane 1 for promotion, and it ships no promote tool.
+The auto-promotion policy is explicit and named: repo-file-derived standards
+auto-promote because the git commit / PR review of the standards file IS the
+human gate; the sync promotes only records it just ensured from the file it
+just parsed — nothing else rides the policy, and `emit_lesson` remains
+unadvertised to every semdev loop.
+
+Prompt-surface posture: standards text is repo-authored and enters briefs
+verbatim, bounded by the substrate's 320B/record + 4KB/brief caps and the
+strict parser; every consequential outcome stays harness-gated (measurement,
+floors, clean-room verify are immune to brief content) — a hostile standard
+can waste a run, never forge evidence. A lexical deny-list would be theater
+and is deliberately omitted.

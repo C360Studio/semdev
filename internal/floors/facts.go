@@ -45,7 +45,8 @@ const (
 // FormatDetail renders the per-floor findings into the one human-legible detail
 // scalar (D4). Each line names the floor, its pass/reject, and its reason — so a
 // park-toward-human keeps the full floor breakdown the per-floor triples used to
-// carry. Order is CheckAll's fixed floor order, so the output is stable.
+// carry. Order is CheckAll's fixed floor order followed by the repo's declared check
+// order (standards-via-lessons D7), so the output stays stable run to run.
 func FormatDetail(findings []Finding) string {
 	var b strings.Builder
 	for i, f := range findings {
@@ -53,7 +54,13 @@ func FormatDetail(findings []Finding) string {
 			b.WriteByte('\n')
 		}
 		status := "passed"
-		if !f.Passed {
+		switch {
+		case f.Passed:
+		case f.Advisory:
+			// Reported, not gating — and still rendered as a failure, because a reader
+			// who sees "passed" for a check that failed has been misled by the evidence.
+			status = "FAILED (advisory — reported, does not gate)"
+		default:
 			status = "REJECTED"
 		}
 		fmt.Fprintf(&b, "%s: %s", f.Floor, status)

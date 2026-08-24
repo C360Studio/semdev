@@ -49,6 +49,7 @@ import (
 	"log/slog"
 
 	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/standards"
 
 	"github.com/c360studio/semstreams/component"
 	"github.com/c360studio/semstreams/pkg/errs"
@@ -120,7 +121,7 @@ func (h *handler) Handle(ctx context.Context, req station.Request) error {
 // shared checkout, or stand up into the shared warm-container registry measure_task reads, must
 // not start (never a silent no-op). A fixture-mode EMPTY dir is NOT a fail-loud: it makes the
 // source resolve fail closed → block → park (SB5), matching the tool.
-func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, clients *graphown.Clients) (component.Discoverable, error) {
+func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, snapshots *standards.Snapshots, clients *graphown.Clients) (component.Discoverable, error) {
 	var cfg station.Config
 	if len(rawConfig) > 0 {
 		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
@@ -145,6 +146,29 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 	if err != nil {
 		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build run source")
 	}
+	// The repo-standards sync (standards-via-lessons D4). Built HERE rather than captured at
+	// Register because it needs the live NATS client, and failing loud here is the point: the
+	// framework's curator and lesson store both accept a broken surface set and fail later,
+	// per-call, without naming the wiring bug. Provision blocks on a nil seam, so an unwired
+	// standards sync could otherwise turn every run into an opaque park.
+	standardsSync, err := standards.NewProvisionSync(standards.Wiring{
+		NATS:    deps.NATSClient,
+		Clients: clients,
+		Reader:  factReader,
+		// component.Dependencies already carries the platform identity the framework
+		// resolved — the same source every other semdev factory reads. Threading a second
+		// copy through Register/RegisterAll would give the census a zero PlatformMeta that
+		// looks like a valid identity.
+		Org:      deps.Platform.Org,
+		Platform: deps.Platform.Platform,
+		// The SHARED capture store the floors-time checks lane reads. Provisioning is the
+		// only point at which the repo's declared law is known to be untouched by the run.
+		Snapshots: snapshots,
+		Logger:    logger,
+	})
+	if err != nil {
+		return nil, errs.WrapInvalid(err, ComponentName, "NewProcessor", "build repo-standards sync")
+	}
 	// Each owner gets its OWN bound client (ADR-056 binds one owner per client);
 	// the station's dispatch-outcome stamp is a DIFFERENT owner than the tool core
 	// it hosts, so it resolves separately (station-harness, G5).
@@ -155,6 +179,7 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 			Sources:     sources,   // StaticSource (fixture) or the forge-clone Source (real target)
 			Checkouts:   checkouts, // *runspace.Checkouts implements Materialize (provision Checkouts)
 			Manifests:   runspace.Manifests{},
+			Standards:   standardsSync,
 			Warmers:     sandboxes, // *runspace.Sandboxes implements Provision (provision Warmers)
 			Prover:      provisionsandbox.DefaultProver(),
 			Store:       nil, // M0: no governed secrets (SB2c)
@@ -172,11 +197,11 @@ func newProcessor(rawConfig json.RawMessage, deps component.Dependencies, checko
 // the run's SOURCE spec. Called from boot.RegisterAll with the live instances; the conformance
 // census passes nil/zero (the factory registers but fails loud if ever constructed, which the
 // census never does — it only inspects the registry).
-func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, clients *graphown.Clients) error {
+func Register(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, spec SourceSpec, snapshots *standards.Snapshots, clients *graphown.Clients) error {
 	return reg.RegisterWithConfig(component.RegistrationConfig{
 		Name: ComponentName,
 		Factory: func(raw json.RawMessage, deps component.Dependencies) (component.Discoverable, error) {
-			return newProcessor(raw, deps, checkouts, sandboxes, spec, clients)
+			return newProcessor(raw, deps, checkouts, sandboxes, spec, snapshots, clients)
 		},
 		Schema:      station.Schema,
 		Type:        "processor",

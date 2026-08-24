@@ -69,8 +69,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/c360studio/semstreams/agentic"
 	"github.com/c360studio/semstreams/pkg/projection"
 	semtypes "github.com/c360studio/semstreams/pkg/types"
+	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 
 	"github.com/c360studio/semdev/internal/vocab"
 )
@@ -98,6 +100,11 @@ const (
 	// writer's fact. Narrowing it would reject the loop-fired station park at the
 	// write; TestAgentExecPatternSpansBothExecutionClasses pins both halves.
 	AgentExecPattern = "*.*.agent.*.execution.*"
+	// StandardsSourcePattern is the repo-standards SOURCE entity
+	// (content-digest ID, standards-via-lessons D2) — the provenance anchor
+	// file-derived standard records cite as evidence. The second entity class
+	// semdev CREATES (strict birth, conflict = duplicate signal).
+	StandardsSourcePattern = "*.*.repo.standards.source.*"
 )
 
 // OwnedGroup is the name of the single reconcile predicate group every
@@ -116,6 +123,11 @@ var entityClass = map[string]string{
 	"intake.actor.login":    AdmissionPattern,
 	"intake.actor.admitted": AdmissionPattern,
 	"intake.event.ref":      AdmissionPattern,
+
+	// standards-sync — the birth facts on the repo-standards source entity.
+	"repo.standards.digest": StandardsSourcePattern,
+	"repo.standards.path":   StandardsSourcePattern,
+	"repo.standards.repo":   StandardsSourcePattern,
 
 	// The run entity: the harness fact packages the routing rules read.
 	"run.change.decision":             RunPattern,
@@ -221,6 +233,12 @@ var ruleWriterSources = map[string]bool{
 // own nothing — see the package doc.
 var createOwners = map[string]bool{
 	"admission-check": true,
+	// standards-sync births the repo-standards source entity (D2) — same
+	// strict-Create discipline; it reconciles nothing post-birth. INTERIM
+	// (semstreams-review LOW): the write site lands later in the SAME change
+	// (standards-via-lessons groups 3-4); if that change stalls, this entry
+	// overstates coverage and should move to unwiredPredicates' posture.
+	"standards-sync": true,
 }
 
 // OwnedContract pairs a derived contract with the vocab Source that binds it. The
@@ -293,10 +311,11 @@ type contractKey struct {
 // as the writer's own name. This is presentation only — OwnedContract.Owner is the
 // authority, never a parse of the name.
 var classSuffix = map[string]string{
-	RunPattern:       "run",
-	LoopPattern:      "loop",
-	AdmissionPattern: "admission",
-	AgentExecPattern: "agent-exec",
+	RunPattern:             "run",
+	LoopPattern:            "loop",
+	AdmissionPattern:       "admission",
+	AgentExecPattern:       "agent-exec",
+	StandardsSourcePattern: "standards-source",
 }
 
 // Contracts derives the complete set of semdev projection contracts from the vocab
@@ -385,6 +404,69 @@ func deriveContracts() ([]OwnedContract, error) {
 		contracts = append(contracts, OwnedContract{Owner: key.owner, Contract: c})
 	}
 	return contracts, nil
+}
+
+// AllContracts is the COMPLETE contract set the shared mutation client carries:
+// the vocab-derived semdev census (Contracts) plus the framework-adjunct lesson
+// mirror. The split keeps the census invariant intact — every Contracts()
+// predicate is semdev vocabulary with a checked-in writer — while the mirror's
+// predicates are FRAMEWORK-canonical (censused upstream by agenticvocab.Register),
+// the exact analogue of vocab's frameworkAdjacent set.
+func AllContracts() ([]OwnedContract, error) {
+	census, err := Contracts()
+	if err != nil {
+		return nil, err
+	}
+	// Fresh slice, never append onto the memoized derivation: an append into
+	// spare capacity would WRITE into the sync.OnceValues-cached backing array —
+	// racy across callers and correct today only by accident of exact capacity.
+	all := make([]OwnedContract, 0, len(census)+1)
+	all = append(all, census...)
+	return append(all, LessonRecordMirror()), nil
+}
+
+// LessonRecordMirror is semdev's HAND-MIRRORED copy of the framework's lesson-record
+// projection contract (the CLAUDE.md adoption precondition). The authoritative copy
+// lives in semstreams internal/builtinprojection/contracts.go (LessonRecordContractName
+// / LessonLifecycleGroupName) — an INTERNAL package semdev cannot import, the same
+// class of builtin the write_todos skip documents. Every predicate below uses the
+// framework's EXPORTED vocabulary constants, so only the contract/group NAMES and the
+// grouping are literal here; TestLessonRecordContractMirror pins them and the
+// standards journey is the behavioral proof the mirror matches the wire. Owner is the
+// framework curator's fixed Source: semdev never writes lesson facts through a
+// graphown.Writer — the sync step uses the framework's LessonStore (birth) and
+// LessonCurator (lifecycle), which need this contract present in the shared client.
+func LessonRecordMirror() OwnedContract {
+	return OwnedContract{
+		Owner: "ops-lesson-curator",
+		Contract: projection.Contract{
+			Name:          "agentic.lesson-record",
+			MessageType:   agentic.AgentLessonMessageType().Key(),
+			EntityPattern: "*.*.agent.lesson.record.*",
+			BirthPredicates: []string{
+				agvocab.LessonCategory,
+				agvocab.LessonPolarity,
+				agvocab.LessonSeverity,
+				agvocab.LessonCreatedAt,
+				agvocab.LessonSummary,
+				agvocab.LessonDetail,
+				agvocab.LessonInjectionForm,
+				agvocab.LessonEvidence,
+				agvocab.LessonAppliesTo,
+				agvocab.LessonObservedRole,
+				agvocab.ActionExecutedBy,
+			},
+			Groups: []projection.PredicateGroup{{
+				Name: "lesson-lifecycle",
+				Mode: projection.ModeReconcile,
+				Predicates: []string{
+					agvocab.LessonStatus,
+					agvocab.LessonSupersededBy,
+					agvocab.LessonRetiredAt,
+				},
+			}},
+		},
+	}
 }
 
 // contractName is the owner id for a single-class owner and owner-<class> for an

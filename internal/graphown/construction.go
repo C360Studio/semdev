@@ -1,6 +1,7 @@
 package graphown
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -37,14 +38,25 @@ func NewClients(nc *natsclient.Client) (*Clients, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("graphown: NATS client is required to build the mutation client")
 	}
-	all, err := Contracts()
+	all, err := AllContracts()
 	if err != nil {
 		return nil, err
 	}
+	census, err := Contracts()
+	if err != nil {
+		return nil, err
+	}
+	// The client carries EVERY contract (census + the lesson mirror) so the
+	// curator's Reconcile resolves; the owners map carries the CENSUS only —
+	// the mirror's owner has no graphown Writer (the sync uses the framework
+	// store/curator), and RequireWriters passing for a writer that cannot
+	// write would be exactly the lie it exists to prevent (go-review R3).
 	flat := make([]projection.Contract, 0, len(all))
-	owners := make(map[string]bool, len(all))
 	for _, oc := range all {
 		flat = append(flat, oc.Contract)
+	}
+	owners := make(map[string]bool, len(census))
+	for _, oc := range census {
 		owners[oc.Owner] = true
 	}
 	client, err := projection.NewMutationClient(projection.MutationClientConfig{
@@ -75,6 +87,42 @@ func (c *Clients) ReadWriter(owner string) *Writer {
 		return nil
 	}
 	return NewReadWriter(owner, c.client, c.client)
+}
+
+// LessonSurfaces returns the reconcile + authoritative-read surfaces the
+// framework's LessonCurator composes (standards-via-lessons D4). The shared
+// client carries the hand-mirrored agentic.lesson-record contract, so a curator
+// built over these surfaces can Promote/Retire lesson records; nothing else
+// should reach past the Writer discipline through this accessor. Nil-safe on
+// the census path (returns nils) — and the CALLER MUST reject nils at
+// construction: the framework's NewLessonCurator accepts nil surfaces without
+// checking and would panic at the first Promote, deep in the sync step. The D4
+// boot wiring owns that fail-loud check (go-review R2).
+func (c *Clients) LessonSurfaces() (projection.PredicateReconciler, projection.AuthoritativeReader) {
+	if c == nil || c.client == nil {
+		return nil, nil
+	}
+	return lessonOnlyReconciler{inner: c.client}, c.client
+}
+
+// lessonOnlyReconciler makes LessonSurfaces' least-privilege STRUCTURAL rather
+// than prose (semstreams-review MEDIUM): a raw PredicateReconciler is
+// contract-name-parameterized, so an unwrapped leak could name a census
+// contract + its owned group and group-wipe another writer's facts with
+// arbitrary Source metadata — bypassing exactly the ContractFor discipline
+// this package exists to make unavoidable. Only the mirrored lesson contract
+// passes; everything else fails at the call site, named.
+type lessonOnlyReconciler struct {
+	inner projection.PredicateReconciler
+}
+
+func (l lessonOnlyReconciler) Reconcile(ctx context.Context, m projection.ReconcileMutation) (projection.MutationReceipt, error) {
+	if m.Contract != "agentic.lesson-record" {
+		return projection.MutationReceipt{}, fmt.Errorf(
+			"graphown: the LessonSurfaces reconciler permits only the agentic.lesson-record contract (got %q) — census contracts write through Writer",
+			m.Contract)
+	}
+	return l.inner.Reconcile(ctx, m)
 }
 
 func (c *Clients) knows(owner string) bool {

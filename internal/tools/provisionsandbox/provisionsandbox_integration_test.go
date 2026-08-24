@@ -46,6 +46,7 @@ func TestProvisionRealFixtureReady(t *testing.T) {
 		Sources:     fakeSources{dir: fixtureDir(t)},
 		Checkouts:   checkouts,
 		Manifests:   runspace.Manifests{},
+		Standards:   cleanStandards{},
 		Warmers:     sandboxes,
 		Prover:      DefaultProver(),
 		Reader:      fakeReader{},

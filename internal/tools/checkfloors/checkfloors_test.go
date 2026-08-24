@@ -187,7 +187,7 @@ func vacuousAttempt() floors.Attempt {
 // and collapses the writer's stamped triples into a predicate->object map for assertions.
 func run(t *testing.T, attempt floors.Attempt, w *fakeWriter, idx int) (map[string]string, FloorResult, error) {
 	t.Helper()
-	res, err := RunFloors(context.Background(), fakeAttempts{attempt: attempt}, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", idx)
+	res, err := RunFloors(context.Background(), fakeAttempts{attempt: attempt}, nil, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", idx)
 	facts := map[string]string{}
 	for _, batch := range w.replaces {
 		for _, tr := range batch {
@@ -279,7 +279,7 @@ func TestCheckFloorsForwardsTaskIndexToResolve(t *testing.T) {
 	var gotIdx int
 	fa := fakeAttempts{attempt: passingAttempt(), gotIdx: &gotIdx}
 	w := &fakeWriter{}
-	_, err := RunFloors(context.Background(), fa, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 2)
+	_, err := RunFloors(context.Background(), fa, nil, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 2)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 		floors.DetailPredicate,
 	}
 	w := &fakeWriter{owned: stale}
-	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, nil, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 0)
 	if err == nil {
 		t.Fatal("a failed resolve must surface an error")
 	}
@@ -357,7 +357,7 @@ func TestCheckFloorsResolveFailureClearsStaleFindings(t *testing.T) {
 // An attempt that cannot be resolved (checkout read fault) is an error, not a silent pass.
 func TestCheckFloorsResolveErrorFails(t *testing.T) {
 	w := &fakeWriter{}
-	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{err: errors.New("checkout unreadable")}, nil, fakeReader{}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, "", 0)
 	if err == nil {
 		t.Fatal("a failed attempt resolve must error")
 	}
@@ -387,7 +387,7 @@ func TestCheckFloorsMirrorsRouteInputsOntoLoop(t *testing.T) {
 		attemptFact("dev-loop-2"),
 		budgetFact("3"),
 	}}
-	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	res, err := RunFloors(context.Background(), fakeAttempts{attempt: vacuousAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestCheckFloorsMirrorsFailClosedWhenMeasurementAbsent(t *testing.T) {
 	// budget AND an attempt ARE seeded: the mirror requires both (D7 / task 4.6 — the
 	// dispatch rule appends an attempt at spawn, so a running loop always has one),
 	// and this test is about measurement absence, not a half-provisioned run.
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, fakeReader{facts: []message.Triple{budgetFact("3"), attemptFact("dev-loop-1")}}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, fakeReader{facts: []message.Triple{budgetFact("3"), attemptFact("dev-loop-1")}}, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestCheckFloorsMirrorsFailClosedOnStaleMeasurement(t *testing.T) {
 		// STALE measurement, not a half-provisioned run.
 		attemptFact("dev-loop-1"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestCheckFloorsMirrorStampsBudget(t *testing.T) {
 		attemptFact("dev-loop-1"),
 		budgetFact("4"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestCheckFloorsMirrorAbsentBudgetFaultsFindingsIntact(t *testing.T) {
 		measuredPassed("false"),
 		attemptFact("dev-loop-1"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err == nil {
 		t.Fatal("an absent task.spec.budget must fault the mirror loudly (D7), got nil error")
 	}
@@ -591,7 +591,7 @@ func TestCheckFloorsMirrorNonCanonicalBudgetFaults(t *testing.T) {
 	for _, bad := range []string{"", " 3 ", "3.0", "abc"} {
 		w := &fakeWriter{}
 		reader := fakeReader{facts: []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact(bad)}}
-		_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+		_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 		if err == nil {
 			t.Errorf("budget %q: a non-canonical budget must fault the mirror (D7), got nil error", bad)
 		}
@@ -619,7 +619,7 @@ func TestCheckFloorsMirrorStampsTransientCounter(t *testing.T) {
 		transientFact("dev-loop-1a"),
 		transientFact("dev-loop-1b"),
 	}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestCheckFloorsMirrorStampsTransientCounter(t *testing.T) {
 func TestCheckFloorsMirrorAbsentTransientIsZeroNoFault(t *testing.T) {
 	w := &fakeWriter{}
 	reader := fakeReader{facts: []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("an absent transient counter must NOT fault (valid count 0): %v", err)
 	}
@@ -684,7 +684,7 @@ func TestCheckFloorsMirrorTransientFlagClassification(t *testing.T) {
 				facts:     []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")},
 				loopFacts: tc.loopFacts,
 			}
-			_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+			_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 			if err != nil {
 				t.Fatalf("RunFloors: %v", err)
 			}
@@ -723,7 +723,7 @@ func TestCheckFloorsMirrorTransientFlagAtomicWithPassed(t *testing.T) {
 		facts:     []message.Triple{measuredPassed("false"), attemptFact("dev-loop-1"), budgetFact("3")},
 		loopFacts: []message.Triple{terminalReasonFact("model_error")},
 	}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader, findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err != nil {
 		t.Fatalf("RunFloors: %v", err)
 	}
@@ -822,7 +822,7 @@ func TestCheckFloorsFaultsOnEmptyAttemptSet(t *testing.T) {
 	w := &fakeWriter{}
 	// Budget present, measurement present — ONLY the attempt set is empty.
 	reader := fakeReader{facts: []message.Triple{measuredPassed("true"), budgetFact("3")}}
-	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, reader,
+	_, err := RunFloors(context.Background(), fakeAttempts{attempt: passingAttempt()}, nil, reader,
 		findingsWriterFor(w), mirrorWriterFor(w), slog.Default(), runEntity, loopEntity, 0)
 	if err == nil {
 		t.Fatal("an EMPTY task.attempt.instance must fault — mirroring would group-wipe the prior attempt count and read as budget-unexhausted")

@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	ssmock "github.com/c360studio/semstreams/test/e2e/mock"
@@ -91,6 +92,53 @@ type Harness struct {
 	errorMarkers []string
 	proxy        *http.Server
 	proxyURL     string
+
+	// capture turns on prompt recording. It is OPT-IN, and deliberately so: it
+	// forces every turn through the proxy hop, and a journey that does not read
+	// prompts should keep the transport it has always been proven on. It is read
+	// ONCE, in Start, and handed to the handler as an argument — the handler never
+	// reads this field, so there is no cross-goroutine access to race on.
+	capture bool
+	started bool
+	mu      sync.Mutex
+	prompts []string
+}
+
+// WithPromptCapture records the body of every chat-completion request the runtime
+// sends, readable afterwards via Prompts. ssmock exposes only LastRequest, which
+// cannot answer a question about two different spawns at two different points in one
+// arc — "did the DEVELOPER's brief carry this line, and the REVIEWER's that one" —
+// so the recording happens at the proxy this harness already runs.
+//
+// Capture is unconditional once enabled, including for turns an Error fixture 500s:
+// a prompt that was sent is a prompt that was sent, and hiding the ones that failed
+// would make the record disagree with what the model actually received.
+// It PANICS if called after Start. Enabling capture on a started harness records
+// nothing — with no Error fixtures the proxy was never bound, so Endpoint already
+// handed out ssmock directly and no handler of ours ever runs. That failure is
+// silent, `-race` cannot see it, and the journey asserting on prompts would simply
+// find none: the same shape as the launch lane that was dead for two releases
+// because construction order was wrong and nothing said so. A misused test harness
+// should be loud.
+func (h *Harness) WithPromptCapture() *Harness {
+	if h.started {
+		panic("mockllm: WithPromptCapture called after Start — capture would silently record nothing")
+	}
+	h.capture = true
+	return h
+}
+
+// Prompts returns the recorded completion-request bodies in the order they were
+// served — one entry per model turn, so len(Prompts()) tracks RequestCount(). Empty
+// unless WithPromptCapture was enabled.
+//
+// Each body carries the full message history, so retained bytes grow with the square
+// of the transcript. Fine for a journey's handful of turns; a capture run over a long
+// real-LLM arc with large tool results would want a cap.
+func (h *Harness) Prompts() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.prompts...)
 }
 
 // New builds a mock-LLM harness that replays the given fixtures. Completion
@@ -143,7 +191,8 @@ func (h *Harness) Start() error {
 	if err := h.srv.Start("127.0.0.1:0"); err != nil {
 		return err
 	}
-	if len(h.errorMarkers) == 0 {
+	h.started = true
+	if len(h.errorMarkers) == 0 && !h.capture {
 		return nil
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -151,19 +200,35 @@ func (h *Harness) Start() error {
 		return fmt.Errorf("mockllm: bind error-proxy listener: %w", err)
 	}
 	h.proxyURL = "http://" + ln.Addr().String()
-	h.proxy = &http.Server{Handler: h.errorProxyHandler(), ReadHeaderTimeout: 5 * time.Second}
+	h.proxy = &http.Server{Handler: h.proxyHandler(h.capture), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = h.proxy.Serve(ln) }()
 	return nil
 }
 
-// errorProxyHandler returns 500 for any request whose body contains an error marker
-// (the model_error terminal path), and forwards everything else verbatim to the wrapped
-// ssmock server — so a 500'd turn (and the client's retries of it) never reaches ssmock and
-// does not consume a scripted turn.
-func (h *Harness) errorProxyHandler() http.Handler {
+// proxyHandler records the request body when capture is on, returns 500 for any request
+// whose body contains an error marker (the model_error terminal path), and forwards
+// everything else verbatim to the wrapped ssmock server — so a 500'd turn (and the
+// client's retries of it) never reaches ssmock and does not consume a scripted turn.
+func (h *Harness) proxyHandler(capture bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		_ = r.Body.Close()
+		if err != nil {
+			// Never record a short read as if it were the whole prompt. A truncated
+			// body makes an absence assertion ("this brief does NOT carry that
+			// standard") pass because the bytes were cut, not because the standard was
+			// absent — a false green in the exact assertion class capture exists for.
+			http.Error(w, "mockllm: read request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Record only completion requests, so Prompts() is one entry per model turn and
+		// comparable to RequestCount(). Recording health probes would put empty strings
+		// in the corpus and quietly break that correspondence.
+		if capture && strings.Contains(r.URL.Path, "/chat/completions") {
+			h.mu.Lock()
+			h.prompts = append(h.prompts, string(body))
+			h.mu.Unlock()
+		}
 		for _, m := range h.errorMarkers {
 			if m != "" && strings.Contains(string(body), m) {
 				http.Error(w, `{"error":{"message":"mockllm injected transient failure","type":"server_error"}}`, http.StatusInternalServerError)

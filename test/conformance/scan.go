@@ -330,3 +330,43 @@ func qualifiedFunc(fun ast.Expr) (string, bool) {
 		return "", false
 	}
 }
+
+// graphClientConstructionSites returns the names of the functions in src that
+// call graphown.NewClients directly. Contract validation inside the mutation
+// client calls vocabulary.RequireDeclaredPredicate on every contract predicate,
+// so a client built before internal/vocab's Register() fails construction
+// outright — which is exactly how the launch lane died silently at beta.159
+// (internal/boot/launch.go built clients with no Register call; the whole
+// `semdev launch` path returned "build graph mutation client: ... canonical but
+// not declared in the vocabulary registry"). The pin over this scan keeps every
+// boot entry point funnelled through the one helper that declares first.
+//
+// Bounds, so nobody over-trusts it: it matches the literal selector text
+// "graphown.NewClients", so an import alias evades it, and it inspects function bodies,
+// so a package-level func literal is invisible. It is scoped to internal/boot, so callers
+// elsewhere (e.g. a test that builds clients directly) are out of its reach by design.
+// It is a regression pin on a known shape, not a proof of absence.
+func graphClientConstructionSites(src []byte) ([]string, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, decl := range f.Decls {
+		fn, isFn := decl.(*ast.FuncDecl)
+		if !isFn || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, isCall := n.(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			if name, ok := qualifiedFunc(call.Fun); ok && name == "graphown.NewClients" {
+				out = append(out, fn.Name.Name)
+			}
+			return true
+		})
+	}
+	return out, nil
+}

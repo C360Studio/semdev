@@ -76,6 +76,15 @@ const forgeIO = "forge-io-real-lanes"
 // deterministic fast-path; a reject cancels the run.
 const nlIntent = "nl-conversation-intent"
 
+// repoStandards is the change slug for repo-declared standards on the lesson
+// substrate: the provision-time sync births each declared standard as an
+// agent.lesson.record citing a content-digest SOURCE entity — these three
+// predicates describe that source entity and are the change's whole G9 cost.
+// The standard records themselves ride FRAMEWORK-canonical agent.lesson.*
+// vocabulary (declared by agenticvocab.Register), deliberately not re-censused
+// here.
+const repoStandards = "standards-via-lessons"
+
 // Predicates is the complete semdev-OWNED fact vocabulary (canonical beta.147 names).
 // Order is presentational only; the pins treat it as a set keyed by Name. Framework
 // predicates semdev merely READS (agent.loop.*, coordinator.decision.*, agent.run.phase,
@@ -349,6 +358,14 @@ var Predicates = []Predicate{
 	// that returns a ToolResult error does not fail its loop, so a classifier that
 	// refused to classify still terminates outcome=success (observed, not assumed).
 	{"conversation.classifier.recorded", "conversation-classifier", "conversation-channel", nlIntent},
+
+	// standards-sync — the repo-standards SOURCE entity's birth facts (the
+	// provenance anchor every file-derived standard record cites as evidence).
+	// Content-digest entity ID makes the birth idempotent (strict Create,
+	// conflict = the duplicate signal — the admission-record pattern).
+	{"repo.standards.digest", "standards-sync", "repo-standards", repoStandards},
+	{"repo.standards.path", "standards-sync", "repo-standards", repoStandards},
+	{"repo.standards.repo", "standards-sync", "repo-standards", repoStandards},
 }
 
 // frameworkAdjacent are canonical predicates semdev READS or WRITES that the framework

@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/c360studio/semdev/internal/graphown"
-
 	"github.com/c360studio/semdev/internal/experiment"
 	"github.com/c360studio/semdev/internal/forge/github"
 	"github.com/c360studio/semdev/internal/forge/semsource"
@@ -55,9 +53,9 @@ func RunLaunch(ctx context.Context, opts RunOptions, params launch.Params) (stri
 	// experiment-intake) through the same contract-validated surface the runtime
 	// uses. Construction registers nothing (ADR-091), so a concurrent `task serve`
 	// is unaffected by this process holding its own client.
-	graphClients, err := graphown.NewClients(natsClient)
+	graphClients, err := declaredGraphClients(natsClient)
 	if err != nil {
-		return "", fmt.Errorf("build graph mutation client: %w", err)
+		return "", err
 	}
 
 	// The experiment condition is operator-declared in the config (G3/G5 — the same evidence

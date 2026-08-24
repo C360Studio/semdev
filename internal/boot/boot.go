@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/standards"
 
 	"github.com/c360studio/semstreams/agentic/agentrun"
 	"github.com/c360studio/semstreams/component"
@@ -74,7 +75,7 @@ import (
 // loud if ever CONSTRUCTED without the seam — which the census never does (it only
 // inspects the registry). The live boot passes the shared instances + source spec,
 // created before this call.
-func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceSpec provision.SourceSpec, clients *graphown.Clients) error {
+func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandboxes *runspace.Sandboxes, sourceSpec provision.SourceSpec, snapshots *standards.Snapshots, clients *graphown.Clients) error {
 	if err := componentregistry.Register(reg); err != nil {
 		return fmt.Errorf("register framework components: %w", err)
 	}
@@ -92,7 +93,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 		return fmt.Errorf("register validation station: %w", err)
 	}
 	// Checkout/sandbox-dependent R6 stations — capture boot's shared runspace instances.
-	if err := floors.Register(reg, checkouts, clients); err != nil {
+	if err := floors.Register(reg, checkouts, sandboxes, snapshots, clients); err != nil {
 		return fmt.Errorf("register floors station: %w", err)
 	}
 	if err := stationverify.Register(reg, checkouts, clients); err != nil {
@@ -100,7 +101,7 @@ func RegisterAll(reg *component.Registry, checkouts *runspace.Checkouts, sandbox
 	}
 	// provision captures BOTH shared instances (it materializes the checkout AND stands up
 	// the warm container measure_task reads) plus the operator's run source dir.
-	if err := provision.Register(reg, checkouts, sandboxes, sourceSpec, clients); err != nil {
+	if err := provision.Register(reg, checkouts, sandboxes, sourceSpec, snapshots, clients); err != nil {
 		return fmt.Errorf("register provision station: %w", err)
 	}
 	// The forge-io front door (forge-io-real-lanes): webhook receiver + durable

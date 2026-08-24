@@ -138,6 +138,16 @@ func lifecycleTransitionCallers(t *testing.T, patterns ...string) []string {
 // with 5/6 lifecycle edges in Go; that is the disease this pin prevents. A
 // direct Manager.Transition/Complete/Fail/Create or agentrun.Mint from product
 // Go fails the build unless it is in the ADR-linked exception table (target 0).
+//
+// SCOPING DETERMINATION (standards-via-lessons, semstreams-review): this census
+// covers semdev-OWNED lifecycle surfaces — the run/loop lifecycle.Manager verbs
+// and agentrun.Mint. The lesson substrate's record lifecycle
+// (agent.lesson.status via the framework's LessonCurator, Lane 1) is the
+// FRAMEWORK's own sanctioned Go surface: its README mandates Lane 1 for
+// promotion because the rule lane cannot resolve evidence, and it ships no
+// promote tool. The standards-sync auto-promotion rides that surface under a
+// named policy (docs/alignment-notes.md#standards-sync-step) and is therefore
+// deliberately OUTSIDE this census's target set — not an exception-table entry.
 func TestNoLifecycleTransitionCallersInProductGo(t *testing.T) {
 	callers := lifecycleTransitionCallers(t, "./cmd/...", "./internal/...")
 	for _, c := range callers {

@@ -128,6 +128,18 @@ type Attempts interface {
 	Resolve(ctx context.Context, runEntityID string, taskIndex int) (floors.Attempt, error)
 }
 
+// RepoChecks runs the target repo's own declared deterministic checks (the
+// standards-via-lessons D7 lane) and returns one finding per check. nil disables the lane
+// entirely, which is what a caller with no sandbox (a unit test) wants.
+//
+// An error means the LANE could not be evaluated — an unreadable or malformed standards
+// file at the base revision, or an unresolvable sandbox. That must not be confused with
+// "this repo declared no checks" (nil, nil): inferring the latter from a fault would
+// delete the repo's gate with nothing saying so.
+type RepoChecks interface {
+	Run(ctx context.Context, runEntityID string) ([]floors.Finding, error)
+}
+
 // FloorResult reports the floors outcome for a task attempt.
 type FloorResult struct {
 	Rejected  bool
@@ -151,7 +163,7 @@ type FloorResult struct {
 // chaining signal the route rules trigger on) follows, so a mirror-write failure surfaces
 // only AFTER the findings are durable. Fails closed: a resolve/check fault CLEARS this
 // task's findings (so no stale pass is readable) before returning the error.
-func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader, findingsWriter, mirrorWriter *graphown.Writer, logger *slog.Logger, runEntityID, routeLoopEntityID string, taskIndex int) (FloorResult, error) {
+func RunFloors(ctx context.Context, attempts Attempts, repoChecks RepoChecks, reader changefacts.Reader, findingsWriter, mirrorWriter *graphown.Writer, logger *slog.Logger, runEntityID, routeLoopEntityID string, taskIndex int) (FloorResult, error) {
 	attempt, err := attempts.Resolve(ctx, runEntityID, taskIndex)
 	if err != nil {
 		// A resolve/check failure must NOT leave a prior attempt's PASS readable as if it
@@ -165,6 +177,31 @@ func RunFloors(ctx context.Context, attempts Attempts, reader changefacts.Reader
 	}
 
 	findings := floors.CheckAll(attempt)
+
+	// The repo's own declared checks, appended to the built-in floors so they route
+	// through exactly the same aggregate — a required check that fails rejects like any
+	// floor, with no separate gate to keep in sync. A lane fault is returned rather than
+	// swallowed: running zero checks because the lane broke would read identically to a
+	// repo that declared none.
+	if repoChecks == nil {
+		// Allowed (unit tests pass nil), but never silent: a wiring regression that
+		// dropped the lane would otherwise remove every repo-declared gate from every run
+		// with no error and no log — indistinguishable from a healthy pass.
+		logger.Warn("check_floors: repo-declared checks lane is not wired — the target repo's own gates did NOT run",
+			slog.String("run_entity_id", runEntityID), slog.Int("task_index", taskIndex))
+	}
+	if repoChecks != nil {
+		repoFindings, err := repoChecks.Run(ctx, runEntityID)
+		if err != nil {
+			if cerr := clearFindings(ctx, findingsWriter, runEntityID, taskIndex); cerr != nil {
+				logger.Warn("check_floors: could not clear stale findings after a repo-checks fault",
+					slog.Int("task_index", taskIndex), slog.Any("clear_error", cerr))
+			}
+			return FloorResult{}, fmt.Errorf("check_floors: run repo-declared checks for task %d: %w", taskIndex, err)
+		}
+		findings = append(findings, repoFindings...)
+	}
+
 	rejected := floors.AnyRejected(findings)
 	attemptID := floors.AttemptID(attempt)
 	out := findingTriples(runEntityID, taskIndex, attemptID, rejected, findings, time.Now().UTC())

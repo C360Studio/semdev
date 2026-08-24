@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	ssmock "github.com/c360studio/semstreams/test/e2e/mock"
@@ -141,4 +142,78 @@ func TestEndpointIsLoopbackZeroToken(t *testing.T) {
 	if ip == nil || !ip.IsLoopback() {
 		t.Fatalf("endpoint host %q is not loopback — a non-loopback mock could reach a paid provider", host)
 	}
+}
+
+// Prompt capture must actually record, and the corpus must correspond one-to-one
+// with model turns. The failure mode this guards is SILENT: a capture path that
+// records nothing looks identical to a journey whose assertions all passed, which
+// is how a dead lane survives a green suite.
+func TestPromptCaptureRecordsEveryCompletionTurn(t *testing.T) {
+	h := New(Fixture{Marker: "ALPHA", Content: "a"}, Fixture{Marker: "BETA", Content: "b"}).WithPromptCapture()
+	startHarness(t, h)
+
+	chatComplete(t, h, userReq("ALPHA"))
+	chatComplete(t, h, userReq("BETA"))
+
+	got := h.Prompts()
+	if len(got) != 2 {
+		t.Fatalf("captured %d prompts, want 2: %q", len(got), got)
+	}
+	if !strings.Contains(got[0], "ALPHA") || !strings.Contains(got[1], "BETA") {
+		t.Errorf("captured bodies do not carry their markers in order: %q", got)
+	}
+	if len(got) != h.RequestCount() {
+		t.Errorf("len(Prompts())=%d but RequestCount()=%d — the corpus must be one entry per model turn, "+
+			"or an assertion comparing them silently means something else", len(got), h.RequestCount())
+	}
+}
+
+// The negative control on the pin above: with capture OFF nothing is recorded, so a
+// passing capture assertion cannot be an artifact of recording-by-default.
+func TestPromptCaptureOffRecordsNothing(t *testing.T) {
+	h := New(Fixture{Marker: "ALPHA", Content: "a"})
+	startHarness(t, h)
+	chatComplete(t, h, userReq("ALPHA"))
+	if got := h.Prompts(); len(got) != 0 {
+		t.Errorf("capture is off but %d prompts were recorded: %q", len(got), got)
+	}
+}
+
+// Non-completion traffic must stay out of the corpus, or len(Prompts()) stops
+// tracking model turns and any comparison against RequestCount misleads.
+func TestPromptCaptureIgnoresNonCompletionRequests(t *testing.T) {
+	h := New(Fixture{Marker: "ALPHA", Content: "a"}).WithPromptCapture()
+	startHarness(t, h)
+
+	resp, err := http.Get(h.Endpoint() + "/../health")
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	if got := h.Prompts(); len(got) != 0 {
+		t.Errorf("a non-completion request was recorded as a prompt: %q", got)
+	}
+}
+
+// Enabling capture after Start records nothing — with no Error fixtures the proxy was
+// never bound, so Endpoint hands out ssmock directly and no handler of ours runs. That
+// must be loud rather than silent.
+func TestPromptCaptureAfterStartPanics(t *testing.T) {
+	h := New(Fixture{Marker: "ALPHA", Content: "a"})
+	startHarness(t, h)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("enabling capture after Start did not panic — it would silently record nothing, " +
+				"and a journey asserting on prompts would report an empty corpus rather than a misuse")
+		}
+	}()
+	h.WithPromptCapture()
+}
+
+// startHarness starts h and registers its teardown.
+func startHarness(t *testing.T, h *Harness) {
+	t.Helper()
+	if err := h.Start(); err != nil {
+		t.Fatalf("start harness: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Stop() })
 }

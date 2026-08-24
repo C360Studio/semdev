@@ -58,6 +58,7 @@ import (
 	"github.com/c360studio/semdev/internal/intake"
 	"github.com/c360studio/semdev/internal/intake/admission"
 	"github.com/c360studio/semdev/internal/mockllm"
+	"github.com/c360studio/semdev/internal/standards"
 
 	"github.com/c360studio/semdev/internal/graphown"
 )
@@ -1519,7 +1520,17 @@ func requireFloorsPassed(ctx context.Context, t *testing.T, runEntityID string) 
 		// Require the aggregate AND the presence floor's own passed line in the
 		// concatenated detail, so a partial/absent finding set cannot false-green
 		// the "not true" check above.
-		return tripleString(e, rejected) == "false" && strings.Contains(tripleString(e, detail), presencePassedLine)
+		// The repo's OWN declared checks must appear in the same verdict. Without this,
+		// a checks lane that silently stopped running would look exactly like a healthy
+		// one — every journey stays green, and the gate the target repo declared is
+		// simply gone (standards-via-lessons D7).
+		// ": passed" and not just the name: matching the prefix alone would stay green if
+		// the fixture check were ever demoted to non-required and started FAILING as an
+		// advisory line — the exact regression this assertion exists to catch.
+		repoCheckLine := standards.FloorPrefix + "go-vet: passed"
+		return tripleString(e, rejected) == "false" &&
+			strings.Contains(tripleString(e, detail), presencePassedLine) &&
+			strings.Contains(tripleString(e, detail), repoCheckLine)
 	}, "run entity "+runEntityID+" never gained "+rejected+"=false with a full finding set (including the "+
 		"\""+presencePassedLine+"\" line in "+detail+") — the floors trigger (dev-from-task/05) did not fire, "+
 		"or the floors station could not resolve the attempt: check Amelia's developer loop reached a terminal "+
