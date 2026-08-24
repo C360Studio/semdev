@@ -118,6 +118,23 @@ jobs:
       # test:integration` resets NATS first, runs with -p 1 so container-spawning
       # packages do not compete, and reaps sandbox images on the way out even if the
       # run fails.
+      #
+      # ⚠ IF THIS JOB EVER FAILS WITH `docker run: no space left on device` — read this
+      # before reaching for the obvious fix. That exact error took down the Test job
+      # twice (#31) while it still ran these packages in PARALLEL, and it was NOT a full
+      # disk: the runner reported 84G free with under 2GB of images at the moment of
+      # failure. ENOSPC is also what the kernel returns when inotify watches or instances
+      # are exhausted, which fits container churn far better.
+      #
+      # ⚠ DO NOT add a disk-reclaim step. It was tried, it treated a refuted cause, and
+      # the stock snippet deletes $AGENT_TOOLSDIRECTORY — where actions/setup-go installs
+      # Go — so the job then failed with `"go": executable file not found in $PATH`,
+      # worse than the bug it was meant to fix.
+      #
+      # The `-p 1` above is what actually removed the failure, by removing the parallel
+      # container spawning that was its precondition. If ENOSPC returns even serialised,
+      # measure inotify (`/proc/sys/fs/inotify/*`) BEFORE changing anything — the two
+      # wrong fixes above were both reasoned rather than measured.
       - name: Infrastructure-gated tests (docker + NATS)
         run: task test:integration
 
