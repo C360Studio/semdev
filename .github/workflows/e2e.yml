@@ -29,6 +29,9 @@ concurrency:
 
 env:
   GO_VERSION: "1.26"
+  # Same pin as ci.yml. The journeys shell this out as the validate station's
+  # oracle, so its version is part of what they prove.
+  OPENSPEC_VERSION: "1.7.0"
 
 jobs:
   e2e:
@@ -49,6 +52,40 @@ jobs:
 
       - name: Install task
         run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+
+      - name: Set up Node (for the OpenSpec CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The validate station shells out to this binary as its oracle
+      # (internal/tools/validatechange: `const openspecBin = "openspec"`), so
+      # the journeys cannot run without it on PATH. Learned the direct way: the
+      # first run of this workflow failed all 18 journeys at a uniform ~52s,
+      # every one of them stuck before awaiting_approval because the oracle was
+      # missing. The tool was right — it treats an unrunnable oracle as a
+      # transport failure rather than a verdict, declines to stamp, and the run
+      # parks. The workflow was what was wrong.
+      - name: Install OpenSpec CLI (pinned)
+        run: npm install -g @fission-ai/openspec@${{ env.OPENSPEC_VERSION }}
+
+      # Fail in seconds, not after sixteen minutes. semdev shells out to exactly
+      # three binaries (git, docker, openspec — the only `Bin = "..."` constants
+      # in internal/). Runners ship the first two; the third we install above. A
+      # missing one does not surface as a clear error, it surfaces as every
+      # journey timing out identically, which reads like a product bug.
+      - name: Preflight — the binaries the journeys shell out to
+        run: |
+          fail=0
+          for bin in git docker openspec; do
+            if command -v "$bin" >/dev/null 2>&1; then
+              echo "OK: $bin -> $(command -v "$bin")"
+            else
+              echo "FAIL: $bin is not on PATH — journeys will time out rather than fail clearly"
+              fail=1
+            fi
+          done
+          exit $fail
 
       # A clean runner has these unset, so this step should never fire. It exists
       # because one of them SPENDS REAL MONEY, and "unset by default" is a
