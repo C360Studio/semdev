@@ -87,6 +87,25 @@ jobs:
       # `task test` is `go test -race ./...`, which excludes ./test/e2e (build
       # tag `e2e`) and therefore needs no docker and spends no tokens. It does
       # include ./test/conformance, semdev's guardrail suite.
+      # MEASURED, not assumed: at the moment of failure the runner reported 84G
+      # free with 1.79GB of images, so `docker run: no space left on device` is
+      # not disk. ENOSPC is also what the kernel returns when inotify instances
+      # or watches are exhausted, and the timings point the same way — the failing
+      # run is the CONTENDED one (cleanroom 25.7s vs 10.5s, coldproof 68.6s vs
+      # 51.6s), with provisionsandbox failing 1.65s in while the other two still
+      # held containers. `go test ./...` runs those three packages in parallel and
+      # each stands up real containers.
+      #
+      # Both values are logged BEFORE being raised, so the causal claim stays
+      # checkable: if the pre-raise number is already high, this was not the cause
+      # and the next step is bounding docker concurrency (`go test -p`) instead.
+      - name: inotify limits (log, then raise)
+        run: |
+          echo "before: max_user_instances=$(cat /proc/sys/fs/inotify/max_user_instances) max_user_watches=$(cat /proc/sys/fs/inotify/max_user_watches)"
+          sudo sysctl -w fs.inotify.max_user_instances=1024 >/dev/null
+          sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null
+          echo "after:  max_user_instances=$(cat /proc/sys/fs/inotify/max_user_instances) max_user_watches=$(cat /proc/sys/fs/inotify/max_user_watches)"
+
       - name: Unit and conformance suite (race)
         run: task test
 
