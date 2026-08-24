@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/c360studio/semdev/internal/changefacts"
 	"github.com/c360studio/semdev/internal/devtask"
 	"github.com/c360studio/semdev/internal/floors"
+	"github.com/c360studio/semdev/internal/pathguard"
 	"github.com/c360studio/semstreams/message"
 )
 
@@ -121,15 +120,9 @@ func decodeStringArray(tr message.Triple, predicate string) ([]string, error) {
 // stay inside its own tree. Exported so the read-side tools (read_workspace) share the SAME
 // containment guard the write side (Attempts, the Patcher) enforces — one path-guard
 // implementation, not a re-derived copy (DRY; a divergent read-side guard would be a silent
-// escape surface).
+// escape surface). The implementation lives in pathguard so packages runspace itself
+// imports (cleanroom's image builder) share the same guard without a cycle; this re-export
+// keeps every existing caller and its call shape intact.
 func SafeJoin(root, rel string) (string, error) {
-	if filepath.IsAbs(rel) {
-		return "", fmt.Errorf("runspace: target file %q must be repo-relative, not absolute", rel)
-	}
-	abs := filepath.Join(root, rel)
-	within, err := filepath.Rel(root, abs)
-	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("runspace: target file %q escapes the checkout", rel)
-	}
-	return abs, nil
+	return pathguard.SafeJoin(root, rel)
 }

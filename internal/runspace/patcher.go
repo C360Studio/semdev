@@ -54,6 +54,9 @@ func NewPatcher(checkouts *Checkouts, runner cliexec.Runner, reader changefacts.
 // path that escapes the checkout, a git-apply or commit failure — none silently succeed. The
 // returned error is the reason the developer's authored change did not land; the measured
 // pass/fail of the change is a SEPARATE harness measurement (G3), not derived here.
+// Invariant: ONE writer per run checkout — the per-loop executor serializes tool calls, so
+// Apply is never concurrent for the same runEntityID (a concurrent Apply's reset could
+// wipe another's applied-but-uncommitted tree; go-review L3).
 func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) (touched []string, commitSHA string, err error) {
 	if strings.TrimSpace(diff) == "" {
 		return nil, "", fmt.Errorf("runspace: apply_patch got an empty diff")
@@ -61,6 +64,16 @@ func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) (touched 
 	root, err := p.checkouts.Root(ctx, runEntityID)
 	if err != nil {
 		return nil, "", err // fail-closed: no checkout materialized (park toward the human)
+	}
+	// Every apply starts from the COMMITTED snapshot: discard tracked mutations and
+	// remove untracked residue (a prior attempt's measurement artifact, a failed apply's
+	// partial state) so the diff applies against exactly the tree it was authored over
+	// and residue can neither doom later attempts at the clean-tree floor nor be
+	// absorbed into a commit. `-ffd`, never `-x`: gitignored build caches survive
+	// (the clean-tree floor's documented assumption). The committed chain is the record
+	// (G7); the working tree between attempts is scratch.
+	if err := p.reset(ctx, root); err != nil {
+		return nil, "", err
 	}
 	targets, err := parseDiffTargets(diff)
 	if err != nil {
@@ -130,26 +143,61 @@ func (p *Patcher) Apply(ctx context.Context, runEntityID, diff string) (touched 
 	// repo-local, so the checkout carries an immutable snapshot the cold verify clones and
 	// read_diff diffs against base. Commit failure is fail-closed (the developer re-authors):
 	// a change that applied but could not be committed is not a landed attempt.
-	sha, err := p.commit(ctx, root)
+	sha, err := p.commit(ctx, root, targets)
 	if err != nil {
 		return nil, "", err
 	}
 	return targets, sha, nil
 }
 
-// commit stages the whole checkout and commits it, returning the new commit SHA. The
-// harness identity is the repo-local config Materialize set at init, so no per-commit
-// identity is needed. --no-gpg-sign: a run never blocks on an operator signing key.
-func (p *Patcher) commit(ctx context.Context, root string) (string, error) {
-	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "--no-gpg-sign", "-m", "attempt: apply_patch"}} {
+// reset returns the working tree AND the index to the committed snapshot (`reset
+// --hard`, never `checkout -- .` — that restores from the index, so hostile staged
+// content would survive it and `git commit` commits the whole index; go-review H1),
+// then removes untracked files including nested repos (`-ff` — a repo a measurement
+// step cloned in is residue the model cannot remove). Both fail closed — a tree that
+// cannot be reset is a tree whose apply/commit containment cannot be trusted.
+func (p *Patcher) reset(ctx context.Context, root string) error {
+	for _, args := range [][]string{{"reset", "--hard", "-q"}, {"clean", "-ffdq"}} {
+		res, err := p.runner.Run(ctx, root, gitBin, args...)
+		if err != nil {
+			return fmt.Errorf("runspace: run git %v: %w", args, err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("runspace: git %v failed (exit %d): %s", args, res.ExitCode, strings.TrimSpace(res.Stdout+" "+res.Stderr))
+		}
+	}
+	return nil
+}
+
+// commit stages EXACTLY the enumerated diff targets and commits them, returning the new
+// commit SHA — never `add -A`: parseDiffTargets guarantees every path git wrote is in
+// targets (or the diff was rejected), so explicit staging is what keeps unauthorized
+// tree content (residue, scratch state) out of the committed snapshot that measurement,
+// review, verify, and delivery all consume. The harness identity is the repo-local
+// config Materialize set at init, so no per-commit identity is needed. --no-gpg-sign: a
+// run never blocks on an operator signing key.
+// Precondition (caller-enforced): targets is non-empty — Apply rejects a targetless
+// diff before reaching here; a direct future caller must hold the same invariant.
+func (p *Patcher) commit(ctx context.Context, root string, targets []string) (string, error) {
+	// `:(literal)` pins each target as a LITERAL path, not a pathspec: a target
+	// containing glob or `:`-magic characters must stage exactly the file git apply
+	// wrote (the enumerated write set), never a pattern expansion (go-review M2).
+	add := make([]string, 0, len(targets)+2)
+	add = append(add, "add", "--")
+	for _, t := range targets {
+		add = append(add, ":(literal)"+t)
+	}
+	for _, args := range [][]string{add, {"commit", "-q", "--no-gpg-sign", "-m", "attempt: apply_patch"}} {
 		res, err := p.runner.Run(ctx, root, gitBin, args...)
 		if err != nil {
 			return "", fmt.Errorf("runspace: run git %v: %w", args, err)
 		}
 		if res.ExitCode != 0 {
-			// git reports "nothing to commit" on STDOUT (a diff that applied but changed no
-			// TRACKED path — e.g. it touched only gitignored files), so surface both streams
-			// or the caller gets an empty reason. A no-op attempt fails closed here.
+			// Two fail-closed shapes share this exit: `git add` itself errors on a
+			// gitignored target path (explicit paths are not silently skipped the way
+			// `-A` skipped them), and `git commit` reports "nothing to commit" on STDOUT
+			// for a diff that changed no tracked content. Surface both streams or the
+			// caller gets an empty reason. A no-op attempt fails closed here.
 			return "", fmt.Errorf("runspace: git %v failed (exit %d): %s", args, res.ExitCode, strings.TrimSpace(res.Stdout+" "+res.Stderr))
 		}
 	}

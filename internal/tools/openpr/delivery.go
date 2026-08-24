@@ -77,6 +77,11 @@ type Delivery struct {
 // BranchPrefix is the delivery head-branch namespace.
 const BranchPrefix = "semdev/"
 
+// pushTimeout bounds every git push. A stalled remote is terminated at the bound and the
+// failure rides the station's existing bounded-retry → park lane instead of wedging the
+// handler; ~100× the observed live push time for a fix-alone diff (design D4).
+const pushTimeout = 2 * time.Minute
+
 // Deliver pushes the run's committed branch, creates-or-adopts the PR, and
 // stamps delivery.pr.ref = the REAL PR URL. Idempotent at BOTH layers:
 //  1. graph-side — an existing pr.ref returns verbatim, the create leg never
@@ -127,7 +132,29 @@ func (d *Delivery) Deliver(ctx context.Context, runEntityID string) (string, err
 	if err != nil {
 		return "", err
 	}
-	res, err := d.Runner.Run(ctx, root, "git", "push", pushURL, sha+":refs/heads/"+branch)
+	// The push is credential-contained the clone way (design D3): the token rides the
+	// subprocess env through the shared askpass assembly, NEVER argv — and fail-closed,
+	// a runner that cannot inject env refuses rather than falling back. Every push is
+	// deadline-bounded (D4) so a stalled remote exhausts into the park, not a wedge.
+	env, cleanup, err := cliexec.GitCredEnv(d.Token)
+	if err != nil {
+		return "", fmt.Errorf("open-pr: assemble push credential env: %w", err)
+	}
+	defer cleanup()
+	pushCtx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	args := []string{"push", pushURL, sha + ":refs/heads/" + branch}
+	var res cliexec.Result
+	if er, ok := d.Runner.(cliexec.EnvRunner); ok {
+		res, err = er.RunWithEnv(pushCtx, root, env, "git", args...)
+	} else if d.Token != "" {
+		return "", fmt.Errorf("open-pr: a token is configured but the git runner cannot inject env — refusing to put the token on argv (design D3)")
+	} else {
+		// Tokenless plain-Runner path: env (GIT_TERMINAL_PROMPT=0) cannot ride here.
+		// Unreachable in production — every construction site wires cliexec.OSRunner
+		// (an EnvRunner) — and the D4 deadline caps a prompt wedge regardless.
+		res, err = d.Runner.Run(pushCtx, root, "git", args...)
+	}
 	if err != nil {
 		return "", fmt.Errorf("open-pr: git push %s: %w", branch, err)
 	}
@@ -171,9 +198,11 @@ func (d *Delivery) Deliver(ctx context.Context, runEntityID string) (string, err
 	return pr.HTMLURL, nil
 }
 
-// pushURL injects the token into an https remote (x-access-token form); a
-// file:// or ssh remote passes through untouched. The token NEVER reaches an
-// error message (see sanitize).
+// pushURL names the push remote. For an https remote with a token configured it sets
+// ONLY the non-secret x-access-token username (the fixed GitHub convention) so git routes
+// the password prompt through GIT_ASKPASS; the token itself NEVER enters the URL — and so
+// never argv (design D3, the cloneURL shape). A file:// or ssh remote passes through
+// untouched. sanitize stays as the output belt below.
 func (d *Delivery) pushURL() (string, error) {
 	remote := d.Forge.RemoteURL
 	if d.Token == "" || !strings.HasPrefix(remote, "https://") {
@@ -183,7 +212,7 @@ func (d *Delivery) pushURL() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open-pr: parse remote_url: %w", err)
 	}
-	u.User = url.UserPassword("x-access-token", d.Token)
+	u.User = url.User("x-access-token")
 	return u.String(), nil
 }
 
