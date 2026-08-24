@@ -368,8 +368,19 @@ fail-open construct rejects at parse naming its defect; a `proof` that exits
 zero rejects a required check; an absent `proof` gates but stamps `unproven`;
 a could-not-run check stamps `not-run` and never passes — the last red-first
 against a deliberately dead container) and the G8 scan extension: the
-fixture-vocabulary conformance walk gains `.yaml`/`.yml` so standards
+fixture-vocabulary conformance walk reaches the standards file so standards
 fixtures cannot smuggle coaching (B10).
+
+Scoped at implementation to `internal/standards.Path` itself, NOT to all
+`.yaml`/`.yml` as first drafted. The product reads standards from that one
+fixed path with no override, so no other YAML can be a standards file, and
+the wider scan is a build-breaking false positive on config a realistic
+fixture ships — a `.golangci.yml` enabling godox declares
+`keywords: [TODO, FIXME, HACK, BUG]`, which is the repo configuring the very
+linter that bans coaching. This lint fails the build, so a false positive
+blocks a legitimately realistic fixture: the opposite of G8's intent. The
+walk's coverage is one declarative table each pin derives from, so a kind
+cannot be declared without a specimen proving the walk reaches it.
 
 ## Upstream asks (semstreams — first-consumer findings, to file as issues)
 
