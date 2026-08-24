@@ -3,12 +3,10 @@ package cleanroom
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 // buildRunArgs assembles a deterministic `docker run -d` line: detached, checkout
@@ -123,124 +121,5 @@ func TestUpFailsClosedWithoutDocker(t *testing.T) {
 	_, err := c.Up(context.Background(), t.TempDir(), []string{"GOMODCACHE"})
 	if !errors.Is(err, ErrDockerUnavailable) {
 		t.Errorf("Up without docker: got %v, want ErrDockerUnavailable", err)
-	}
-}
-
-// Integration: a real per-run container round-trips Up → Exec (verdict) → Down, with
-// a fresh cache volume that is distinct and torn down. Skips when docker is absent so
-// unit CI stays green; runs in the docker-backed environment (the journey already
-// needs docker for NATS).
-func TestContainerRunnerRoundTrip(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	if err := DockerAvailable(ctx, "docker"); err != nil {
-		t.Skipf("docker unavailable, skipping container integration: %v", err)
-	}
-
-	// A real checkout dir with a file the container will read back through the bind mount.
-	workDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workDir, "marker.txt"), []byte("bound"), 0o644); err != nil {
-		t.Fatalf("seed workdir: %v", err)
-	}
-
-	c := NewContainerRunner("alpine:latest")
-	sb, err := c.Up(ctx, workDir, []string{"GOMODCACHE"})
-	if err != nil {
-		t.Fatalf("Up: %v", err)
-	}
-	defer func() {
-		if derr := c.Down(ctx, sb); derr != nil {
-			t.Errorf("Down: %v", derr)
-		}
-	}()
-
-	if sb.Handle == "" {
-		t.Fatal("Up returned no container handle")
-	}
-	if len(sb.CacheHomes) != 1 || sb.CacheHomes[0] == "" {
-		t.Fatalf("expected one fresh cache volume, got %v", sb.CacheHomes)
-	}
-	if sb.Env["GOMODCACHE"] != "/caches/GOMODCACHE" {
-		t.Errorf("GOMODCACHE env = %q, want /caches/GOMODCACHE", sb.Env["GOMODCACHE"])
-	}
-
-	// The bind-mounted checkout is visible in the container.
-	res, err := c.Exec(ctx, sb, []string{"cat", "marker.txt"})
-	if err != nil {
-		t.Fatalf("Exec cat: %v", err)
-	}
-	if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "bound" {
-		t.Errorf("cat marker: exit=%d stdout=%q, want exit 0 / 'bound'", res.ExitCode, res.Stdout)
-	}
-
-	// The fresh cache env points at a writable mounted volume.
-	if res, err = c.Exec(ctx, sb, []string{"sh", "-c", "echo ok > $GOMODCACHE/probe && cat $GOMODCACHE/probe"}); err != nil {
-		t.Fatalf("Exec cache write: %v", err)
-	}
-	if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "ok" {
-		t.Errorf("cache write: exit=%d stdout=%q, want 0 / 'ok'", res.ExitCode, res.Stdout)
-	}
-
-	// A non-zero exit is a VERDICT (nil error), not a transport fault (the seam contract).
-	res, err = c.Exec(ctx, sb, []string{"sh", "-c", "exit 7"})
-	if err != nil {
-		t.Fatalf("Exec exit-7 returned a transport error, want a verdict: %v", err)
-	}
-	if res.ExitCode != 7 {
-		t.Errorf("exit code = %d, want 7 (a verdict, not an error)", res.ExitCode)
-	}
-}
-
-// Integration: once the container is gone (torn down), a non-zero docker exec is a
-// TRANSPORT fault (park), not a red verdict — the reviewer's blocking scenario (a
-// dead sandbox must never read as "the command ran and failed", SB5).
-func TestContainerRunnerDeadContainerIsTransport(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	if err := DockerAvailable(ctx, "docker"); err != nil {
-		t.Skipf("docker unavailable: %v", err)
-	}
-	c := NewContainerRunner("alpine:latest")
-	sb, err := c.Up(ctx, t.TempDir(), []string{"GOMODCACHE"})
-	if err != nil {
-		t.Fatalf("Up: %v", err)
-	}
-	// Kill the container out from under Exec, then run a command that would exit
-	// non-zero IF it ran — docker exec returns 1/137, which must classify as transport.
-	if derr := c.Down(ctx, sb); derr != nil {
-		t.Fatalf("Down (to kill the container): %v", derr)
-	}
-	_, err = c.Exec(ctx, sb, []string{"sh", "-c", "exit 1"})
-	if !errors.Is(err, ErrDockerUnavailable) {
-		t.Errorf("exec against a dead container: got %v, want a transport fault (ErrDockerUnavailable), NOT a red verdict", err)
-	}
-}
-
-// Integration: two Ups yield DISTINCT fresh cache volumes — caches are never shared
-// across runs (the semteams/semspec cache-masking sin, SB4).
-func TestContainerRunnerFreshCachePerRun(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	if err := DockerAvailable(ctx, "docker"); err != nil {
-		t.Skipf("docker unavailable: %v", err)
-	}
-	c := NewContainerRunner("alpine:latest")
-
-	sb1, err := c.Up(ctx, t.TempDir(), []string{"GOMODCACHE"})
-	if err != nil {
-		t.Fatalf("Up 1: %v", err)
-	}
-	defer func() { _ = c.Down(ctx, sb1) }()
-	sb2, err := c.Up(ctx, t.TempDir(), []string{"GOMODCACHE"})
-	if err != nil {
-		t.Fatalf("Up 2: %v", err)
-	}
-	defer func() { _ = c.Down(ctx, sb2) }()
-
-	if sb1.CacheHomes[0] == sb2.CacheHomes[0] {
-		t.Errorf("two runs share a cache volume %q — caches must be fresh per run", sb1.CacheHomes[0])
-	}
-	if sb1.Handle == sb2.Handle {
-		t.Errorf("two runs share a container %q — containers must be fresh per run", sb1.Handle)
 	}
 }

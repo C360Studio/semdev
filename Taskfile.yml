@@ -20,12 +20,12 @@ tasks:
     cmds:
       - go vet ./...
       - test -z "$(gofmt -l .)"
-      - revive -config revive.toml -set_exit_status ./...
+      - go tool revive -config revive.toml -set_exit_status ./...
 
   lint:ci:
     desc: Revive with stylish output for CI (exits non-zero on any warning)
     cmds:
-      - revive -config revive.toml -formatter stylish -set_exit_status ./...
+      - go tool revive -config revive.toml -formatter stylish -set_exit_status ./...
 
   test:
     desc: Unit tests with the race detector
@@ -81,12 +81,22 @@ tasks:
 
   test:integration:
     desc: >-
-      Boot smoke test against a FRESH NATS (internal/boot/runtime_integration_test.go).
+      Every test that needs REAL infrastructure — a live NATS or a docker daemon.
+      These are gated behind the `integration` build tag so plain `task test` never
+      needs either; this is the only lane that runs them.
       Resets NATS first so the runtime loads the config file under test, not a stale
-      versioned KV copy (see nats:reset).
+      versioned KV copy (see nats:reset). Docker-backed packages build real ~1.29GB
+      sandbox images and run real containers, so the deferred teardown is not optional.
     deps: [nats:reset]
     cmds:
-      - go test -tags=integration -count=1 ./internal/boot/...
+      # defer: runs even on failure or interrupt, which is exactly when sandbox
+      # containers and images get stranded (same reasoning as the e2e task).
+      - defer: { task: clean:docker }
+      # -p 1: these packages each stand up containers. Running them in PARALLEL
+      # exhausted a per-user kernel resource on CI and surfaced as an ENOSPC that
+      # read as a full disk (it was not — 84G free). Serialised, they are also
+      # FASTER in wall-clock than the contended parallel run was.
+      - go test -tags=integration -count=1 -p 1 ./internal/...
 
   e2e:
     desc: Mock-LLM spine journey — zero paid tokens (mock ladder must be green)
@@ -97,7 +107,17 @@ tasks:
       # path. Without this, every red e2e run leaves a sandbox container, its cache
       # volumes, and a multi-GB semdev-sandbox image behind.
       - defer: { task: clean:docker }
-      - go test -race -tags=e2e ./test/e2e/...
+      # -count=1 DEFEATS THE TEST CACHE, and it is load-bearing rather than tidy.
+      # These journeys assert against real docker and a real NATS the Go tool cannot
+      # see as inputs, so an unchanged tree makes `go test` replay a cached "ok"
+      # having executed nothing — a green gate that reports 20 journeys passed
+      # against containers it never started. The integration and real-LLM tasks
+      # already carry it; this one gates every group commit and did not.
+      # -timeout: the suite runs real docker builds and cold proofs, and it had crept
+      # to 567s against Go's 600s DEFAULT — one journey from failing as a confusing
+      # `panic: test timed out` that names whichever test merely happened to be running
+      # when the clock ran out, rather than "the suite got slower". Explicit and generous.
+      - go test -race -tags=e2e -count=1 -timeout 30m ./test/e2e/...
 
   check:
     desc: The pre-push gauntlet (build + lint + unit)

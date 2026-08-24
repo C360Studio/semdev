@@ -12,10 +12,8 @@ import (
 	"github.com/c360studio/semstreams/message"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
-	"github.com/c360studio/semdev/internal/cliexec"
 	"github.com/c360studio/semdev/internal/coldproof"
 	"github.com/c360studio/semdev/internal/harness"
-	"github.com/c360studio/semdev/internal/runspace"
 	"github.com/c360studio/semdev/internal/secrets"
 	"github.com/c360studio/semdev/internal/verify"
 
@@ -455,60 +453,6 @@ func TestAlreadyReadyIsNoOp(t *testing.T) {
 	}
 	if len(w.calls) != 0 {
 		t.Errorf("an already-ready run must stamp nothing, got %d writes", len(w.calls))
-	}
-}
-
-// Docker-gated integration: the FULL provision core proves the committed fixture builds
-// cold and stamps a real readiness attestation — materialize (real Checkouts) →
-// resolve (real Manifests) → ProveBaseline (real docker cold build) → stamp. This is
-// the exact end-to-end path the journey drives, minus NATS.
-func TestProvisionRealFixtureReady(t *testing.T) {
-	ctx := context.Background()
-	if err := cleanroom.DockerAvailable(ctx, "docker"); err != nil {
-		t.Skipf("docker unavailable: %v", err)
-	}
-	checkouts, err := runspace.NewCheckouts("", cliexec.OSRunner{})
-	if err != nil {
-		t.Fatalf("new checkouts: %v", err)
-	}
-	// A REAL warm-sandbox registry: on a proven-cold baseline the core stands up an
-	// actual warm docker container here (the loop's measure target). Reaped at the end
-	// so this test leaks nothing.
-	sandboxes := runspace.NewSandboxes()
-	defer func() { _ = sandboxes.CloseAll(context.Background()) }()
-	w := &fakeWriter{}
-	deps := ProvisionDeps{
-		Sources:     fakeSources{dir: fixtureDir(t)},
-		Checkouts:   checkouts,
-		Manifests:   runspace.Manifests{},
-		Standards:   cleanStandards{},
-		Warmers:     sandboxes,
-		Prover:      DefaultProver(),
-		Reader:      fakeReader{},
-		Writer:      writerFor(w),
-		DockerCheck: cleanroom.DockerAvailable,
-	}
-
-	res, provErr := Provision(ctx, deps, runEntity)
-	if provErr != nil {
-		t.Fatalf("provision: %v", provErr)
-	}
-	if !res.Ready {
-		t.Fatalf("fixture did not prove ready cold — blocked: %s", res.Reason)
-	}
-	if got := firstObject(w.calls, ReadyPredicate); got != "true" {
-		if reason := firstObject(w.calls, BlockedPredicate); reason != "" {
-			t.Fatalf("fixture did not prove ready cold — blocked: %s", reason)
-		}
-		t.Fatalf("%s = %q, want \"true\" (the committed fixture must build cold)", ReadyPredicate, got)
-	}
-	if firstObject(w.calls, AttestationImagePredicate) == "" {
-		t.Error("a ready sandbox must attest the digest-pinned image it proved")
-	}
-	// The warm dev container is really Up and resolvable — the exact handle measure_task
-	// Execs the test command into (proven cold, then reused warm).
-	if _, _, rerr := sandboxes.Resolve(ctx, runEntity); rerr != nil {
-		t.Errorf("a ready sandbox must leave a resolvable warm container for measure_task: %v", rerr)
 	}
 }
 
