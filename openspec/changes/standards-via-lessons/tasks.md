@@ -332,8 +332,38 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       Five red-first proofs total, each run and reverted; `go test
       ./test/conformance/ -count=1` green, `-count=2 -shuffle=on -race` green.
 
-- [ ] 7.2 `openspec validate standards-via-lessons --strict` green;
+- [x] 7.2 `openspec validate standards-via-lessons --strict` green;
       `/opsx:verify`; evidence named in the change (pins + the green e2e
       run; no evidence-ledger entry — no run-level claim).
+      DONE: `--strict` reports valid. `/opsx:verify` run across all three
+      dimensions against the full artifact set (proposal + 3 delta specs +
+      design + tasks). It found ONE real divergence, now fixed in `ae3e23b`:
+      design.md D9 still described the G8 walk as gaining `.yaml`/`.yml`, but
+      7.1 shipped narrowed to `internal/standards.Path` — the spec delta
+      ("every fixture standards file") already matched what shipped, so only
+      design.md was stale (G10).
+      Evidence named, per requirement:
+      - "A target repo declares standards in one committed file" →
+        `internal/standards/standards.go` (strict parse) + `provision.go`;
+        journey `TestBridgeProofRepoStandardsBornAndActivated`.
+      - "Standards are born as lesson records with honest provenance" +
+        "auto-promote under an explicit named policy" → `sync.go`;
+        same journey.
+      - "Active standards reach the right roles' briefs within bounds" →
+        `standards.go` `InjectionForm` + the two persona fragments; journey
+        `TestBridgeProofRepoStandardsReachBriefsAndGate`.
+      - dev-from-task's repo-check floor scenarios → `internal/standards/
+        checks.go` + `gates.go` + `internal/tools/checkfloors/`; journey
+        `TestBridgeProofRequiredRepoCheckGatesLikeAFloor`.
+      - harness-measurement's three standards-review scenarios →
+        `configs/personas/fragments/reviewer/10-standards-contract.md`;
+        the ReachBriefsAndGate journey.
+      - "Fixture standards carry no coaching" → `test/conformance/
+        g8_fixtures_test.go`. The scenario ("the pin fails naming the file and
+        the banned term") is covered by a COMMITTED test, not only by mutation:
+        the reach pin plants `// TODO` into a synthetic
+        `go-health-class/.semdev/standards.yaml` and asserts it is flagged, and
+        the failure message names both the file and the terms.
+      No evidence-ledger entry: this change makes no run-level claim.
 - [ ] 7.3 Sync deltas + archive (expect the dev-from-task floors-requirement
       re-merge if PR #7 archived first — reconcile the merged text).
