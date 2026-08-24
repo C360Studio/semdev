@@ -1,0 +1,106 @@
+name: E2E
+
+# semdev's bridge-proof journeys against REAL docker — the gate that proves the
+# issue → PR arc still works end to end. Split from ci.yml deliberately: this
+# needs a docker daemon, takes ~8.5 minutes, and stacking it on every push would
+# dominate CI time for no added signal.
+#
+# Zero paid tokens. ./test/e2e is the mock-LLM ladder; the real-LLM journey is
+# env-gated and stays skipped here, asserted below rather than assumed.
+#
+# Runs `task e2e` rather than a hand-written go test line. That task carries two
+# things a naive invocation loses, both of which this repo has already been
+# burned by:
+#   -count=1     defeats the test cache. These journeys assert against docker and
+#                NATS, which the Go tool cannot see as inputs, so an unchanged
+#                tree replays a cached "ok" having started no containers.
+#   -timeout 30m the suite had crept to 567s against Go's 600s default.
+# It also carries `defer: clean:docker`, which removes the ~1.29GB sandbox image
+# and any stranded container even when the run fails.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  e2e:
+    name: Bridge-proof journeys
+    runs-on: ubuntu-latest
+    # Generous against the task's own 30m go-test timeout, so a hung suite is
+    # killed by Go (which names the test) rather than by the runner (which does
+    # not). The suite itself runs ~8.5 minutes.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install task
+        run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+
+      # A clean runner has these unset, so this step should never fire. It exists
+      # because one of them SPENDS REAL MONEY, and "unset by default" is a
+      # property of the runner image, not a guarantee this repo controls — a
+      # repository variable or secret exported into the environment would arm the
+      # paid journey silently. Cheap to assert, expensive to discover.
+      - name: Assert the paid and external gates are closed
+        run: |
+          fail=0
+          if [ -n "${SEMDEV_REAL_LLM:-}" ]; then
+            echo "FAIL: SEMDEV_REAL_LLM is set — that arms the PAID real-LLM journey. CI must never run it."
+            fail=1
+          fi
+          if [ -n "${SEMDEV_SEMSOURCE_E2E_ENDPOINT:-}" ]; then
+            echo "FAIL: SEMDEV_SEMSOURCE_E2E_ENDPOINT is set — that journey needs an external semsource compose."
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] && echo "OK: paid and external gates are closed"
+          exit $fail
+
+      # `task e2e` runs without -v, and WITHOUT -v A SKIP IS INVISIBLE: the suite
+      # prints one `ok` line whether a test ran or skipped, so a newly-skipped
+      # journey would look identical to a passing one. Rather than make the log
+      # enormous, census the skip guards statically. Three are expected and
+      # deliberate: the semsource journey (needs an external compose), the
+      # real-LLM journey (paid), and self-target's git-availability guard. A
+      # fourth means someone disabled a journey — which may be right, but must be
+      # a decision someone made on purpose, not a green nobody questioned.
+      - name: Skip census — a bare "ok" cannot show a skipped journey
+        run: |
+          expected=3
+          actual=$(grep -rho 't\.Skipf\?(' test/e2e/*.go | wc -l | tr -d ' ')
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL: test/e2e has $actual t.Skip guards, expected $expected."
+            echo ""
+            grep -rn 't\.Skipf\?(' test/e2e/*.go
+            echo ""
+            echo "A new skip silently removes a journey from this gate. If the new guard is"
+            echo "intended, bump 'expected' here in the same PR so the change is reviewed."
+            exit 1
+          fi
+          echo "OK: $actual skip guards, all expected"
+
+      - name: Disk before
+        run: df -h / | tail -1
+
+      # Journeys build a ~1.29GB sandbox image and run real containers.
+      - name: Run the bridge-proof journeys
+        run: task e2e
+
+      - name: Disk after
+        if: always()
+        run: |
+          df -h / | tail -1
+          docker system df || true
