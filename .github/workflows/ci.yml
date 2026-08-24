@@ -84,11 +84,41 @@ jobs:
       - name: Install task
         run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 
-      # `task test` is `go test -race ./...`, which excludes ./test/e2e (build
-      # tag `e2e`) and therefore needs no docker and spends no tokens. It does
-      # include ./test/conformance, semdev's guardrail suite.
+      # CORRECTION (this comment previously claimed the suite needs no docker):
+      # `task test` is `go test -race ./...`, which excludes ./test/e2e (build tag
+      # `e2e`) and spends no tokens — but it is NOT docker-free. 17 tests across
+      # internal/{cleanroom,coldproof,tools/provisionsandbox} are docker-GATED:
+      # they skip when the daemon is absent and RUN when it is present. On a dev
+      # laptop with docker down they skip, which is how the wrong claim survived
+      # local verification; on ubuntu-latest docker exists, so they run, build
+      # real ~1.29GB sandbox images, and `go test ./...` runs those packages in
+      # parallel.
+      #
+      # That combination exhausted the runner on the first main build: `docker
+      # run: no space left on device`, then `cannot connect to the docker daemon`
+      # — the daemon dying under disk pressure and cascading into unrelated
+      # failures. Runners ship ~30GB of preinstalled toolchains this repo never
+      # uses, so reclaim them first rather than tune parallelism blind.
+      - name: Reclaim runner disk (unused preinstalled toolchains)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h / | tail -1
+
       - name: Unit and conformance suite (race)
         run: task test
+
+      # Visibility, because the first failure was diagnosed by inference rather
+      # than measurement. If disk is the cause it shows here; if it is not, this
+      # rules it out instead of leaving it a standing theory.
+      - name: Disk and docker state after
+        if: always()
+        run: |
+          df -h / | tail -1
+          docker system df || true
+
+      - name: Reap sandbox images this job built
+        if: always()
+        run: task clean:docker || true
 
   build:
     name: Build
