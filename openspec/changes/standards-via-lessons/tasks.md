@@ -187,16 +187,31 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
       vet subset `go test` runs omits the assign analyzer). Floor detail:
       `repo-check:go-vet: REJECTED — unproven — … exit status 1` alongside
       `repo-check:gofmt: passed — unproven`, and the run parks with no review.
-- [ ] 6.3 Full offline suite + `task e2e -race` green; adversarial review;
+- [x] 6.3 Full offline suite + `task e2e -race` green; adversarial review;
       commit group 6.
       DONE: offline suite, conformance and lint green; all three standards
       journeys green individually (`-count=1`, real docker); BOTH adversarial
       reviews complete with every finding folded (below).
-      ⚠ OPEN: the FULL `task e2e` post-fold has NOT run green. Its first attempt
-      died on Go's 600s DEFAULT timeout — the suite had crept to 567s and group 6
-      pushed it over — and the re-run under the new explicit `-timeout 30m` was
-      killed when docker work was paused (host resource pressure, 2026-08-23).
-      Re-run before archive. Nothing is known-broken; the gate is simply unmet.
+      GATE CLOSED 2026-08-24: the full post-fold suite ran GREEN —
+      `go test -race -tags=e2e -count=1 -timeout 30m ./test/e2e/...` →
+      `ok github.com/c360studio/semdev/test/e2e 507.947s`, zero failures.
+      Recorded as the exact command rather than `task e2e` (G7): the two
+      gate-honesty flags live on branch `e2e-gate-honesty` (PR #22), not here, so
+      bare `task e2e` on this branch is still cache-eligible and still carries
+      Go's 600s default — the two traps that killed the earlier attempts. The
+      explicit form is strictly stronger than what the task asked for.
+      SKIP ACCOUNTING (the suite ran without `-v`, where a skip is INVISIBLE — a
+      bare `ok` is not evidence a test ran): 22 of 24 executed. The 2 skips are
+      env-gated by design and were verified unset —
+      `TestBridgeProofSemsourceConditionPlumbing` (needs
+      `SEMDEV_SEMSOURCE_E2E_ENDPOINT`, an external semsource compose) and
+      `TestRealLLMJourneyIssueToPR` (needs `SEMDEV_REAL_LLM`; correctly closed,
+      zero paid tokens). The third guard, `TestBridgeProofSelfTargetForgeCloneToPR`'s
+      git check, did not fire (git 2.50.1 present). All three standards journeys
+      carry NO skip guard and therefore ran:
+      `TestBridgeProofRepoStandardsBornAndActivated`,
+      `TestBridgeProofRepoStandardsReachBriefsAndGate`, and the checks-lane
+      `TestBridgeProofRequiredRepoCheckGatesLikeAFloor`.
 
       Review fold (2 reviewers, both CHANGES REQUESTED, both closed):
       ⚠⚠ THE finding, raised INDEPENDENTLY by both: the fragments made `[std:`
@@ -236,9 +251,87 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 7. Conformance hardening + close
 
-- [ ] 7.1 G8/B10: extend the fixture-vocabulary scan to `.yaml`/`.yml`; the
-      journey fixtures' standards files pass; the meta-pin proves the scan
+- [x] 7.1 G8/B10: extend the fixture-vocabulary scan to `.yaml`/`.yml`; the
+      journey fixture's standards file passes; the meta-pin proves the scan
       fires on a planted coaching term.
+      DONE, but NOT as written — see the scope narrowing below.
+      `test/conformance/g8_fixtures_test.go` now carries ONE declarative policy
+      table, `fixtureScanKinds`, that all three pins derive from. Each kind
+      declares a matcher, a `specimen` the reach pin plants, and a `treeFloor`
+      — so a newly declared kind cannot be added without proving the walk
+      reaches it, and its tree floor must be CLASSIFIED. `treeFloor` is a typed
+      string with no valid zero value, not a bool, precisely so omission is not
+      a silent "exempt": the reach pin fatals on the empty value.
+      SCOPE NARROWED (reviewer HIGH): the task says `.yaml`/`.yml`, but the spec
+      (`specs/repo-standards/spec.md:133`) says every fixture STANDARDS file, and
+      `internal/standards.Path` fixes that at `.semdev/standards.yaml` with no
+      override — so no other YAML can ever BE a standards file. Scanning all YAML
+      is a demonstrated build-breaking false positive: a `.golangci.yml` enabling
+      godox declares `keywords: [TODO, FIXME, HACK, BUG]` (the repo configuring
+      the linter that bans coaching) and a `.github` issue template is little but
+      the word "bug". This lint fails the build, so that blocks a legitimately
+      realistic fixture — the opposite of G8. The kind is keyed off
+      `standards.Path` itself, so the pin follows the const if it ever moves.
+      RATIONALE CORRECTED (reviewer HIGH): the first draft justified the scope as
+      "agent-read content". That is FALSE — `read_workspace` serves Amelia any
+      repo-relative path with no extension filter
+      (`internal/tools/readworkspace/readworkspace.go:107-176`), advertised in
+      every developer dispatch, so by that test every fixture file qualifies and
+      the line collapses. The true line is content PUSHED INTO EVERY BRIEF
+      UNBIDDEN: standards text is minted as `agent.lesson.injection-form`
+      (`internal/standards/sync.go:276`) and rendered verbatim by the framework.
+      `.json` is excluded for a stronger reason than taste — semdev's SB2 contract
+      MANDATES the literal token `semdev` as the devcontainer customizations key
+      (`internal/harness/customizations.go:77`, the enforcing struct tag), so scanning `.json` is
+      PERMANENTLY UNSATISFIABLE, proven by declaring it and watching the committed
+      fixture go red.
+      RED-FIRST, three proofs, each run and reverted:
+      (1) a kind whose specimen its own matcher rejects → `TestFixtureScanReaches
+      EveryDeclaredKind` fatals (the earlier hardcoded version stayed GREEN with
+      three unreached extensions declared — both reviewers found this
+      independently);
+      (2) widening back to all `.yaml`/`.yml` → `TestRealisticRepoConfigStaysOut
+      OfScope` reds on `.golangci.yml` and the issue template;
+      (3) declaring `.json` a scanned kind → reds on the committed
+      `devcontainer.json` with `[semdev]`.
+      Also folded: violation output is now sorted (map order was nondeterministic,
+      hurting CI log diffability); the negative control asserts what the walk
+      OPENED (a total count) rather than only what it flagged, which was one typo
+      from vacuous; every reach specimen carries the same `// TODO` marker so the
+      pin measures reachability alone (the `.md` plant had rested entirely on the
+      `amelia` vocab entry, coupling reachability to the vocabulary list);
+      `scanFixtureTree` documents that its maps are PARTIAL when err != nil.
+      ⚠ RESIDUALS, recorded not fixed:
+      - `\bBUG\b` matches ordinary English ("Found a bug? Open an issue.") in
+        prose kinds. Pre-existing and currently dormant — no fixture ships `.md` —
+        but this change promotes `.md` to live forward coverage, so it will bite
+        the first fixture README. Filed as issue #24.
+      - `filepath.WalkDir` does not follow symlinks, so a fixture tree reachable
+        only through a symlinked directory is silently invisible. Pre-existing
+        WalkDir semantics; the per-kind counters catch the total-loss case.
+      - NO fixture ships `.md` at all: the original pin declared it yet had never
+        opened a file, hidden behind three `.go` files by a single whole-walk
+        total. The kind stays declared with `requiredInTree: false`; the reach pin
+        proves the walk opens it synthetically.
+      SECOND ROUND (both reviewers re-ran in isolated worktrees; semstreams
+      APPROVE, go-reviewer no-blocking/no-high). Both independently found the
+      same latent defeat, now fixed and red-proven: a DUPLICATE `label` merges
+      the scan counter, so a kind matching nothing real inherits another kind's
+      files and satisfies all four guards at once — green with a dead kind
+      declared. The reach pin now fatals on a duplicate label, on a nil matcher
+      (previously a SIGSEGV raised from a different test), and on an unclassified
+      `treeFloor`.
+      Also folded: `TestRealisticRepoConfigStaysOutOfScope` now drives the REAL
+      walk instead of only the classifier — widening scope INSIDE
+      `scanFixtureTree` had left every pin green, verified and now red; the
+      standards matcher is case-folded, because on a case-insensitive host FS the
+      product's `filepath.Join(checkoutRoot, Path)` would open a case-variant the
+      pin never scanned; and the shadowed-kind failure message no longer names
+      the wrong cause (the file WAS opened, just attributed to an earlier kind —
+      `fixtureKindOf` returns the FIRST match).
+      Five red-first proofs total, each run and reverted; `go test
+      ./test/conformance/ -count=1` green, `-count=2 -shuffle=on -race` green.
+
 - [ ] 7.2 `openspec validate standards-via-lessons --strict` green;
       `/opsx:verify`; evidence named in the change (pins + the green e2e
       run; no evidence-ledger entry — no run-level claim).
