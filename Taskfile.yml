@@ -81,12 +81,22 @@ tasks:
 
   test:integration:
     desc: >-
-      Boot smoke test against a FRESH NATS (internal/boot/runtime_integration_test.go).
+      Every test that needs REAL infrastructure — a live NATS or a docker daemon.
+      These are gated behind the `integration` build tag so plain `task test` never
+      needs either; this is the only lane that runs them.
       Resets NATS first so the runtime loads the config file under test, not a stale
-      versioned KV copy (see nats:reset).
+      versioned KV copy (see nats:reset). Docker-backed packages build real ~1.29GB
+      sandbox images and run real containers, so the deferred teardown is not optional.
     deps: [nats:reset]
     cmds:
-      - go test -tags=integration -count=1 ./internal/boot/...
+      # defer: runs even on failure or interrupt, which is exactly when sandbox
+      # containers and images get stranded (same reasoning as the e2e task).
+      - defer: { task: clean:docker }
+      # -p 1: these packages each stand up containers. Running them in PARALLEL
+      # exhausted a per-user kernel resource on CI and surfaced as an ENOSPC that
+      # read as a full disk (it was not — 84G free). Serialised, they are also
+      # FASTER in wall-clock than the contended parallel run was.
+      - go test -tags=integration -count=1 -p 1 ./internal/...
 
   e2e:
     desc: Mock-LLM spine journey — zero paid tokens (mock ladder must be green)
