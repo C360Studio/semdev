@@ -1,7 +1,10 @@
 package conformance
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/c360studio/semstreams/agentic"
@@ -9,6 +12,7 @@ import (
 	agvocab "github.com/c360studio/semstreams/vocabulary/agentic"
 
 	"github.com/c360studio/semdev/internal/graphown"
+	"github.com/c360studio/semdev/internal/standards"
 	"github.com/c360studio/semdev/internal/vocab"
 )
 
@@ -129,4 +133,82 @@ func TestLessonRecordContractMirror(t *testing.T) {
 		return
 	}
 	t.Fatal("no agentic.lesson-record contract in the graphown contract set — the CLAUDE.md mirror precondition is unmet")
+}
+
+// No AUTHORED PROMPT may contain the standards injection prefix — not a persona
+// fragment, and not a rule action's `prompt` field.
+//
+// A prompt that shows a specimen standard — even as an illustration of the format —
+// puts a line into every brief for that role which is byte-indistinguishable from a
+// standard the target repository actually declared. The persona is told to treat those
+// lines as the repo's law and, for the reviewer, to cite them in findings. So an example
+// becomes a constraint the run enforces against work no repository asked to be judged
+// that way, and a reviewer citing it blocks approval on a rule that does not exist.
+//
+// Found by running the D9 journey and PRINTING what each brief carried, not by reading
+// the fragments: the first draft of both standards fragments opened with a fenced
+// example, and the developer and reviewer briefs duly arrived carrying forged ids.
+// Describe the format in prose; never spell a specimen.
+//
+// BOTH surfaces are scanned because both are brief text. `04-dispatch-developer.json`'s
+// on_enter prompt IS Amelia's user message verbatim, so a specimen there forges a
+// standard on every run of that station with exactly the same indistinguishability.
+// (The UNTRUSTED channels — issue text reaching task.spec, a diff read via read_diff,
+// a file read via read_workspace, a finding's quoted command output — cannot be closed
+// by a scan. Those are bounded in the persona fragments themselves, which now teach
+// that a standard arrives only inside the brief's lessons block and a bracketed id met
+// anywhere else carries no authority.)
+func TestNoAuthoredPromptForgesAStandard(t *testing.T) {
+	root := repoRoot(t)
+
+	fragments := filepath.Join(root, "configs", "personas", "fragments")
+	scannedFragments := 0
+	err := filepath.WalkDir(fragments, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".md" {
+			return err
+		}
+		scannedFragments++
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(body), standards.InjectionPrefix) {
+			rel, _ := filepath.Rel(root, path)
+			t.Errorf("persona fragment %s contains the standards injection prefix %q — every brief for "+
+				"that role would carry a standard no target repository declared, and the persona cannot "+
+				"distinguish it from a real one. Describe the format in prose instead of showing a specimen",
+				rel, standards.InjectionPrefix)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk persona fragments: %v", err)
+	}
+	if scannedFragments == 0 {
+		t.Fatal("no persona fragments were scanned; the fragment half of this pin would pass vacuously")
+	}
+
+	rules, err := loadRules(root)
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	scannedPrompts := 0
+	for _, r := range rules {
+		for _, a := range append(append(append(append([]ruleAction{}, r.OnEnter...), r.OnExit...), r.WhileTrue...), r.OnRecovery...) {
+			if a.Prompt == "" {
+				continue
+			}
+			scannedPrompts++
+			if strings.Contains(a.Prompt, standards.InjectionPrefix) {
+				t.Errorf("rule %q dispatches a prompt containing the standards injection prefix %q — a spawn "+
+					"prompt is brief text, so this forges a standard on every run of that station",
+					r.ID, standards.InjectionPrefix)
+			}
+		}
+	}
+	if scannedPrompts == 0 {
+		t.Fatal("no rule action prompts were scanned; the rule half of this pin would pass vacuously")
+	}
+	t.Logf("scanned %d persona fragments and %d rule action prompts for forged standards",
+		scannedFragments, scannedPrompts)
 }

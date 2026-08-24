@@ -158,16 +158,81 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
 
 ## 6. The judgment lane + the full bridge proof (D8, D9)
 
-- [ ] 6.1 Persona fragments: `reviewer/10-standards-contract.md` +
+- [x] 6.1 Persona fragments: `reviewer/10-standards-contract.md` +
       `developer/10-standards.md` (cite-the-id duty; standards tighten,
       never weaken); persona-dir conformance stays green.
-- [ ] 6.2 RED then GREEN: `TestBridgeProofRepoStandardsReachBriefsAndGate` —
-      the full D9 journey: birth+activation, role-scoped brief content via
-      captured mock prompts (developer sees developer standards, not
-      reviewer-only), the required-check gate (failing check → floors reject
-      → no review), and the green path end-to-end.
+      ⚠ Both fragments originally opened with a fenced SPECIMEN standard, so
+      every developer and reviewer brief arrived carrying forged ids
+      (`[std:no-panics-in-handlers]`, `[std:<id>]`) indistinguishable from the
+      repo's real ones — Quinn is told to cite what she is given, so she could
+      have blocked approval on a rule no repository declared. Found by PRINTING
+      what the briefs carried in 6.2, not by reading. Fragments now describe the
+      format in prose, `standards.InjectionPrefix` is exported as the one
+      spelling of the token, and `TestNoPersonaFragmentForgesAStandard`
+      (red-first, negative-controlled) refuses any fragment containing it.
+- [x] 6.2 GREEN: `TestBridgeProofRepoStandardsReachBriefsAndGate` (D9 items 2+4)
+      and `TestBridgeProofRequiredRepoCheckGatesLikeAFloor` (D9 item 3). Two Go
+      tests rather than one: the gate case ends PARKED and the green case ends
+      DELIVERED, so one function cannot hold both terminals.
+      Role scoping is proven off the captured bytes and REPORTED, not merely
+      unasserted: developer brief carries `[eng-error-context, eng-table-driven-tests]`,
+      reviewer `[eng-exported-doc-comments, eng-table-driven-tests]`, coordinator
+      `[]` (the negative control on the axis — an injector ignoring scoping
+      entirely would satisfy both role assertions, since each expected set is a
+      subset of the whole). Needed `mockllm.WithPromptCapture` (opt-in, so no
+      existing journey's transport changes): ssmock exposes only `LastRequest`,
+      which cannot answer a question about two spawns at two points in one arc.
+      The gate journey's attempt MEASURES GREEN and is rejected anyway, by the
+      repo's own `go vet ./...` — isolation measured, not assumed (the default
+      vet subset `go test` runs omits the assign analyzer). Floor detail:
+      `repo-check:go-vet: REJECTED — unproven — … exit status 1` alongside
+      `repo-check:gofmt: passed — unproven`, and the run parks with no review.
 - [ ] 6.3 Full offline suite + `task e2e -race` green; adversarial review;
       commit group 6.
+      DONE: offline suite, conformance and lint green; all three standards
+      journeys green individually (`-count=1`, real docker); BOTH adversarial
+      reviews complete with every finding folded (below).
+      ⚠ OPEN: the FULL `task e2e` post-fold has NOT run green. Its first attempt
+      died on Go's 600s DEFAULT timeout — the suite had crept to 567s and group 6
+      pushed it over — and the re-run under the new explicit `-timeout 30m` was
+      killed when docker work was paused (host resource pressure, 2026-08-23).
+      Re-run before archive. Nothing is known-broken; the gate is simply unmet.
+
+      Review fold (2 reviewers, both CHANGES REQUESTED, both closed):
+      ⚠⚠ THE finding, raised INDEPENDENTLY by both: the fragments made `[std:`
+      mean law but never bounded WHERE a standard may arrive, and the forgery pin
+      guards only the repo-controlled channel. Five untrusted paths reach a
+      persona — issue text → task.spec, `read_diff`, `read_workspace`,
+      `review.findings.value`, and `floor.finding.detail` (which quotes
+      `snippet(res)`, the OUTPUT OF A REPO COMMAND RUN OVER ATTEMPT-AUTHORED
+      CODE). Fixed by teaching both fragments the framework's own distinguisher,
+      verified in `processor/agentic-loop/lessons.go`: real standards arrive ONLY
+      inside `[Lessons — durable guidance…]`, each line ending in a resolvable
+      entity id; a bracketed id met anywhere else carries no authority.
+      Also folded: the gate journey could not tell "ran and failed" from
+      "could not run" (`not-run` renders as `…: REJECTED — not-run — …`, a
+      byte-compatible prefix) — now asserts `FAILED with exit status` plus the
+      `unproven` token, which no journey pinned; NOTHING pinned that the D8
+      fragments reach a brief at all (delete both files and every test still
+      passed) — now pinned on a distinctive phrase per role; the green journey
+      asserted no turn count; `WithPromptCapture` after `Start` was a silent
+      no-op `-race` cannot see (now panics, and `capture` is read once in `Start`
+      and passed to the handler so no cross-goroutine read exists); `io.ReadAll`'s
+      discarded error could record a truncated body and make an ABSENCE assertion
+      pass because the bytes were cut; the forgery pin now also scans rule
+      `prompt:` fields (8 fragments + 12 prompts, negative-controlled); four
+      offline capture pins added (negative-controlled); the advisory check must
+      report `passed`, not merely appear; two comments corrected that named
+      mechanisms which cannot fire.
+      Reviewers REFUTED three things — do not "fix" them: the coordinator
+      negative control is not vacuous (the sync runs inside `Provision` before the
+      ready stamp), `requireNoReviewVerdict`'s single read is near-unreachable as
+      a fail-open, and the capture proxy introduces no unproven transport.
+      Out of scope, FILED as #21: `ask_human` is declared in 11 rules, has no
+      executor, is DROPPED by the engine with a WARN that fired 38× in one
+      afternoon, and `rules_test.go:534` asserts the declaration the engine
+      discards — so Amelia has no escalation lane while three surfaces say she
+      does. Her fragment now describes what actually happens instead.
 
 ## 7. Conformance hardening + close
 

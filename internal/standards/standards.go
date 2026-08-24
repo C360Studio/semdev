@@ -340,11 +340,19 @@ func rejectNullEntries(data []byte) error {
 	return nil
 }
 
+// InjectionPrefix opens every standard's brief line. It is EXPORTED because it is
+// a token with two independent readers: the reviewer persona is told to cite it, and
+// the conformance suite refuses to let a persona fragment contain one (a fragment
+// carrying this prefix forges a standard the target repository never declared, and
+// the persona cannot tell the forgery from the real thing). Both must move with the
+// renderer, so neither may spell it out for itself.
+const InjectionPrefix = "[std:"
+
 // InjectionForm renders a standard's brief line — `[std:<id>] MUST <text>` —
 // the exact string injected into agent briefs. It errors (naming the id, never
 // truncating) when the rendered form exceeds the substrate bound.
 func InjectionForm(s Standard) (string, error) {
-	form := fmt.Sprintf("[std:%s] %s %s", s.ID, strings.ToUpper(string(s.Severity)), s.Text)
+	form := fmt.Sprintf("%s%s] %s %s", InjectionPrefix, s.ID, strings.ToUpper(string(s.Severity)), s.Text)
 	if n := len(form); n > maxInjectionFormBytes {
 		return "", fmt.Errorf(
 			"standards: standard %q renders to %d bytes, over the %d-byte injection bound — shorten the text (it is never truncated)",
