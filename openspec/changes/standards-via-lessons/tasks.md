@@ -365,5 +365,26 @@ If the beta.161 bump lands mid-change, re-verify the four upstream anchors
         `go-health-class/.semdev/standards.yaml` and asserts it is flagged, and
         the failure message names both the file and the terms.
       No evidence-ledger entry: this change makes no run-level claim.
-- [ ] 7.3 Sync deltas + archive (expect the dev-from-task floors-requirement
+- [x] 7.3 Sync deltas + archive (expect the dev-from-task floors-requirement
       re-merge if PR #7 archived first — reconcile the merged text).
+      DONE. PR #7 WAS merged first (`559cd57`, operator decision), so the
+      anticipated re-merge came due and was reconciled deliberately in the delta
+      (`99946e6`) rather than left to a git merge. The conflict was sharper than
+      "same file": both changes extend the SAME requirement — "Deterministic
+      floors gate the loop and cannot be skipped" — from the SAME anchor
+      sentence. ⚠ The dangerous half was invisible to git: this delta is a
+      complete requirement body that REPLACES the canonical one, so nothing
+      would have conflicted and #7's `Prior-attempt residue cannot launder into
+      a later commit` scenario would have been silently DELETED from the
+      capability on sync. The merged requirement keeps #7's cleanliness
+      fail-closed sentence with the built-in floors it describes, opens the
+      repo-declared checks lane as its own paragraph, and restores that scenario
+      in its canonical position — 11 scenarios, 4 canonical + 7 new.
+      Gates re-run on the MERGED tree, since this branch now carries #7's
+      runspace/openpr/cleanroom changes which had never executed against the
+      standards work: `task check` exit 0, and
+      `go test -race -tags=e2e -count=1 -timeout 30m ./test/e2e/...` →
+      `ok ... 506.583s`, zero failures, both paid/external env gates verified
+      unset, no leftover sandbox containers.
+      Archiving adds `repo-standards` as a NEW capability: 12 canonical caps
+      become 13.
