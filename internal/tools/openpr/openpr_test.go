@@ -324,14 +324,17 @@ func TestDeliverFailedPushStopsDelivery(t *testing.T) {
 
 // TestPushURLInjectsTokenForHTTPSOnly — the x-access-token form for https,
 // pass-through for file:// (the journey's bare-repo remote).
-func TestPushURLInjectsTokenForHTTPSOnly(t *testing.T) {
+func TestPushURLNamesTokenUserWithoutSecret(t *testing.T) {
 	d := &Delivery{Token: "tok", Forge: ForgeConfig{RemoteURL: "https://github.com/acme/repo.git"}}
 	u, err := d.pushURL()
 	if err != nil {
 		t.Fatalf("pushURL: %v", err)
 	}
-	if !strings.Contains(u, "x-access-token:tok@github.com") {
-		t.Errorf("https push URL = %q, want the x-access-token credential form", u)
+	if !strings.Contains(u, "x-access-token@github.com") {
+		t.Errorf("https push URL = %q, want the non-secret x-access-token username form", u)
+	}
+	if strings.Contains(u, "tok:") || strings.Contains(u, ":tok") {
+		t.Errorf("https push URL %q carries the token — it must ride GIT_ASKPASS env only (design D3)", u)
 	}
 	d.Forge.RemoteURL = "file:///tmp/bare.git"
 	if u, _ = d.pushURL(); u != "file:///tmp/bare.git" {

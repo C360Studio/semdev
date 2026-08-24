@@ -4,6 +4,15 @@
 // the openspec-io seam — create_change stamps the facts, render_openspec renders
 // them to a document, write_change writes them to the workspace filesystem.
 //
+// ⚠ FOLLOW-UP (security-forge-containment, semstreams-review): "so the change can
+// be committed" predates commit containment — apply_patch now commits ONLY its
+// enumerated diff targets and RESETS the tree (removing untracked files) before
+// each apply, so files this tool writes into the checkout are never committed and
+// are deleted by the next apply. Prospective, not live: boot wires a nil resolver
+// that fails loudly and the M0 rail delivers the fix-alone diff. When the
+// production resolver lands, route the written change through the delivery
+// surface (or an authorized-targets lane), never via working-tree residue.
+//
 // It is graph-READ-only: it hydrates the Change from the run's openspec.change.*
 // facts (changefacts.Hydrate) and writes it with the format engine's WriteChange.
 // It stamps NO graph facts (it produces files, not triples), so it has no G5 vocab

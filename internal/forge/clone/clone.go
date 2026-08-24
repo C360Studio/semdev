@@ -31,11 +31,6 @@ import (
 // issue-ref-rule, forge-io). The clone source READS it; it never writes it (G5).
 const issueRefPredicate = "run.issue.ref"
 
-// tokenEnvName is the fixed subprocess env var the GIT_ASKPASS helper reads the token from —
-// an INTERNAL name, independent of the operator's chosen TokenEnv, so the child env is
-// deterministic. The operator's token value is copied into it for the clone subprocess only.
-const tokenEnvName = "SEMDEV_FORGE_TOKEN"
-
 // Config is the forge-target source mode's config (the boot `source` block).
 type Config struct {
 	// BaseURL is the git host base the target lives under: "https://github.com" live, or
@@ -191,18 +186,13 @@ func (s *Source) cloneURL(owner, repo string) (string, error) {
 // so raw git stderr (internal hostnames, private-repo existence) must never ride it (M4).
 func (s *Source) clone(ctx context.Context, cloneURL, dest string) error {
 	args := []string{"clone", "-q", cloneURL, dest}
-	env := []string{"GIT_TERMINAL_PROMPT=0"}
-	if s.token != "" {
-		askpass, cleanup, err := writeAskpass()
-		if err != nil {
-			return err
-		}
-		defer cleanup()
-		env = append(env, "GIT_ASKPASS="+askpass, tokenEnvName+"="+s.token)
+	env, cleanup, err := cliexec.GitCredEnv(s.token)
+	if err != nil {
+		return err
 	}
+	defer cleanup()
 
 	var res cliexec.Result
-	var err error
 	if er, ok := s.runner.(cliexec.EnvRunner); ok {
 		res, err = er.RunWithEnv(ctx, "", env, "git", args...)
 	} else if s.token != "" {
@@ -222,31 +212,4 @@ func (s *Source) clone(ctx context.Context, cloneURL, dest string) error {
 		return fmt.Errorf("git clone failed (exit %d) — verify the repository exists and the token has access", res.ExitCode)
 	}
 	return nil
-}
-
-// writeAskpass writes a throwaway GIT_ASKPASS helper that echoes the token from the subprocess
-// env — never a file containing the token, never argv. Returns its path and a cleanup func.
-func writeAskpass() (path string, cleanup func(), err error) {
-	f, err := os.CreateTemp("", "semdev-askpass-*.sh")
-	if err != nil {
-		return "", func() {}, fmt.Errorf("clone: create askpass helper: %w", err)
-	}
-	name := f.Name()
-	remove := func() { _ = os.Remove(name) }
-	// Echo the token ENV VAR (not the value) — git calls this for the x-access-token user's
-	// password prompt. The token is never written into this script.
-	if _, err := f.WriteString("#!/bin/sh\nprintf '%s' \"$" + tokenEnvName + "\"\n"); err != nil {
-		_ = f.Close()
-		remove()
-		return "", func() {}, fmt.Errorf("clone: write askpass helper: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		remove()
-		return "", func() {}, err
-	}
-	if err := os.Chmod(name, 0o700); err != nil {
-		remove()
-		return "", func() {}, err
-	}
-	return name, remove, nil
 }
