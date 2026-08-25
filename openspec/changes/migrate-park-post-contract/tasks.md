@@ -32,6 +32,17 @@
 
 ## 4. Lockstep adoption and closeout
 
+> **HELD (measured 2026-08-25).** 4.1's stated precondition is *met*: the tag
+> carrying the `user.response.>` reservation (gh#952 / ADR-093,
+> `33e02fe8 feat(agentic)!: reserve typed user response subjects`) is
+> **v1.0.0-beta.161**, and SemDev pins beta.160. The hold is now a *different*
+> gate — the operator decision of 2026-08-23 to bump only on a settled tag,
+> because upstream `main` is +113 commits past beta.161 mid a repo-wide
+> context-ownership refactor that is the real migration cost. Bumping to
+> beta.161 today buys the ADR-093 lockstep and pays the context-ownership
+> migration twice. Re-measure `git tag --list 'v1.0.0*'` in the semstreams
+> checkout before treating this group as blocked.
+
 - [ ] 4.1 After the breaking SemStreams tag containing ADR-093 exists, update
       `go.mod`/`go.sum` once (never before) and run the full clean-room gates
 - [ ] 4.2 Adversarial review the complete SemDev diff and fold all findings
