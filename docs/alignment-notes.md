@@ -467,8 +467,15 @@ Template:
   baseline and the final `verify_artifact` route through `verify.Decide`, so a
   fabrication reads identically in both. `internal/harness` is the reshaped RUN
   contract (the declared image + resolve/build/test commands + tier split + secret
-  refs — no toolchain modeling; the dropped source-substitution/native-asset fields
-  were semspec's harness-injected-resolution grave, now structurally inexpressible).
+  refs + the cache-home env names — no toolchain modeling; the dropped
+  source-substitution/native-asset fields were semspec's harness-injected-resolution
+  grave, now structurally inexpressible). Every one of those RUN fields is
+  operator-declarable in `customizations.semdev`, so a profile shipping no built-in
+  convention is still fully declarable; the IMAGE is not among them — it is located
+  from a committed Dockerfile/devcontainer, never declared in that block (SB2). A
+  manifest naming no cache home fails closed AT resolution, and a malformed cache-home
+  name is rejected there too (G4: a proof with nothing to freshen cannot be cold, and
+  one freshening a variable the ecosystem does not use is cold in name only).
 - **Secrets (SB2c/G7):** `internal/secrets` is the governed named-creds-ref store
   (git-ignored `.env` at M0), the leak-guard Scrubber (a secret VALUE is redacted
   from every surfaced detail — no value in a log, tool result, or fact), and the

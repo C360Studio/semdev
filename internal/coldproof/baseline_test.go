@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
@@ -176,5 +177,164 @@ func writeFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// semdev #28: the incompleteness error must name WHICH fields are missing. The old message
+// restated all three every time, so an operator missing one field was handed a list that
+// included two they had already declared — and, before the declaration surface existed,
+// one they could not declare at all. Offline-provable.
+func TestColdProofNamesTheMissingRunFields(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mut        func(*harness.Manifest)
+		want       string
+		wantAbsent []string
+		prove      func(harness.Manifest) error
+	}{
+		{
+			name:       "baseline-missing-cache-home",
+			mut:        func(m *harness.Manifest) { m.CacheHomeEnvs = nil },
+			want:       "cacheHomeEnvs",
+			wantAbsent: []string{"resolveCommand", "buildCommand"},
+			prove: func(m harness.Manifest) error {
+				_, err := ProveBaseline(context.Background(), "docker", "/repo", m, nil)
+				return err
+			},
+		},
+		{
+			name:       "baseline-missing-resolve",
+			mut:        func(m *harness.Manifest) { m.ResolveCmd = nil },
+			want:       "resolveCommand",
+			wantAbsent: []string{"cacheHomeEnvs", "buildCommand"},
+			prove: func(m harness.Manifest) error {
+				_, err := ProveBaseline(context.Background(), "docker", "/repo", m, nil)
+				return err
+			},
+		},
+		{
+			// Two missing fields at once — the only case that exercises the join, so a
+			// regression to "report the first one" or a bad separator cannot stay green.
+			name:       "baseline-missing-several",
+			mut:        func(m *harness.Manifest) { m.ResolveCmd, m.BuildCmd = nil, nil },
+			want:       "resolveCommand, buildCommand",
+			wantAbsent: []string{"cacheHomeEnvs"},
+			prove: func(m harness.Manifest) error {
+				_, err := ProveBaseline(context.Background(), "docker", "/repo", m, nil)
+				return err
+			},
+		},
+		{
+			// The verify path's own cache-home defense in depth; the baseline's is pinned
+			// by TestProveBaselineIncompleteManifestFailsClosed.
+			name:       "verify-missing-cache-home",
+			mut:        func(m *harness.Manifest) { m.CacheHomeEnvs = nil },
+			want:       "cacheHomeEnvs",
+			wantAbsent: []string{"resolveCommand", "testCommand"},
+			prove: func(m harness.Manifest) error {
+				_, err := ProveArtifact(context.Background(), "docker", "/repo", m, nil)
+				return err
+			},
+		},
+		{
+			name:       "verify-missing-test",
+			mut:        func(m *harness.Manifest) { m.TestCmd = nil },
+			want:       "testCommand",
+			wantAbsent: []string{"cacheHomeEnvs", "resolveCommand"},
+			prove: func(m harness.Manifest) error {
+				_, err := ProveArtifact(context.Background(), "docker", "/repo", m, nil)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := harness.GoProfile()
+			m.Image = harness.ImageDecl{Dockerfile: "Dockerfile"}
+			tc.mut(&m)
+			err := tc.prove(m)
+			if err == nil {
+				t.Fatal("expected an error for an incomplete manifest")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name the missing %s", err, tc.want)
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(err.Error(), absent) {
+					t.Errorf("error = %q, names %s which the manifest DOES declare", err, absent)
+				}
+			}
+		})
+	}
+}
+
+// A fully declared non-Go manifest must get PAST the declaration gate. It then fails on
+// the absent docker BINARY — an infra fault, which is the correct next failure and proves
+// the operator's declaration was accepted. The repo root is a real temp dir carrying a real
+// Dockerfile so the run reaches the docker invocation itself: pointing at a nonexistent
+// root would fail earlier, at image-path resolution, and the test would claim a docker
+// fault it never provoked. Hermetic — no docker process is ever spawned.
+func TestColdProofAcceptsFullyDeclaredNonGoManifest(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM scratch\n")
+	devcontainer := []byte(`{
+	  "customizations": {"semdev": {
+	    "resolveCommand": ["./gradlew","--no-daemon","dependencies"],
+	    "buildCommand": ["./gradlew","--no-daemon","assemble"],
+	    "testCommand": ["./gradlew","--no-daemon","test"],
+	    "cacheHomeEnvs": ["GRADLE_USER_HOME"]
+	  }}
+	}`)
+	m, err := harness.ResolveManifest(harness.ProfileJVM, harness.ImageDecl{Dockerfile: "Dockerfile"}, devcontainer)
+	if err != nil {
+		t.Fatalf("ResolveManifest: %v", err)
+	}
+	_, err = ProveBaseline(context.Background(), "docker-not-installed-"+t.Name(), root, m, nil)
+	if err == nil {
+		t.Fatal("expected an infra error from the absent docker binary")
+	}
+	// Assert the error is the INFRA one from the next stage, not a declaration fault.
+	// Asserting merely that some message is absent would pass vacuously against any
+	// wording — the proof of progress is that the run reached the docker invocation.
+	if !strings.Contains(err.Error(), "docker unavailable") {
+		t.Errorf("error = %q — a fully declared manifest must pass the declaration gate and fail on infra", err)
+	}
+}
+
+// The G4 control is only a control if what it names is real. A blank or whitespace entry
+// has length, so it clears every `len(...) == 0` guard, and docker accepts a mount at
+// `/caches/  ` with an env var literally named "  " — the run then reports a PASSING
+// isolation check while the REAL cache home (GOMODCACHE, GRADLE_USER_HOME) stays warm for
+// both proofs. That is a false green on the one thing that makes a cold proof mean
+// anything, so a malformed name must never reach the Runner.
+func TestResolveManifestRejectsMalformedCacheHomeNames(t *testing.T) {
+	for _, tc := range []struct{ name, decl string }{
+		{"whitespace", `["  "]`},
+		{"empty-string", `[""]`},
+		{"traversal", `["../../etc"]`},
+		{"assignment-typo", `["GRADLE_USER_HOME=/tmp/x"]`},
+		{"leading-digit", `["1CACHE"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dc := []byte(`{"customizations":{"semdev":{"cacheHomeEnvs":` + tc.decl + `}}}`)
+			_, err := harness.ResolveManifest(harness.ProfileGo, harness.ImageDecl{Dockerfile: "Dockerfile"}, dc)
+			if err == nil {
+				t.Fatalf("expected an error: %s is not a usable cache-home env name", tc.decl)
+			}
+		})
+	}
+}
+
+// A repeated cache-home name states one intent twice. Passed through it would ask docker
+// for two mounts at one container path, which docker REJECTS — surfacing as a transport
+// fault that is retried as infra, parking a run on a harmless typo. Collapsing preserves
+// the operator's meaning; rejecting would not.
+func TestResolveManifestCollapsesDuplicateCacheHomes(t *testing.T) {
+	dc := []byte(`{"customizations":{"semdev":{"cacheHomeEnvs":["GOMODCACHE","GOCACHE","GOMODCACHE"]}}}`)
+	m, err := harness.ResolveManifest(harness.ProfileGo, harness.ImageDecl{Dockerfile: "Dockerfile"}, dc)
+	if err != nil {
+		t.Fatalf("ResolveManifest: %v", err)
+	}
+	if got := m.CacheHomeEnvs; len(got) != 2 || got[0] != "GOMODCACHE" || got[1] != "GOCACHE" {
+		t.Errorf("CacheHomeEnvs = %v, want the duplicate collapsed in declaration order", got)
 	}
 }

@@ -10,14 +10,18 @@
 // longer carries toolchain pins, submodule SHAs, source-substitution, or native-asset
 // fields (the last two modeled semspec's fatal harness-injected resolution — banned).
 // What remains is the RUN contract: the declared image, the resolve/build/test
-// commands, the sandbox/operator-ci tier split, and the governed secret refs. Those
-// few run fields ride a convention default per profile, overlaid by a
-// customizations.semdev block (customizations.go) — never a bespoke environment DSL.
+// commands, the sandbox/operator-ci tier split, the governed secret refs, and the
+// cache-home env names. The run fields ride a convention default per profile, overlaid
+// by a customizations.semdev block (customizations.go) — never a bespoke environment
+// DSL. The image is NOT among them: it is located from a committed Dockerfile /
+// devcontainer, never declared in that block (SB2).
 //
 // The one field every profile carries and the clean-room harness acts on is
 // CacheHomeEnvs — the universal G4 control (a fresh cache home per proof, orthogonal
 // to the container choice), because every ecosystem has a package cache that can mask
-// a broken build.
+// a broken build. It rides the same convention-plus-overlay path as the rest: universal
+// does not mean built in, and a profile shipping no convention must be able to name its
+// own cache homes or it cannot be cold-proven at all (semdev #28).
 //
 // This package is pure: it declares the contract, detects the profile, and reads the
 // operator's run fields; it does not run commands or touch the filesystem. `semdev

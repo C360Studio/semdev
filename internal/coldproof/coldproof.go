@@ -84,9 +84,15 @@ func gatherRaw(ctx context.Context, runner cleanroom.Runner, root string, cacheE
 	}
 	defer func() { _ = runner.Down(ctx, sb) }()
 
+	// Name the ENV VARS that were freshened, not just the anonymous volume IDs they were
+	// bound to. The names are now operator-declared (customizations.semdev), so they are
+	// the only part of this evidence a human can check against their ecosystem — a verdict
+	// reading "1 fresh cache home(s): 3abf5b9c…" cannot tell anyone WHICH home went cold,
+	// and so cannot expose a declaration that freshened the wrong variable (G7).
 	ev := Evidence{
 		FreshCacheHomes: sb.CacheHomes,
-		CacheDetail:     fmt.Sprintf("%d fresh cache home(s): %s", len(sb.CacheHomes), strings.Join(sb.CacheHomes, ", ")),
+		CacheDetail: fmt.Sprintf("%d fresh cache home(s) for %s: %s",
+			len(sb.CacheHomes), strings.Join(cacheEnvs, ", "), strings.Join(sb.CacheHomes, ", ")),
 	}
 
 	// Resolve step. A run error is transport; a non-zero exit is classified
