@@ -2,6 +2,7 @@ package harness
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -173,5 +174,66 @@ func TestResolveManifestFailsClosedOnBlankTestCommand(t *testing.T) {
 func TestResolveManifestFailsClosedWithoutDeclaredImage(t *testing.T) {
 	if _, err := ResolveManifest(ProfileGo, ImageDecl{}, nil); err == nil {
 		t.Fatal("expected an error when no image is declared (SB2 fail-closed)")
+	}
+}
+
+// semdev #28: a profile that ships no convention must still be fully declarable. CacheHomeEnvs
+// is the G4 control — it names the homes each proof freshens so a warm cache cannot mask
+// a fabricated dependency — and before this it was the ONE proof-required field the
+// customizations block could not set. A Gradle repo could declare every command it had a
+// surface for and still be rejected downstream for a field it could not write.
+func TestResolveManifestDeclaresCacheHomesForProfileWithNoConvention(t *testing.T) {
+	devcontainer := []byte(`{
+	  "customizations": {"semdev": {
+	    "resolveCommand": ["./gradlew","--no-daemon","dependencies"],
+	    "buildCommand": ["./gradlew","--no-daemon","assemble"],
+	    "testCommand": ["./gradlew","--no-daemon","test"],
+	    "cacheHomeEnvs": ["GRADLE_USER_HOME"]
+	  }}
+	}`)
+	m, err := ResolveManifest(ProfileJVM, ImageDecl{Dockerfile: "Dockerfile"}, devcontainer)
+	if err != nil {
+		t.Fatalf("ResolveManifest: %v", err)
+	}
+	if !slices.Equal(m.CacheHomeEnvs, []string{"GRADLE_USER_HOME"}) {
+		t.Errorf("CacheHomeEnvs = %v, want the declared GRADLE_USER_HOME", m.CacheHomeEnvs)
+	}
+	// Every field a cold proof requires is now present, so the manifest is provable.
+	if len(m.ResolveCmd) == 0 || len(m.BuildCmd) == 0 || len(m.TestCmd) == 0 {
+		t.Errorf("resolved manifest is not cold-provable: %+v", m)
+	}
+}
+
+// Fail closed at the DECLARATION boundary: a manifest naming no cache home has nothing to
+// freshen, so its "cold" proof would prove nothing (G4). Erroring here — where the operator
+// can act — beats travelling to the prover and failing there.
+func TestResolveManifestFailsClosedWithNoCacheHome(t *testing.T) {
+	devcontainer := []byte(`{
+	  "customizations": {"semdev": {
+	    "resolveCommand": ["./gradlew","--no-daemon","dependencies"],
+	    "buildCommand": ["./gradlew","--no-daemon","assemble"],
+	    "testCommand": ["./gradlew","--no-daemon","test"]
+	  }}
+	}`)
+	_, err := ResolveManifest(ProfileJVM, ImageDecl{Dockerfile: "Dockerfile"}, devcontainer)
+	if err == nil {
+		t.Fatal("expected an error: a manifest with no cache home cannot be proven cold")
+	}
+	// The message must name the field the operator has to add — the whole point of #28.
+	if !strings.Contains(err.Error(), "cacheHomeEnvs") {
+		t.Errorf("error = %q, want it to name the cacheHomeEnvs field", err)
+	}
+}
+
+// A declared cacheHomeEnvs overrides the convention, symmetric with the other overlay
+// fields; an absent one keeps the convention (pinned in the Go overlay test above).
+func TestResolveManifestCacheHomeOverridesConvention(t *testing.T) {
+	devcontainer := []byte(`{"customizations":{"semdev":{"cacheHomeEnvs":["GOMODCACHE"]}}}`)
+	m, err := ResolveManifest(ProfileGo, ImageDecl{Dockerfile: "Dockerfile"}, devcontainer)
+	if err != nil {
+		t.Fatalf("ResolveManifest: %v", err)
+	}
+	if !slices.Equal(m.CacheHomeEnvs, []string{"GOMODCACHE"}) {
+		t.Errorf("CacheHomeEnvs = %v, want the declared override", m.CacheHomeEnvs)
 	}
 }

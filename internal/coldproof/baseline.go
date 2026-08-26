@@ -3,6 +3,7 @@ package coldproof
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
 	"github.com/c360studio/semdev/internal/forbidden"
@@ -57,8 +58,8 @@ func ProveBaseline(ctx context.Context, docker, repoRoot string, m harness.Manif
 	// An incomplete manifest is a DECLARATION fault (the operator's to fix), not infra —
 	// error up front so it parks toward the operator immediately, rather than degrading
 	// into an infra-class Retry inside Gather (an empty resolve/cache reads as transport).
-	if len(m.ResolveCmd) == 0 || len(m.BuildCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
-		return Baseline{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, build, and cache-home fields) — declare the run fields (SB2)", m.Profile)
+	if missing := harness.MissingRunFields(m); len(missing) > 0 {
+		return Baseline{}, fmt.Errorf("coldproof: manifest for profile %q is missing required run fields: %s — declare them in the repo's customizations.semdev block (SB2)", m.Profile, strings.Join(missing, ", "))
 	}
 	img, ev, err := proveCold(ctx, docker, repoRoot, m, store, m.BuildCmd)
 	if err != nil {
@@ -109,8 +110,8 @@ func proveCold(ctx context.Context, docker, root string, m harness.Manifest, sto
 func ProveArtifact(ctx context.Context, docker, artifactRoot string, m harness.Manifest, store secrets.Store) (verify.Verdict, error) {
 	// An incomplete manifest is a DECLARATION fault — error up front so it parks toward the
 	// operator rather than degrading into an infra-class Retry inside Gather.
-	if len(m.ResolveCmd) == 0 || len(m.TestCmd) == 0 || len(m.CacheHomeEnvs) == 0 {
-		return verify.Verdict{}, fmt.Errorf("coldproof: manifest for profile %q is incomplete (needs resolve, test, and cache-home fields) — declare the run fields (SB2)", m.Profile)
+	if missing := harness.MissingRunFields(m); len(missing) > 0 {
+		return verify.Verdict{}, fmt.Errorf("coldproof: manifest for profile %q is missing required run fields: %s — declare them in the repo's customizations.semdev block (SB2)", m.Profile, strings.Join(missing, ", "))
 	}
 	// Build-file tripwire FIRST (SB3): scan the committed build files for a hidden
 	// runtime download (a raw-URL fetch, a semdev network tool) that would dodge the

@@ -207,7 +207,10 @@ and NO webhook secret.
 clone and no issue to develop; `Materialize` fails closed with "no commits — seed
 it first" (enforced in code, `runspace` group 2). The disposable target
 (`semdev-test`) must carry: a buildable project, a declared
-`.devcontainer/Dockerfile` (per the sandbox spec), and an authored issue.
+`.devcontainer/Dockerfile` (per the sandbox spec), and an authored issue. What a
+target repo must declare — the image plus the `customizations.semdev` run fields —
+is written up in [target-repo-contract.md](target-repo-contract.md); a non-Go repo
+declares all of them, since Go is the only profile shipping a convention today.
 
 **Config — select CLONE mode.** Add a `source.forge` block to the bootstrap
 config the runtime boots (design D5; absent → the fixture default):
