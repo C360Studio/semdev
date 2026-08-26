@@ -18,6 +18,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/c360studio/semdev/internal/cleanroom"
@@ -163,22 +164,24 @@ func TestProveArtifactRealFabricationIsFail(t *testing.T) {
 // cold" guard: a hidden runtime download dodges the cold-resolution proof, and the tripwire
 // catches it statically.
 
-// TRIPWIRE (semdev, gap-open): the cold verify re-resolves its manifest from the
-// COMMITTED artifact (verifyartifact.go:137-140, deliberately — prove what was
-// committed). The model writes that artifact, and pathguard.SafeJoin constrains only
-// that a written path stays inside the checkout, not WHICH files. So the run's own
-// measurement contract is model-editable, and nothing compares the declaration the
-// baseline proved against the one the verify runs under.
+// CHARACTERIZATION of a KNOWN OPEN HOLE (semdev #38) — this test is GREEN because it
+// asserts the BROKEN behavior on purpose. Do not read it as a statement that the
+// behavior is correct: it exists to hold the hole still and to fail the moment the
+// behavior changes in either direction.
 //
-// This is the direct form: an artifact whose own tests genuinely FAIL, whose committed
-// devcontainer declares `testCommand: ["true"]`. Byte-identical source to
-// TestProveArtifactRealTestsFailIsFail, which proves Fail — the ONLY difference is the
-// committed declaration.
+// The hole: the cold verify re-resolves its manifest from the COMMITTED artifact
+// (verifyartifact.go:137-140, deliberately — prove what was committed). The model writes
+// that artifact, and pathguard.SafeJoin constrains only that a written path stays inside
+// the checkout, not WHICH files. So the run's own measurement contract is model-editable,
+// and nothing carries the declaration the baseline proved into the verify.
 //
-// If this reports PASS, the cold clean room proved an artifact that does not pass its
-// own tests, and the whole evidence chain (G3/G7) is downstream of a value the model
-// chose. Flip the assertion the day a guard lands; until then it is a gap-open pin.
-func TestTripwireCommittedDeclarationCanWeakenTheColdVerify(t *testing.T) {
+// The fixture is source byte-identical to TestProveArtifactRealTestsFailIsFail, which
+// proves `fail`. The ONLY difference is the committed declaration.
+//
+// WHEN THE FIX LANDS (pin-declaration-drift): invert this to require that no `pass`
+// verdict is rendered AND that the drift fact is stamped — asserting only the absence of
+// a pass is not enough, because absence of a pass is also what a crashed run looks like.
+func TestCharacterizeCommittedDeclarationWeakensTheColdVerify(t *testing.T) {
 	ctx := context.Background()
 	if err := cleanroom.DockerAvailable(ctx, "docker"); err != nil {
 		t.Skipf("docker unavailable: %v", err)
@@ -216,11 +219,14 @@ func TestTripwireCommittedDeclarationCanWeakenTheColdVerify(t *testing.T) {
 	}
 	cleanupImages(t, ctx, root)
 
-	t.Logf("resolved TestCmd = %v", m.TestCmd)
-	t.Logf("verify outcome   = %q", v.Outcome)
-	if v.Outcome == verify.OutcomePass {
-		t.Errorf("GAP OPEN: the cold verify PASSED an artifact whose own tests fail, "+
-			"because the committed declaration replaced the test command with %v. "+
-			"Nothing pins the declaration between the baseline proof and the verify.", m.TestCmd)
+	// The committed declaration wins over the convention — this is the mechanism.
+	if got := strings.Join(m.TestCmd, " "); got != "true" {
+		t.Fatalf("TestCmd = %q, want the committed declaration to win (the hole's mechanism changed — re-read #38)", got)
+	}
+	// And it renders a PASSING verdict for an artifact whose own tests fail.
+	if v.Outcome != verify.OutcomePass {
+		t.Fatalf("verify outcome = %q, want %q.\n\n"+
+			"THIS IS GOOD NEWS: #38 appears to be CLOSED. Invert this test into the "+
+			"regression guard described above rather than 'fixing' it.", v.Outcome, verify.OutcomePass)
 	}
 }
