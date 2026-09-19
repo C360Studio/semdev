@@ -1,0 +1,19 @@
+{
+  "name": "semdev-dogfood",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "customizations": {
+    "semdev": {
+      "resolveCommand": ["go", "mod", "download"],
+      "buildCommand": ["go", "build", "./..."],
+      "testCommand": ["go", "test", "-race", "-count=1", "./..."],
+      "cacheHomeEnvs": ["GOMODCACHE", "GOCACHE"],
+      "secretRefs": [],
+      "tiers": [
+        { "name": "unit", "scope": "sandbox", "proves": ["unit"] }
+      ]
+    }
+  }
+}

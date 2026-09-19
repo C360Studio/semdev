@@ -85,3 +85,30 @@ it is inside `customizations.semdev` and spelled as above.
 
 Related: [`openspec/specs/sandbox/spec.md`](../openspec/specs/sandbox/spec.md) is the
 authoritative capability spec; `internal/harness` is the implementation.
+
+## 4. SemDev as its own target
+
+The root [.devcontainer declaration](../.devcontainer/devcontainer.json) prepares
+semdev for Go dogfooding through this existing contract. Its [Dockerfile](../.devcontainer/Dockerfile)
+pins the inspected `golang:1.26` image by digest; that image provides Go 1.26.8,
+which satisfies [go.mod](../go.mod)'s Go 1.26.3 minimum. `GOTOOLCHAIN=local` keeps
+the declared image authoritative instead of downloading another toolchain.
+
+The declaration resolves with `go mod download`, builds with `go build ./...`,
+and runs the full untagged suite with `go test -race -count=1 ./...`. Cold proofs
+freshen both `GOMODCACHE` and `GOCACHE`. Its only sandbox claim is `unit`; it
+declares no secrets, Docker socket/client mount, or package installation.
+
+Integration and end-to-end evidence remain in the operator lane through
+`task test:integration` and `task e2e`, following the [runbook](real-llm-runbook.md).
+Inspect skipped tests as well as the command result: `TestValidateEndToEndWithRealCLI`
+skips without the OpenSpec CLI, which this minimal image does not install.
+Its real-oracle evidence belongs in operator validation. Git-backed unit checks
+also require the base image's Git executable; an unexpected skip is a coverage gap.
+
+The current self-target path clones the upstream default branch. These files
+must be committed and merged there before that path can use them; local files
+alone do not prepare the cloned target. This declaration is a reviewable
+prerequisite, not a recorded cold-build, unit-test, or dogfood success. It adds
+no mutation gate and makes no sealed-contract claim. Normal runtime change
+approval and independent final verification still apply.
